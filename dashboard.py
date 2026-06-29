@@ -20,7 +20,7 @@ os.makedirs(CHARSHEET_DIR, exist_ok=True)
 
 IMG_MODEL   = "gemini-3-pro-image"
 TEXT_MODEL  = "gemini-2.5-flash"
-AUDIO_MODEL = "gemini-2.0-flash"
+AUDIO_MODEL = "gemini-1.5-flash"
 API = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent"
 FILES_UPLOAD = "https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable"
 FILES_API    = "https://generativelanguage.googleapis.com/v1beta/{name}"
@@ -357,23 +357,25 @@ def gemini_upload_file(local_path, mime_type):
     return file_uri  # proceed anyway
 
 
-def transcribe_and_segment(file_uri, mime_type, sec_per_img):
-    """Transcribe audio and split into timed visual beats via Gemini."""
+def transcribe_and_segment(local_path, mime_type, sec_per_img):
+    """Transcribe audio inline (base64) and split into timed beats — no Files API needed."""
+    with open(local_path, "rb") as f:
+        audio_b64 = base64.b64encode(f.read()).decode()
     instr = (
-        f"This is a voice-over narration audio. Do the following:\n"
-        f"1. Transcribe verbatim.\n"
-        f"2. Segment into visual beats — each beat should cover roughly {sec_per_img:.0f} seconds of audio. "
-        f"Group words that belong together visually (same topic / same scene). "
-        f"Beats can be slightly shorter or longer if needed for semantic coherence.\n"
-        f"3. Return a JSON array where each item has:\n"
-        f"   - start: start time in seconds (float, from actual audio timing)\n"
-        f"   - text: the exact spoken words of that beat\n"
+        f"This is a voice-over narration audio file. Do the following:\n"
+        f"1. Transcribe the spoken content verbatim.\n"
+        f"2. Segment the transcription into visual beats where each beat covers roughly "
+        f"{sec_per_img:.0f} seconds of audio. Group words that belong together visually "
+        f"(same topic / same scene). Beats may be slightly shorter or longer for semantic coherence.\n"
+        f"3. For each beat provide:\n"
+        f"   - start: start time in seconds (float, based on actual audio timing)\n"
+        f"   - text: exact spoken words of that beat\n"
     )
     body = {
         "contents": [{
             "parts": [
                 {"text": instr},
-                {"fileData": {"mimeType": mime_type, "fileUri": file_uri}}
+                {"inlineData": {"mimeType": mime_type, "data": audio_b64}}
             ]
         }],
         "generationConfig": {
@@ -511,10 +513,9 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 return self._send(400, {"error": "Keine Audio-Datei hochgeladen."})
             try:
-                print("  [Audio] Upload zu Gemini Files API …", flush=True)
-                file_uri = gemini_upload_file(meta["path"], meta["mime"])
-                print(f"  [Audio] URI: {file_uri} — transkribiere …", flush=True)
-                beats = transcribe_and_segment(file_uri, meta["mime"], sec)
+                mb = os.path.getsize(meta["path"]) / 1024 / 1024
+                print(f"  [Audio] Transkribiere inline ({mb:.1f} MB) …", flush=True)
+                beats = transcribe_and_segment(meta["path"], meta["mime"], sec)
                 print(f"  [Audio] {len(beats)} Beats erkannt.", flush=True)
             except Exception as e:
                 import traceback; traceback.print_exc()
