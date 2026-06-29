@@ -1,20 +1,46 @@
-STYLE: ASDF Movie-style animation frame. Every frame looks drawn by the same hand with the same tools — medium-weight black marker on flat white paper. Clean, minimal, instantly readable.
+VISUAL IDENTITY — STICK FIGURE VIDEO (apply to every frame without exception)
 
-FIGURES: Pure stick figures. Head = simple circle. Body = one vertical line. Arms = two angled lines from shoulder. Legs = two lines from hip with small oval feet. Eyes = two dots. Mouth = curve up (happy), curve down (sad), circle (shocked), flat line (neutral). Stick figures are ALWAYS filled white inside — their interior is never colored. Black outline only, white fill.
+FIGURE CONSTRUCTION:
+Head: perfect circle, white fill, diameter ≈ 25% of total figure height. Slightly top-heavy look is correct.
+Neck: short single line.
+Torso: one vertical line, ≈ 30% of height.
+Arms: two lines meeting at one shoulder point on the torso. Arm length ≈ torso length.
+Legs: two lines from hip, ≈ 40% of height. Small flat oval feet.
+Line weight: medium-bold throughout — Sharpie marker feel, not ballpoint, not crayon. Same weight on every line of every figure.
+White fill: every enclosed shape on a figure (head, any clothing outline) is filled flat white. Never colored.
 
-CHARACTER CONSISTENCY: If a character reference sheet is provided, match that design EXACTLY in every frame — same proportions, same identifying features, same line weight. Identical across all appearances.
+FACE & EXPRESSION:
+Eyes: two small solid dots, upper half of head, horizontally centered.
+Mouth: arc up = happy · arc down = sad · small circle = shocked or speaking · flat line = neutral.
+Exaggerate body language — it carries the emotion: arms flung wide = shock, arms raised = joy, shoulders drooping = sadness, leaning forward = anger or focus.
+For KO or death: X eyes. For embarrassment: small squiggly lines near head.
 
-BACKGROUND: Always solid flat white (#FFFFFF). The background area is never colored, never filled. No textures, no paper grain, no gradients, no atmospheric effects.
+CHARACTER CONSISTENCY:
+If a character reference is provided, match its design exactly — proportions, line weight, identifying features — in every frame that character appears. Never improvise a different look.
 
-COLOR — USE FREELY BUT WITH DISCIPLINE:
-Colors appear on objects, props, and environment elements only — not on backgrounds, not inside stick figures.
-Examples: grass patch = flat green, a car = flat red, a house = flat yellow walls + blue roof, fire = orange, sky element = light blue shape, money = flat green, a phone screen = any color.
-Pick colors that feel semantically right for the object. Use a consistent palette across the whole video — if a car is red in frame 3, it is red in frame 10. Introduce a color only when there is a clear visual reason. Maximum 3–4 flat colors per frame besides black and white. No gradients, no shading, no blending, no transparency effects.
+BACKGROUND:
+Always solid flat white (#FFFFFF). No fill, no tint, no color wash. White space is intentional. Never render sky, floor, walls, or atmosphere as filled areas.
 
-COMPOSITION: Wide 16:9. Subject centered. Generous empty white space around it. One clear action or emotion per frame. Characters interacting: face each other with space between.
+ENVIRONMENT PROPS (use only what the scene needs, 1–3 max):
+Suggest location with outline-only geometric shapes: horizontal line = floor/ground, rectangle = door/wall/screen, triangle = roof/mountain, two parallel lines = road. Props can have a flat color fill if they are a specific colored object (red car = flat red; green tree = flat green circle on a stick). Minimize detail — readable silhouette only.
 
-PROPS / ENVIRONMENT: Suggested with 1–3 minimal geometric shapes. A floor = horizontal line. A building = rectangle with a few lines. A tree = circle on a stick. A road = two parallel lines. When a scene continues in the same location, reuse the exact same props and their colors.
+COLOR SYSTEM (flat fills only — no gradients, no shadows, no shading, ever):
+Apply color to objects, props, and clothing only — never to backgrounds, never inside stick figure bodies.
+Choose colors semantically: grass = green, fire = orange-red, water = blue, danger/blood = red, money = green, night sky element = dark blue shape, etc.
+Keep the same color for the same object across all frames of the video.
+Maximum 3–4 flat colors per frame besides black and white.
+Introduce a color only when it serves the story — do not decorate.
 
-SPEECH / TEXT: Only when the scene description specifically calls for it. Short, hand-lettered style, inside a simple oval speech bubble.
+COMPOSITION (16:9 wide frame):
+One subject, one action or emotion per frame — readable in under one second.
+Subject(s) centered with ≥15% white margin on all sides. Nothing important near the edges.
+Two figures interacting: face each other, placed center-left and center-right with space between.
+Full figures visible — never crop a character. Exception: deliberate close-up face reaction shot.
+Everything on one visual plane. No perspective, no depth, no 3D.
 
-DO NOT: No realistic anatomy, no gradients, no shadows, no 3D, no photorealism, no anime/manga, no complex backgrounds, no watermarks, no extra limbs, no broken anatomy, no colored stick figure interiors, no colored backgrounds.
+SPEECH BUBBLES & TEXT:
+Use only when the scene description specifically calls for spoken words.
+Simple oval bubble, short hand-lettered text inside, tail pointing to the speaker.
+
+WHAT NEVER APPEARS:
+Colored backgrounds · colored stick figure interiors · gradients · shadows · shading · 3D rendering · photorealism · anime or manga style · Disney style · complex rendered environments · thick uniform outlines · detailed realistic faces · extra limbs · broken anatomy · watermarks · signatures.
