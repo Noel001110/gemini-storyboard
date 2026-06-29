@@ -1,0 +1,26 @@
+# Generated images — never commit large binaries
+generated/
+higgsfield_v1/
+flash_v1/
+anchor.png
+*.png
+*.jpg
+*.jpeg
+
+# Old per-session JSON files
+/*.json
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+
+# API keys (stored in ~/.gemini_key, never here)
+.gemini_key
+*_key.txt

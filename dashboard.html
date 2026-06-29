@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Storyboard Generator</title>
+<style>
+  :root{--bg:#0f1115;--panel:#181b22;--panel2:#1f232c;--line:#2c313c;--txt:#e7ebf0;--mut:#8b93a1;--acc:#e4322b;--ok:#37b24d;--warn:#f08c00;}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif}
+  header{padding:16px 24px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px}
+  header h1{font-size:16px;margin:0;font-weight:600}
+  header .dot{width:9px;height:9px;border-radius:50%;background:var(--ok)}
+  .wrap{max-width:1100px;margin:0 auto;padding:20px 24px 80px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:18px}
+  .card h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:0 0 10px}
+  textarea{width:100%;background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:10px;font:13px/1.5 ui-monospace,Menlo,monospace;resize:vertical}
+  .row{display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end}
+  .row label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--mut)}
+  input[type=number],select,input[type=text]{background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:13px;min-width:90px}
+  button{background:var(--acc);color:#fff;border:0;border-radius:8px;padding:10px 16px;font-size:13px;font-weight:600;cursor:pointer}
+  button.ghost{background:transparent;border:1px solid var(--line);color:var(--txt)}
+  button.sm{padding:6px 10px;font-size:12px}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .hint{color:var(--mut);font-size:12px}
+  .est{font-size:13px;color:var(--txt);margin-left:auto}
+  .est b{color:var(--acc)}
+  .bar{height:6px;background:var(--panel2);border-radius:4px;overflow:hidden;margin-top:10px}
+  .bar>div{height:100%;background:var(--ok);width:0;transition:width .3s}
+  .scene{display:grid;grid-template-columns:300px 1fr;gap:14px;border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px;background:var(--panel2)}
+  .thumb{aspect-ratio:16/9;background:#000;border-radius:6px;display:flex;align-items:center;justify-content:center;color:var(--mut);font-size:12px;overflow:hidden}
+  .thumb img{width:100%;height:100%;object-fit:cover}
+  .meta{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px}
+  .tag{background:#000;border:1px solid var(--line);border-radius:20px;padding:2px 9px;color:var(--mut)}
+  .st{margin-left:auto;font-weight:600}
+  .st.geplant{color:var(--mut)} .st.läuft{color:var(--warn)} .st.fertig{color:var(--ok)} .st.fehler{color:var(--acc)}
+  .scene .beat{font-size:12px;color:var(--mut);margin:0 0 6px;font-style:italic}
+  .scene textarea{min-height:70px}
+  .scene .acts{display:flex;gap:8px;margin-top:8px}
+  .toolbar{display:flex;gap:10px;align-items:center;position:sticky;top:0;background:var(--bg);padding:10px 0;z-index:5}
+  .save-note{font-size:12px;color:var(--ok);opacity:0;transition:opacity .3s}
+</style>
+</head>
+<body>
+<header><span class="dot"></span><h1>Storyboard Generator</h1><span class="hint" id="hdr">ASDF Movie Style · Gemini 3 Pro · 2K · 16:9</span></header>
+<div class="wrap">
+
+  <div class="card">
+    <h2>Master-Prompt (Stil – gilt für jedes Bild)</h2>
+    <textarea id="master" rows="7"></textarea>
+    <div class="row" style="margin-top:8px">
+      <button class="sm" onclick="saveMaster()">Stil speichern</button>
+      <span class="save-note" id="saveNote">gespeichert ✓</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Video-Skript</h2>
+    <textarea id="script" rows="8" placeholder="Skript hier einfügen (Timestamps werden automatisch ignoriert)…" oninput="estimate()"></textarea>
+    <div class="row" style="margin-top:12px">
+      <label>Wörter / Minute<input type="number" id="wpm" value="150" min="80" max="220" oninput="estimate()"></label>
+      <label>Sekunden / Bild<input type="number" id="sec" value="4" min="2" max="6" step="0.5" oninput="estimate()"></label>
+      <label>Akzentfarbe<span style="display:flex;gap:6px;align-items:center"><input type="color" id="accentPick" value="#2563EB" style="width:38px;height:36px;padding:2px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;cursor:pointer" oninput="syncAccent('pick')"><input type="text" id="accent" value="#2563EB" style="min-width:100px" oninput="syncAccent('hex')"></span></label>
+      <label>Auflösung<select id="size"><option value="2K">2K (2752px)</option><option value="1K">1K</option><option value="4K">4K (kann Grunge)</option></select></label>
+      <span class="est" id="est">—</span>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button onclick="makePlan()" id="planBtn">① Plan erstellen</button>
+      <span class="hint">zerlegt das Skript inhaltlich in Szenen und schreibt pro Szene einen Bild-Prompt</span>
+    </div>
+  </div>
+
+  <div id="planArea" style="display:none">
+    <div class="toolbar">
+      <button onclick="genAll()" id="genAllBtn">② Alle generieren</button>
+      <button class="ghost sm" onclick="location.href='/api/download'">ZIP herunterladen</button>
+      <span class="hint" id="prog">0 / 0</span>
+      <span class="est" style="margin-left:auto"><span id="folder" class="hint"></span></span>
+    </div>
+    <div class="bar"><div id="barFill"></div></div>
+    <div id="scenes" style="margin-top:14px"></div>
+  </div>
+
+</div>
+<script>
+let SCENES = [];
+const $ = id => document.getElementById(id);
+const api = (u,m,b)=>fetch(u,{method:m||'GET',headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined}).then(r=>r.json());
+
+async function loadMaster(){ const r=await api('/api/master'); $('master').value=r.master||''; }
+async function saveMaster(){ await api('/api/master','POST',{master:$('master').value}); const n=$('saveNote'); n.style.opacity=1; setTimeout(()=>n.style.opacity=0,1500); }
+
+function syncAccent(from){
+  const hex=$('accent'), pick=$('accentPick');
+  if(from==='pick'){ hex.value=pick.value; }
+  else if(/^#[0-9a-fA-F]{6}$/.test(hex.value)){ pick.value=hex.value; }
+}
+function wordCount(s){ return (s.trim().match(/\S+/g)||[]).length; }
+function estimate(){
+  const w=wordCount($('script').value), wpm=+$('wpm').value, sec=+$('sec').value;
+  if(!w){ $('est').textContent='—'; return; }
+  const mins=w/wpm, total=mins*60, imgs=Math.max(1,Math.round(total/sec));
+  $('est').innerHTML=`${w} Wörter · ~${total.toFixed(0)}s Audio · <b>${imgs} Bilder</b>`;
+}
+
+async function makePlan(){
+  const btn=$('planBtn'); btn.disabled=true; btn.textContent='Plane…';
+  const r=await api('/api/plan','POST',{script:$('script').value,wpm:+$('wpm').value,sec:+$('sec').value,accent:$('accent').value});
+  SCENES=r.scenes||[]; renderScenes(); btn.disabled=false; btn.textContent='① Plan erstellen';
+  $('planArea').style.display=SCENES.length?'block':'none';
+}
+
+function renderScenes(){
+  const c=$('scenes'); c.innerHTML='';
+  SCENES.forEach(s=>{
+    const d=document.createElement('div'); d.className='scene'; d.id='sc'+s.i;
+    d.innerHTML=`
+      <div>
+        <div class="thumb" id="th${s.i}">${s.file?`<img src="/generated/${s.file}?t=${Date.now()}">`:'kein Bild'}</div>
+        <div class="acts"><button class="sm" onclick="genOne(${s.i})">Bild generieren</button></div>
+      </div>
+      <div>
+        <div class="meta"><span class="tag">#${s.i+1}</span><span class="tag">${s.t}</span><span class="tag">~${s.dur}s</span><span class="st ${s.status}" id="st${s.i}">${s.status}</span></div>
+        <p class="beat">„${s.text}"</p>
+        <textarea id="pr${s.i}" oninput="SCENES[${s.i}].prompt=this.value">${s.prompt||''}</textarea>
+      </div>`;
+    c.appendChild(d);
+  });
+  $('prog').textContent=`0 / ${SCENES.length}`;
+  $('folder').textContent='generated/';
+}
+
+function setStatus(i,st){ const e=$('st'+i); if(e){e.textContent=st; e.className='st '+st;} }
+
+async function genOne(i){
+  setStatus(i,'läuft');
+  const r=await api('/api/generate_one','POST',{i:i,prompt:SCENES[i].prompt,size:$('size').value,accent:$('accent').value});
+  if(r.ok){ setStatus(i,'fertig'); SCENES[i].file=r.file; $('th'+i).innerHTML=`<img src="/generated/${r.file}?t=${r.ts}">`; }
+  else{ setStatus(i,'fehler'); $('th'+i).textContent=r.error||'Fehler'; }
+  return r.ok;
+}
+
+async function genAll(){
+  const btn=$('genAllBtn'); btn.disabled=true;
+  let done=0;
+  for(const s of SCENES){
+    await genOne(s.i);
+    done++; $('prog').textContent=`${done} / ${SCENES.length}`;
+    $('barFill').style.width=(done/SCENES.length*100)+'%';
+  }
+  btn.disabled=false;
+}
+
+loadMaster();
+(async()=>{ const r=await api('/api/plan'); if(r.scenes&&r.scenes.length){ SCENES=r.scenes; renderScenes(); $('planArea').style.display='block'; } })();
+</script>
+</body>
+</html>

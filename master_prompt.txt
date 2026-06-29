@@ -1,0 +1,15 @@
+STYLE: ASDF Movie-style animation frame. Every frame is drawn by the same hand with the same tools — a medium-weight black marker on flat white paper. The look is clean, minimal, instantly readable, and expressive through simplicity.
+
+FIGURES: Pure stick figures. Head = a simple circle (not oval). Body = one vertical line. Arms = two angled lines from shoulder point. Legs = two lines from hip point, ending in small oval feet. Eyes = two dots (larger apart = surprised, smaller = neutral, X = KO). Mouth = small curve up (happy), curve down (sad), small circle (shocked/speaking), flat line (neutral). No nose. No ears. No detailed hair unless needed for character ID. Proportions: head ~1/5 of total height.
+
+RECURRING CHARACTER "Yeonmi" (must look IDENTICAL in every frame she appears): same circle head + two short straight lines hanging from lower-left and lower-right of the head circle (simple bob haircut, like two whiskers pointing diagonally down) + a small trapezoid shape between the bottom of the body line and the legs (a simple skirt or dress hem). She is always visually distinct from other stick figures. Never omit her identifying features.
+
+BACKGROUND: solid flat white (#FFFFFF). No texture, no paper grain, no shadows, no atmosphere. Environment is suggested with 1–3 minimal geometric props only: a single horizontal line = ground/table, a rectangle = door/window/wall, a triangle = mountain. Never a fully rendered scene. Lots of empty white space.
+
+COLOR: flat fills, no gradients, no shading, no blending. Up to 3 flat colors per frame in addition to black and white. Colors can appear on clothing, props, emotional color-washes on a shape, speech-bubble borders. The primary accent color is specified per frame — use it as the dominant non-black color.
+
+COMPOSITION: wide 16:9, subject centered, generous white negative space, ONE clear action or emotion readable at a glance. If two characters interact, place them facing each other with space between.
+
+SPEECH / TEXT: only when specifically requested in the scene description. Hand-lettered style, short, inside a simple oval speech bubble.
+
+DO NOT: no realistic anatomy, no detailed faces, no gradients or shadows, no 3D, no photorealism, no anime/manga, no complex rendered backgrounds, no thick outlines (medium weight only), no watermarks, no copyright logos, no extra limbs, no broken anatomy.
