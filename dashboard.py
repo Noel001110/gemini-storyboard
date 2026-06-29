@@ -20,7 +20,7 @@ os.makedirs(CHARSHEET_DIR, exist_ok=True)
 
 IMG_MODEL   = "gemini-3-pro-image"
 TEXT_MODEL  = "gemini-2.5-flash"
-AUDIO_MODEL = "gemini-1.5-flash"
+AUDIO_MODEL = "gemini-2.5-flash"
 API = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent"
 FILES_UPLOAD = "https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable"
 FILES_API    = "https://generativelanguage.googleapis.com/v1beta/{name}"
