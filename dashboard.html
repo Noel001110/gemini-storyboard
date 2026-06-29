@@ -21,6 +21,7 @@
   button{background:var(--acc);color:#fff;border:0;border-radius:8px;padding:10px 16px;font-size:13px;font-weight:600;cursor:pointer}
   button.ghost{background:transparent;border:1px solid var(--line);color:var(--txt)}
   button.sm{padding:6px 10px;font-size:12px}
+  button.blue{background:#2563EB}
   button:disabled{opacity:.5;cursor:not-allowed}
   .hint{color:var(--mut);font-size:12px}
   .est{font-size:13px;color:var(--txt);margin-left:auto}
@@ -30,52 +31,110 @@
   .scene{display:grid;grid-template-columns:300px 1fr;gap:14px;border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px;background:var(--panel2)}
   .thumb{aspect-ratio:16/9;background:#000;border-radius:6px;display:flex;align-items:center;justify-content:center;color:var(--mut);font-size:12px;overflow:hidden}
   .thumb img{width:100%;height:100%;object-fit:cover}
-  .meta{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px}
+  .meta{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px;flex-wrap:wrap}
   .tag{background:#000;border:1px solid var(--line);border-radius:20px;padding:2px 9px;color:var(--mut)}
+  .tag.audio{border-color:#2563EB;color:#93c5fd}
   .st{margin-left:auto;font-weight:600}
   .st.geplant{color:var(--mut)} .st.läuft{color:var(--warn)} .st.fertig{color:var(--ok)} .st.fehler{color:var(--acc)}
   .scene .beat{font-size:12px;color:var(--mut);margin:0 0 6px;font-style:italic}
   .scene textarea{min-height:70px}
   .scene .acts{display:flex;gap:8px;margin-top:8px}
-  .toolbar{display:flex;gap:10px;align-items:center;position:sticky;top:0;background:var(--bg);padding:10px 0;z-index:5}
+  .toolbar{display:flex;gap:10px;align-items:center;position:sticky;top:0;background:var(--bg);padding:10px 0;z-index:5;flex-wrap:wrap}
   .save-note{font-size:12px;color:var(--ok);opacity:0;transition:opacity .3s}
+  /* Audio drop zone */
+  .dropzone{background:var(--panel2);border:1.5px dashed var(--line);border-radius:10px;padding:24px;text-align:center;cursor:pointer;transition:border-color .2s}
+  .dropzone:hover,.dropzone.drag{border-color:#2563EB}
+  .dropzone p{margin:0;color:var(--mut);font-size:13px}
+  .dropzone p.name{color:var(--txt);font-weight:600;margin-top:4px}
+  audio{width:100%;margin-top:12px;border-radius:6px}
+  .steps{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--mut)}
+  .steps span.active{color:var(--warn);font-weight:600}
+  .steps span.done{color:var(--ok)}
+  .divider{display:flex;align-items:center;gap:10px;margin:18px 0;color:var(--mut);font-size:12px}
+  .divider::before,.divider::after{content:'';flex:1;height:1px;background:var(--line)}
 </style>
 </head>
 <body>
-<header><span class="dot"></span><h1>Storyboard Generator</h1><span class="hint" id="hdr">ASDF Movie Style · Gemini 3 Pro · 2K · 16:9</span></header>
+<header><span class="dot"></span><h1>Storyboard Generator</h1><span class="hint">ASDF Movie Style · Gemini 3 Pro · 2K · 16:9</span></header>
 <div class="wrap">
 
+  <!-- Master Prompt -->
   <div class="card">
     <h2>Master-Prompt (Stil – gilt für jedes Bild)</h2>
-    <textarea id="master" rows="7"></textarea>
+    <textarea id="master" rows="6"></textarea>
     <div class="row" style="margin-top:8px">
-      <button class="sm" onclick="saveMaster()">Stil speichern</button>
+      <button class="sm ghost" onclick="saveMaster()">Stil speichern</button>
       <span class="save-note" id="saveNote">gespeichert ✓</span>
     </div>
   </div>
 
+  <!-- Settings (shared between both flows) -->
   <div class="card">
-    <h2>Video-Skript</h2>
-    <textarea id="script" rows="8" placeholder="Skript hier einfügen (Timestamps werden automatisch ignoriert)…" oninput="estimate()"></textarea>
-    <div class="row" style="margin-top:12px">
-      <label>Wörter / Minute<input type="number" id="wpm" value="150" min="80" max="220" oninput="estimate()"></label>
-      <label>Sekunden / Bild<input type="number" id="sec" value="4" min="2" max="6" step="0.5" oninput="estimate()"></label>
-      <label>Akzentfarbe<span style="display:flex;gap:6px;align-items:center"><input type="color" id="accentPick" value="#2563EB" style="width:38px;height:36px;padding:2px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;cursor:pointer" oninput="syncAccent('pick')"><input type="text" id="accent" value="#2563EB" style="min-width:100px" oninput="syncAccent('hex')"></span></label>
-      <label>Auflösung<select id="size"><option value="2K">2K (2752px)</option><option value="1K">1K</option><option value="4K">4K (kann Grunge)</option></select></label>
-      <span class="est" id="est">—</span>
-    </div>
-    <div class="row" style="margin-top:12px">
-      <button onclick="makePlan()" id="planBtn">① Plan erstellen</button>
-      <span class="hint">zerlegt das Skript inhaltlich in Szenen und schreibt pro Szene einen Bild-Prompt</span>
+    <h2>Einstellungen</h2>
+    <div class="row">
+      <label>Sekunden / Bild<input type="number" id="sec" value="4" min="2" max="10" step="0.5"></label>
+      <label>Akzentfarbe
+        <span style="display:flex;gap:6px;align-items:center">
+          <input type="color" id="accentPick" value="#2563EB" style="width:38px;height:36px;padding:2px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;cursor:pointer" oninput="syncAccent('pick')">
+          <input type="text" id="accent" value="#2563EB" style="min-width:100px" oninput="syncAccent('hex')">
+        </span>
+      </label>
+      <label>Auflösung
+        <select id="size">
+          <option value="2K">2K (2752px)</option>
+          <option value="1K">1K</option>
+          <option value="4K">4K (kann Grunge)</option>
+        </select>
+      </label>
     </div>
   </div>
 
+  <!-- ① Audio flow -->
+  <div class="card">
+    <h2>① Voice-Over hochladen (empfohlen – echte Timestamps)</h2>
+    <div class="dropzone" id="dropzone" onclick="$('audioFile').click()" ondragover="dragOver(event)" ondragleave="dragLeave()" ondrop="dropFile(event)">
+      <p>MP3, WAV, M4A, OGG hier ablegen oder klicken</p>
+      <p class="name" id="audioLabel" style="display:none"></p>
+    </div>
+    <input type="file" id="audioFile" accept="audio/*" style="display:none" onchange="audioSelected()">
+    <audio id="audioPlayer" controls style="display:none"></audio>
+
+    <div class="row" style="margin-top:12px;align-items:center">
+      <button class="blue" id="transBtn" onclick="transcribeAudio()" disabled>Transkribieren &amp; Plan erstellen</button>
+      <div class="steps" id="transSteps" style="display:none">
+        <span id="step1">① Upload</span>
+        <span style="color:var(--line)">›</span>
+        <span id="step2">② Transkription</span>
+        <span style="color:var(--line)">›</span>
+        <span id="step3">③ Prompts</span>
+      </div>
+      <span class="hint" id="transStatus">Keine Datei</span>
+    </div>
+  </div>
+
+  <div class="divider">oder Skript manuell eingeben (ohne echte Audio-Timestamps)</div>
+
+  <!-- ② Manual script flow -->
+  <div class="card">
+    <h2>② Video-Skript (manuell)</h2>
+    <textarea id="script" rows="7" placeholder="Skript hier einfügen (Timestamps werden ignoriert) …" oninput="estimate()"></textarea>
+    <div class="row" style="margin-top:10px">
+      <label>Wörter / Minute<input type="number" id="wpm" value="150" min="80" max="220" oninput="estimate()"></label>
+      <span class="est" id="est">—</span>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button onclick="makePlan()" id="planBtn">Plan aus Skript erstellen</button>
+      <span class="hint">Timing geschätzt via WPM-Formel</span>
+    </div>
+  </div>
+
+  <!-- Scene plan + generation -->
   <div id="planArea" style="display:none">
     <div class="toolbar">
-      <button onclick="genAll()" id="genAllBtn">② Alle generieren</button>
+      <button onclick="genAll()" id="genAllBtn">Alle generieren</button>
       <button class="ghost sm" onclick="location.href='/api/download'">ZIP herunterladen</button>
       <span class="hint" id="prog">0 / 0</span>
-      <span class="est" style="margin-left:auto"><span id="folder" class="hint"></span></span>
+      <span class="est" style="margin-left:auto"><span id="srcBadge" class="hint"></span></span>
     </div>
     <div class="bar"><div id="barFill"></div></div>
     <div id="scenes" style="margin-top:14px"></div>
@@ -85,16 +144,20 @@
 <script>
 let SCENES = [];
 const $ = id => document.getElementById(id);
-const api = (u,m,b)=>fetch(u,{method:m||'GET',headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined}).then(r=>r.json());
+const api = (u,m,b) => fetch(u,{method:m||'GET',headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined}).then(r=>r.json());
 
+// ---- Master ----
 async function loadMaster(){ const r=await api('/api/master'); $('master').value=r.master||''; }
 async function saveMaster(){ await api('/api/master','POST',{master:$('master').value}); const n=$('saveNote'); n.style.opacity=1; setTimeout(()=>n.style.opacity=0,1500); }
 
+// ---- Accent ----
 function syncAccent(from){
   const hex=$('accent'), pick=$('accentPick');
   if(from==='pick'){ hex.value=pick.value; }
   else if(/^#[0-9a-fA-F]{6}$/.test(hex.value)){ pick.value=hex.value; }
 }
+
+// ---- Word estimate ----
 function wordCount(s){ return (s.trim().match(/\S+/g)||[]).length; }
 function estimate(){
   const w=wordCount($('script').value), wpm=+$('wpm').value, sec=+$('sec').value;
@@ -103,38 +166,120 @@ function estimate(){
   $('est').innerHTML=`${w} Wörter · ~${total.toFixed(0)}s Audio · <b>${imgs} Bilder</b>`;
 }
 
+// ---- Manual plan ----
 async function makePlan(){
   const btn=$('planBtn'); btn.disabled=true; btn.textContent='Plane…';
   const r=await api('/api/plan','POST',{script:$('script').value,wpm:+$('wpm').value,sec:+$('sec').value,accent:$('accent').value});
-  SCENES=r.scenes||[]; renderScenes(); btn.disabled=false; btn.textContent='① Plan erstellen';
+  SCENES=r.scenes||[]; renderScenes('text'); btn.disabled=false; btn.textContent='Plan aus Skript erstellen';
   $('planArea').style.display=SCENES.length?'block':'none';
 }
 
-function renderScenes(){
+// ---- Audio upload ----
+let audioB64=null, audioMime=null, audioName=null;
+
+function audioSelected(file){
+  const f = file || $('audioFile').files[0];
+  if(!f) return;
+  audioName=f.name; audioMime=f.type||'audio/mpeg';
+  $('audioLabel').textContent = f.name+' ('+( f.size/1024/1024).toFixed(1)+' MB)';
+  $('audioLabel').style.display='block';
+  const player=$('audioPlayer');
+  player.src=URL.createObjectURL(f);
+  player.style.display='block';
+  $('transStatus').textContent='Datei wird gelesen …';
+  $('transBtn').disabled=true;
+  const reader=new FileReader();
+  reader.onload=e=>{
+    audioB64=e.target.result.split(',')[1];
+    $('transBtn').disabled=false;
+    $('transStatus').textContent='Bereit – '+f.name;
+  };
+  reader.readAsDataURL(f);
+}
+
+function dragOver(e){ e.preventDefault(); $('dropzone').classList.add('drag'); }
+function dragLeave(){ $('dropzone').classList.remove('drag'); }
+function dropFile(e){
+  e.preventDefault(); $('dropzone').classList.remove('drag');
+  const f=e.dataTransfer.files[0];
+  if(f && f.type.startsWith('audio/')){ audioSelected(f); }
+}
+
+function setStep(n){
+  ['step1','step2','step3'].forEach((id,i)=>{
+    const el=$(id);
+    el.className = i+1<n?'done': i+1===n?'active':'';
+  });
+}
+
+async function transcribeAudio(){
+  if(!audioB64) return;
+  const btn=$('transBtn');
+  btn.disabled=true;
+  $('transSteps').style.display='flex';
+
+  setStep(1); $('transStatus').textContent='Upload zur Gemini Files API …';
+  const upRes=await fetch('/api/upload_audio',{
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({data:audioB64, mime:audioMime, name:audioName})
+  }).then(r=>r.json());
+
+  if(!upRes.ok){
+    $('transStatus').textContent='Upload-Fehler: '+(upRes.error||'unbekannt');
+    btn.disabled=false; return;
+  }
+
+  setStep(2); $('transStatus').textContent='Transkribiere Audio … (30–90 s)';
+  const r=await fetch('/api/transcribe',{
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({sec:+$('sec').value, accent:$('accent').value})
+  }).then(r=>r.json());
+
+  if(r.error){
+    $('transStatus').textContent='Fehler: '+r.error;
+    btn.disabled=false; return;
+  }
+
+  setStep(3); $('transStatus').textContent='Fertig ✓';
+  SCENES=r.scenes||[];
+  renderScenes('audio');
+  $('planArea').style.display=SCENES.length?'block':'none';
+  btn.disabled=false;
+}
+
+// ---- Render scenes ----
+function renderScenes(source){
   const c=$('scenes'); c.innerHTML='';
+  const isAudio = source==='audio';
+  $('srcBadge').textContent = isAudio ? '🎙 Echte Audio-Timestamps' : '⏱ WPM-Schätzung';
   SCENES.forEach(s=>{
     const d=document.createElement('div'); d.className='scene'; d.id='sc'+s.i;
+    const tagClass = isAudio ? 'tag audio' : 'tag';
     d.innerHTML=`
       <div>
         <div class="thumb" id="th${s.i}">${s.file?`<img src="/generated/${s.file}?t=${Date.now()}">`:'kein Bild'}</div>
         <div class="acts"><button class="sm" onclick="genOne(${s.i})">Bild generieren</button></div>
       </div>
       <div>
-        <div class="meta"><span class="tag">#${s.i+1}</span><span class="tag">${s.t}</span><span class="tag">~${s.dur}s</span><span class="st ${s.status}" id="st${s.i}">${s.status}</span></div>
+        <div class="meta">
+          <span class="tag">#${s.i+1}</span>
+          <span class="${tagClass}">${s.t}</span>
+          <span class="tag">~${s.dur}s</span>
+          <span class="st ${s.status}" id="st${s.i}">${s.status}</span>
+        </div>
         <p class="beat">„${s.text}"</p>
         <textarea id="pr${s.i}" oninput="SCENES[${s.i}].prompt=this.value">${s.prompt||''}</textarea>
       </div>`;
     c.appendChild(d);
   });
   $('prog').textContent=`0 / ${SCENES.length}`;
-  $('folder').textContent='generated/';
 }
 
 function setStatus(i,st){ const e=$('st'+i); if(e){e.textContent=st; e.className='st '+st;} }
 
 async function genOne(i){
   setStatus(i,'läuft');
-  const r=await api('/api/generate_one','POST',{i:i,prompt:SCENES[i].prompt,size:$('size').value,accent:$('accent').value});
+  const r=await api('/api/generate_one','POST',{i,prompt:SCENES[i].prompt,size:$('size').value,accent:$('accent').value});
   if(r.ok){ setStatus(i,'fertig'); SCENES[i].file=r.file; $('th'+i).innerHTML=`<img src="/generated/${r.file}?t=${r.ts}">`; }
   else{ setStatus(i,'fehler'); $('th'+i).textContent=r.error||'Fehler'; }
   return r.ok;
@@ -151,8 +296,12 @@ async function genAll(){
   btn.disabled=false;
 }
 
+// ---- Init ----
 loadMaster();
-(async()=>{ const r=await api('/api/plan'); if(r.scenes&&r.scenes.length){ SCENES=r.scenes; renderScenes(); $('planArea').style.display='block'; } })();
+(async()=>{
+  const r=await api('/api/plan');
+  if(r.scenes&&r.scenes.length){ SCENES=r.scenes; renderScenes(r.source||'text'); $('planArea').style.display='block'; }
+})();
 </script>
 </body>
 </html>

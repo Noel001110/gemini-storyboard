@@ -11,11 +11,17 @@ KEYFILE = os.path.expanduser("~/.gemini_key")
 MASTER_FILE = os.path.join(HERE, "master_prompt.txt")
 OUT_DIR = os.path.join(HERE, "generated")
 PLAN_FILE = os.path.join(OUT_DIR, "plan.json")
+UPLOAD_DIR = os.path.join(HERE, "uploads")
+AUDIO_META_FILE = os.path.join(UPLOAD_DIR, "audio_meta.json")
 os.makedirs(OUT_DIR, exist_ok=True)
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-IMG_MODEL = "gemini-3-pro-image"
-TEXT_MODEL = "gemini-2.5-flash"
+IMG_MODEL   = "gemini-3-pro-image"
+TEXT_MODEL  = "gemini-2.5-flash"
+AUDIO_MODEL = "gemini-2.0-flash"
 API = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent"
+FILES_UPLOAD = "https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable"
+FILES_API    = "https://generativelanguage.googleapis.com/v1beta/{name}"
 
 def key():
     return open(KEYFILE).read().strip()
@@ -192,6 +198,91 @@ def gen_image(scene_prompt, master, out_path, size, accent="#2563EB"):
         return {"ok": False, "error": f"Kein Bild ({fr or 'leer'})"}
     return {"ok": False, "error": "Rate-Limit"}
 
+# ---------- Audio → Gemini Files API ----------
+
+def gemini_upload_file(local_path, mime_type):
+    """Upload a file to the Gemini Files API using the resumable protocol. Returns the file URI."""
+    file_size = os.path.getsize(local_path)
+    display_name = os.path.basename(local_path)
+    meta_body = json.dumps({"file": {"display_name": display_name}}).encode()
+
+    # 1. Start upload session
+    req = urllib.request.Request(FILES_UPLOAD, data=meta_body, method="POST")
+    req.add_header("x-goog-api-key", key())
+    req.add_header("X-Goog-Upload-Protocol", "resumable")
+    req.add_header("X-Goog-Upload-Command", "start")
+    req.add_header("X-Goog-Upload-Header-Content-Length", str(file_size))
+    req.add_header("X-Goog-Upload-Header-Content-Type", mime_type)
+    req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        upload_url = resp.getheader("X-Goog-Upload-URL")
+
+    # 2. Upload bytes
+    with open(local_path, "rb") as f:
+        data = f.read()
+    upload_req = urllib.request.Request(upload_url, data=data, method="POST")
+    upload_req.add_header("Content-Length", str(file_size))
+    upload_req.add_header("X-Goog-Upload-Offset", "0")
+    upload_req.add_header("X-Goog-Upload-Command", "upload, finalize")
+    with urllib.request.urlopen(upload_req, timeout=180) as resp:
+        result = json.load(resp)
+
+    file_name = result["file"]["name"]
+    file_uri  = result["file"]["uri"]
+
+    # 3. Wait for ACTIVE state
+    status_url = FILES_API.format(name=file_name)
+    for _ in range(20):
+        req2 = urllib.request.Request(status_url)
+        req2.add_header("x-goog-api-key", key())
+        with urllib.request.urlopen(req2, timeout=10) as r2:
+            info = json.load(r2)
+        if info.get("state") == "ACTIVE":
+            return file_uri
+        time.sleep(3)
+    return file_uri  # proceed anyway
+
+
+def transcribe_and_segment(file_uri, mime_type, sec_per_img):
+    """Transcribe audio and split into timed visual beats via Gemini."""
+    instr = (
+        f"This is a voice-over narration audio. Do the following:\n"
+        f"1. Transcribe verbatim.\n"
+        f"2. Segment into visual beats — each beat should cover roughly {sec_per_img:.0f} seconds of audio. "
+        f"Group words that belong together visually (same topic / same scene). "
+        f"Beats can be slightly shorter or longer if needed for semantic coherence.\n"
+        f"3. Return a JSON array where each item has:\n"
+        f"   - start: start time in seconds (float, from actual audio timing)\n"
+        f"   - text: the exact spoken words of that beat\n"
+    )
+    body = {
+        "contents": [{
+            "parts": [
+                {"text": instr},
+                {"fileData": {"mimeType": mime_type, "fileUri": file_uri}}
+            ]
+        }],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": {
+                "type": "ARRAY",
+                "items": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "start": {"type": "NUMBER"},
+                        "text": {"type": "STRING"}
+                    },
+                    "required": ["start", "text"]
+                }
+            },
+            "temperature": 0.1,
+        }
+    }
+    r = post_gemini(AUDIO_MODEL, body)
+    txt = r["candidates"][0]["content"]["parts"][0]["text"]
+    return json.loads(txt)
+
+
 # ---------- HTTP ----------
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
@@ -264,6 +355,52 @@ class H(BaseHTTPRequestHandler):
             out = {"scenes": scenes, "wpm": wpm, "sec": sec}
             json.dump(out, open(PLAN_FILE, "w"), ensure_ascii=False, indent=1)
             return self._send(200, out)
+        if p == "/api/upload_audio":
+            # {data: base64, mime: string, name: string}
+            try:
+                raw = base64.b64decode(d["data"])
+            except Exception:
+                return self._send(400, {"error": "Ungültige Base64-Daten"})
+            ext = (d.get("name", "audio.bin").rsplit(".", 1)[-1].lower()) or "bin"
+            local_path = os.path.join(UPLOAD_DIR, f"voiceover.{ext}")
+            open(local_path, "wb").write(raw)
+            json.dump({"path": local_path, "mime": d.get("mime", "audio/mpeg"), "name": d.get("name", "")},
+                      open(AUDIO_META_FILE, "w"))
+            print(f"  [Audio] Gespeichert: {os.path.basename(local_path)} ({len(raw)//1024} KB)", flush=True)
+            return self._send(200, {"ok": True, "size": len(raw), "name": d.get("name", "")})
+
+        if p == "/api/transcribe":
+            sec    = float(d.get("sec", 4))
+            accent = d.get("accent", "#2563EB")
+            try:
+                meta = json.load(open(AUDIO_META_FILE))
+            except Exception:
+                return self._send(400, {"error": "Keine Audio-Datei hochgeladen."})
+            try:
+                print("  [Audio] Upload zu Gemini Files API …", flush=True)
+                file_uri = gemini_upload_file(meta["path"], meta["mime"])
+                print(f"  [Audio] URI: {file_uri} — transkribiere …", flush=True)
+                beats = transcribe_and_segment(file_uri, meta["mime"], sec)
+                print(f"  [Audio] {len(beats)} Beats erkannt.", flush=True)
+            except Exception as e:
+                import traceback; traceback.print_exc()
+                return self._send(500, {"error": f"Transkription fehlgeschlagen: {e}"})
+            scenes = []
+            for i, b in enumerate(beats):
+                dur = (beats[i+1]["start"] - b["start"]) if i+1 < len(beats) else sec
+                scenes.append({
+                    "i": i, "start": round(float(b["start"]), 1), "dur": round(float(dur), 1),
+                    "text": b["text"], "t": fmt_t(float(b["start"])),
+                    "file": None, "status": "geplant", "prompt": ""
+                })
+            print(f"  [Audio] Generiere visuelle Prompts …", flush=True)
+            prompts = visual_prompts(scenes, read_master(), accent)
+            for s, pr in zip(scenes, prompts):
+                s["prompt"] = pr
+            out = {"scenes": scenes, "sec": sec, "source": "audio"}
+            json.dump(out, open(PLAN_FILE, "w"), ensure_ascii=False, indent=1)
+            return self._send(200, out)
+
         if p == "/api/generate_one":
             i = int(d["i"]); prompt = d.get("prompt", "")
             size = d.get("size", "2K"); accent = d.get("accent", "#2563EB")
