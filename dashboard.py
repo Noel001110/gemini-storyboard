@@ -441,11 +441,21 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 return self._send(200, {"scenes": []})
         if p == "/api/download":
+            # Build index→timestamp map from plan
+            ts_map = {}
+            try:
+                plan = json.load(open(PLAN_FILE))
+                for s in plan.get("scenes", []):
+                    t = s.get("t", "").replace(":", "-")
+                    ts_map[f"{s['i']:03d}.png"] = f"{t}.png"
+            except Exception:
+                pass
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w") as z:
                 for f in sorted(os.listdir(OUT_DIR)):
                     if f.endswith(".png"):
-                        z.write(os.path.join(OUT_DIR, f), f)
+                        arcname = ts_map.get(f, f)
+                        z.write(os.path.join(OUT_DIR, f), arcname)
             return self._send(200, buf.getvalue(), "application/zip")
         if p.startswith("/generated/"):
             fp = os.path.join(OUT_DIR, os.path.basename(p))
