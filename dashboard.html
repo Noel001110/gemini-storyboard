@@ -128,6 +128,17 @@
     </div>
   </div>
 
+  <!-- Character Reference Sheets -->
+  <div class="card" id="charCard" style="display:none">
+    <h2>Charakter-Referenzen <span class="hint" style="text-transform:none;letter-spacing:0">(werden bei jedem Bild mitgeschickt)</span></h2>
+    <div id="charList"></div>
+    <div class="row" style="margin-top:10px;align-items:flex-end;gap:10px">
+      <label style="flex:1">Name<input type="text" id="newCharName" placeholder="z.B. Max"></label>
+      <label style="flex:3">Design-Beschreibung<input type="text" id="newCharDesc" placeholder="z.B. circle head, spiky hair, striped shirt, long legs"></label>
+      <button class="sm ghost" onclick="addChar()">+ Charakter hinzufügen</button>
+    </div>
+  </div>
+
   <!-- Scene plan + generation -->
   <div id="planArea" style="display:none">
     <div class="toolbar">
@@ -172,6 +183,7 @@ async function makePlan(){
   const r=await api('/api/plan','POST',{script:$('script').value,wpm:+$('wpm').value,sec:+$('sec').value,accent:$('accent').value});
   SCENES=r.scenes||[]; renderScenes('text'); btn.disabled=false; btn.textContent='Plan aus Skript erstellen';
   $('planArea').style.display=SCENES.length?'block':'none';
+  if(r.characters) suggestCharsFromPlan(r.characters);
 }
 
 // ---- Audio upload ----
@@ -244,6 +256,7 @@ async function transcribeAudio(){
   SCENES=r.scenes||[];
   renderScenes('audio');
   $('planArea').style.display=SCENES.length?'block':'none';
+  if(r.characters) suggestCharsFromPlan(r.characters);
   btn.disabled=false;
 }
 
@@ -296,11 +309,94 @@ async function genAll(){
   btn.disabled=false;
 }
 
+// ---- Character sheets ----
+let CHARS = []; // [{name, description, safe, has_image, uri}]
+
+async function loadCharsheets(){
+  const r = await fetch('/api/charsheets').then(r=>r.json());
+  CHARS = r.sheets || [];
+  renderCharList();
+}
+
+function renderCharList(){
+  const c = $('charList'); c.innerHTML = '';
+  if(!CHARS.length){ c.innerHTML='<p class="hint" style="margin:0">Noch keine Charaktere — nach dem Planen werden erkannte Charaktere vorgeschlagen.</p>'; return; }
+  CHARS.forEach(ch=>{
+    const d = document.createElement('div');
+    d.style.cssText='display:grid;grid-template-columns:180px 1fr auto;gap:10px;align-items:start;margin-bottom:10px;padding:10px;background:var(--panel2);border:1px solid var(--line);border-radius:8px';
+    const imgTag = ch.has_image
+      ? `<img src="/charsheets/${ch.safe}.png?t=${Date.now()}" style="width:100%;border-radius:4px;aspect-ratio:16/9;object-fit:cover">`
+      : `<div style="width:100%;aspect-ratio:16/9;background:#000;border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--mut);font-size:11px">kein Bild</div>`;
+    const uriTag = ch.uri
+      ? `<span class="tag" style="color:var(--ok);border-color:var(--ok)">✓ Referenz aktiv</span>`
+      : `<span class="tag">kein Upload</span>`;
+    d.innerHTML = `
+      <div>${imgTag}</div>
+      <div>
+        <div style="font-weight:600;margin-bottom:4px">${ch.name} ${uriTag}</div>
+        <div class="hint">${ch.description||''}</div>
+      </div>
+      <div>
+        <button class="sm" onclick="genCharSheet('${ch.name}','${(ch.description||'').replace(/'/g,"\\'")}')">
+          ${ch.has_image?'Neu generieren':'Referenzbild erstellen'}
+        </button>
+      </div>`;
+    c.appendChild(d);
+  });
+}
+
+function suggestCharsFromPlan(chars){
+  // chars = [{name, description, beats}] from analyze_script
+  if(!chars||!chars.length) return;
+  chars.forEach(ch=>{
+    if(!CHARS.find(c=>c.name.toLowerCase()===ch.name.toLowerCase())){
+      CHARS.push({name: ch.name, description: ch.description||'', safe: ch.name.toLowerCase().replace(/[^\w-]/g,'_'), has_image:false, uri:null});
+    }
+  });
+  $('charCard').style.display='block';
+  renderCharList();
+}
+
+function addChar(){
+  const name=$('newCharName').value.trim(), desc=$('newCharDesc').value.trim();
+  if(!name) return;
+  if(!CHARS.find(c=>c.name.toLowerCase()===name.toLowerCase())){
+    CHARS.push({name, description:desc, safe:name.toLowerCase().replace(/[^\w-]/g,'_'), has_image:false, uri:null});
+  }
+  $('newCharName').value=''; $('newCharDesc').value='';
+  $('charCard').style.display='block';
+  renderCharList();
+}
+
+async function genCharSheet(name, desc){
+  const btn = [...document.querySelectorAll('button')].find(b=>b.textContent.includes('Referenzbild') && b.onclick?.toString().includes(name));
+  if(btn){ btn.disabled=true; btn.textContent='Generiere…'; }
+  const r = await fetch('/api/gen_charsheet',{
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({name, description: desc})
+  }).then(r=>r.json());
+  if(r.ok){
+    const ch = CHARS.find(c=>c.name===name);
+    if(ch){ ch.has_image=true; ch.uri=r.uri; }
+    renderCharList();
+  } else {
+    alert('Fehler: '+(r.error||'unbekannt'));
+    if(btn){ btn.disabled=false; btn.textContent='Referenzbild erstellen'; }
+  }
+}
+
 // ---- Init ----
 loadMaster();
+loadCharsheets();
 (async()=>{
   const r=await api('/api/plan');
-  if(r.scenes&&r.scenes.length){ SCENES=r.scenes; renderScenes(r.source||'text'); $('planArea').style.display='block'; }
+  if(r.scenes&&r.scenes.length){
+    SCENES=r.scenes;
+    renderScenes(r.source||'text');
+    $('planArea').style.display='block';
+    if(r.characters) suggestCharsFromPlan(r.characters);
+    if(CHARS.length) $('charCard').style.display='block';
+  }
 })();
 </script>
 </body>

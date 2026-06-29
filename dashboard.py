@@ -11,10 +11,12 @@ KEYFILE = os.path.expanduser("~/.gemini_key")
 MASTER_FILE = os.path.join(HERE, "master_prompt.txt")
 OUT_DIR = os.path.join(HERE, "generated")
 PLAN_FILE = os.path.join(OUT_DIR, "plan.json")
-UPLOAD_DIR = os.path.join(HERE, "uploads")
+UPLOAD_DIR    = os.path.join(HERE, "uploads")
 AUDIO_META_FILE = os.path.join(UPLOAD_DIR, "audio_meta.json")
+CHARSHEET_DIR = os.path.join(HERE, "charsheets")
 os.makedirs(OUT_DIR, exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(CHARSHEET_DIR, exist_ok=True)
 
 IMG_MODEL   = "gemini-3-pro-image"
 TEXT_MODEL  = "gemini-2.5-flash"
@@ -93,8 +95,10 @@ def analyze_script(beats):
     """Stage 1 — map recurring locations, characters, props and callbacks across the whole script."""
     instr = (
         "Analyze this narration script (JSON array of text beats, 0-indexed). Return a JSON object with:\n"
-        "- locations: array of {name: string, beats: [indices]} — distinct settings in order of first appearance\n"
-        "- characters: array of string — recurring named people\n"
+        "- locations: array of {name: string, beats: [indices], props: [1-3 minimal background props as short strings]} "
+        "— distinct settings in order of first appearance\n"
+        "- characters: array of {name: string, description: string, beats: [indices]} "
+        "— recurring named people with a brief visual description (clothing, hair, posture)\n"
         "- props: array of string — important recurring objects or symbols\n"
         "- arc: string — 3-word emotional arc (e.g. 'despair → hope → triumph')\n"
         "- callbacks: array of {at: index, references: index} — beats that visually reference an earlier beat\n\n"
@@ -112,12 +116,13 @@ def analyze_script(beats):
         print("Analyse-Fehler:", e)
         return {}
 
-def visual_prompts(scenes, master, accent):
+def visual_prompts(scenes, master, accent, analysis=None):
     beats = [s["text"] for s in scenes]
 
-    # Stage 1 — story structure analysis
-    print(f"  [Plan] Analysiere {len(beats)} Beats …", flush=True)
-    analysis = analyze_script(beats)
+    # Stage 1 — story structure analysis (skip if already provided)
+    if analysis is None:
+        print(f"  [Plan] Analysiere {len(beats)} Beats …", flush=True)
+        analysis = analyze_script(beats)
     analysis_ctx = json.dumps(analysis, ensure_ascii=False, indent=1) if analysis else ""
 
     # Stage 2 — generate per-beat image prompts with full continuity context
@@ -143,7 +148,14 @@ def visual_prompts(scenes, master, accent):
         "- Primary accent color is " + accent + "; you may suggest 1–2 additional flat colors per scene.\n"
         "- SENSITIVE content (violence / death / abuse / trafficking / child suffering): tasteful symbolism only — never graphic.\n"
         "- Do NOT describe art style (that is in the master prompt). Only describe scene content.\n\n"
-        "ART STYLE context (stick-figure ASDF Movie style — for reference only):\n" + master[:500] + "\n\n"
+        "CONTINUITY MARKERS (mandatory in your output):\n"
+        "- First beat in a new location → begin prompt with: [NEW SCENE: location name | prop1, prop2, prop3]\n"
+        "  Example: [NEW SCENE: kitchen | horizontal floor line, small square window upper-right]\n"
+        "- Subsequent beats in the SAME location → begin prompt with: [SAME SCENE: location name | prop1, prop2]\n"
+        "  This tells the image model to keep those exact background elements.\n"
+        "- If a beat directly continues an action from the previous beat → append at end: [CONT ACTION]\n"
+        "These markers are part of the prompt text and will be sent to the image model.\n\n"
+        "ART STYLE context (stick-figure ASDF Movie style — for reference only):\n" + master[:400] + "\n\n"
         "BEATS:\n" + json.dumps(beats, ensure_ascii=False) + "\n\n"
         "Return a JSON array of strings, one per beat, same order and same length as BEATS."
     )
@@ -165,13 +177,79 @@ def visual_prompts(scenes, master, accent):
         print("Planner-Fehler:", e)
     return beats  # Fallback
 
+# ---------- Character sheets ----------
+
+def charsheet_path(name):
+    safe = re.sub(r"[^\w\-]", "_", name.lower())
+    return os.path.join(CHARSHEET_DIR, safe)
+
+def load_char_refs():
+    """Return list of {name, uri, mime} for all sheets that have a Gemini Files URI."""
+    refs = []
+    for f in os.listdir(CHARSHEET_DIR):
+        if f.endswith(".json"):
+            try:
+                meta = json.load(open(os.path.join(CHARSHEET_DIR, f)))
+                if meta.get("uri"):
+                    refs.append(meta)
+            except Exception:
+                pass
+    return refs
+
+def gen_charsheet(name, description):
+    """Generate a character reference sheet image and return the bytes."""
+    prompt = (
+        f"CHARACTER REFERENCE SHEET — '{name}'.\n"
+        f"Draw this stick figure in 5 different poses, arranged in a single horizontal row on a white background. "
+        f"Label each pose below it with its name.\n\n"
+        f"Poses: 1-Neutral (standing still) · 2-Happy (arms up, curved smile) · "
+        f"3-Sad (shoulders drooping, frown) · 4-Shocked (arms spread wide, circle mouth) · "
+        f"5-Walking (one leg forward)\n\n"
+        f"Character design: {description}\n\n"
+        f"All 5 poses MUST share identical proportions, head size, and identifying features. "
+        f"White background (#FFFFFF), black ink only, medium-weight lines, no shading. "
+        f"Label each pose clearly below in small neat text."
+    )
+    body = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseModalities": ["IMAGE"],
+            "imageConfig": {"aspectRatio": "16:9"},
+        },
+    }
+    for attempt in range(4):
+        try:
+            r = post_gemini(IMG_MODEL, body)
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 503):
+                time.sleep(min(30, 4 * 2 ** attempt)); continue
+            raise
+        cand = (r.get("candidates") or [{}])[0]
+        for p in cand.get("content", {}).get("parts", []):
+            d = p.get("inlineData") or p.get("inline_data")
+            if d:
+                return base64.b64decode(d["data"])
+        time.sleep(3)
+    raise RuntimeError("Character sheet generation failed")
+
+
 # ---------- Bildgenerierung ----------
-def gen_image(scene_prompt, master, out_path, size, accent="#2563EB"):
+def gen_image(scene_prompt, master, out_path, size, accent="#2563EB", char_refs=None):
     acc = (f"\n\nFLAT COLOR PALETTE: primary accent is {accent}. You may use up to 2 additional flat colors "
            "if the scene calls for it. All colors must be flat fills — no gradients, no shading. "
            "Everything else is pure black (#000000) on clean white (#FFFFFF).")
+    parts = []
+    if char_refs:
+        for cr in char_refs:
+            parts.append({"text": (
+                f"CHARACTER REFERENCE for '{cr['name']}': the image below shows the approved design. "
+                f"Match this character's proportions, head size and identifying features EXACTLY in every frame. "
+                f"Do NOT copy the composition or background from this reference — only the character design."
+            )})
+            parts.append({"fileData": {"mimeType": cr.get("mime", "image/png"), "fileUri": cr["uri"]}})
+    parts.append({"text": scene_prompt + acc + "\n\n" + master})
     body = {
-        "contents": [{"parts": [{"text": scene_prompt + acc + "\n\n" + master}]}],
+        "contents": [{"parts": parts}],
         "generationConfig": {
             "responseModalities": ["IMAGE"],
             "imageConfig": {"aspectRatio": "16:9", "imageSize": size},
@@ -328,6 +406,25 @@ class H(BaseHTTPRequestHandler):
                 ct = "image/jpeg" if b[:2] == b"\xff\xd8" else "image/png"
                 return self._send(200, b, ct)
             return self._send(404, {"error": "not found"})
+        if p == "/api/charsheets":
+            sheets = []
+            for f in sorted(os.listdir(CHARSHEET_DIR)):
+                if f.endswith(".json"):
+                    try:
+                        meta = json.load(open(os.path.join(CHARSHEET_DIR, f)))
+                        img_path = os.path.join(CHARSHEET_DIR, f.replace(".json", ".png"))
+                        meta["has_image"] = os.path.exists(img_path)
+                        sheets.append(meta)
+                    except Exception:
+                        pass
+            return self._send(200, {"sheets": sheets})
+        if p.startswith("/charsheets/"):
+            fp = os.path.join(CHARSHEET_DIR, os.path.basename(p))
+            if os.path.exists(fp):
+                b = open(fp, "rb").read()
+                ct = "image/jpeg" if b[:2] == b"\xff\xd8" else "image/png"
+                return self._send(200, b, ct)
+            return self._send(404, {"error": "not found"})
         return self._send(404, {"error": "not found"})
 
     def do_POST(self):
@@ -346,13 +443,16 @@ class H(BaseHTTPRequestHandler):
             if not text:
                 return self._send(200, {"scenes": []})
             scenes = segment(text, wpm, sec)
-            prompts = visual_prompts(scenes, read_master(), accent)
+            beats = [s["text"] for s in scenes]
+            analysis = analyze_script(beats)
+            prompts = visual_prompts(scenes, read_master(), accent, analysis)
             for s, pr in zip(scenes, prompts):
                 s["prompt"] = pr
                 s["file"] = None
                 s["status"] = "geplant"
                 s["t"] = fmt_t(s["start"])
-            out = {"scenes": scenes, "wpm": wpm, "sec": sec}
+            chars = analysis.get("characters", [])
+            out = {"scenes": scenes, "wpm": wpm, "sec": sec, "characters": chars}
             json.dump(out, open(PLAN_FILE, "w"), ensure_ascii=False, indent=1)
             return self._send(200, out)
         if p == "/api/upload_audio":
@@ -393,19 +493,45 @@ class H(BaseHTTPRequestHandler):
                     "text": b["text"], "t": fmt_t(float(b["start"])),
                     "file": None, "status": "geplant", "prompt": ""
                 })
+            print(f"  [Audio] Analysiere Story …", flush=True)
+            analysis = analyze_script([s["text"] for s in scenes])
             print(f"  [Audio] Generiere visuelle Prompts …", flush=True)
-            prompts = visual_prompts(scenes, read_master(), accent)
+            prompts = visual_prompts(scenes, read_master(), accent, analysis)
             for s, pr in zip(scenes, prompts):
                 s["prompt"] = pr
-            out = {"scenes": scenes, "sec": sec, "source": "audio"}
+            chars = analysis.get("characters", [])
+            out = {"scenes": scenes, "sec": sec, "source": "audio", "characters": chars}
             json.dump(out, open(PLAN_FILE, "w"), ensure_ascii=False, indent=1)
             return self._send(200, out)
+
+        if p == "/api/gen_charsheet":
+            name = d.get("name", "").strip()
+            desc = d.get("description", "").strip()
+            if not name or not desc:
+                return self._send(400, {"error": "name und description erforderlich"})
+            safe = re.sub(r"[^\w\-]", "_", name.lower())
+            img_path  = os.path.join(CHARSHEET_DIR, f"{safe}.png")
+            meta_path = os.path.join(CHARSHEET_DIR, f"{safe}.json")
+            try:
+                print(f"  [Char] Generiere Character-Sheet für '{name}' …", flush=True)
+                img_bytes = gen_charsheet(name, desc)
+                open(img_path, "wb").write(img_bytes)
+                print(f"  [Char] Lade hoch zu Gemini Files …", flush=True)
+                uri = gemini_upload_file(img_path, "image/png")
+                meta = {"name": name, "description": desc, "safe": safe, "uri": uri, "mime": "image/png"}
+                json.dump(meta, open(meta_path, "w"), ensure_ascii=False)
+                print(f"  [Char] Fertig: {uri}", flush=True)
+                return self._send(200, {"ok": True, "name": name, "safe": safe, "uri": uri})
+            except Exception as e:
+                import traceback; traceback.print_exc()
+                return self._send(500, {"error": str(e)})
 
         if p == "/api/generate_one":
             i = int(d["i"]); prompt = d.get("prompt", "")
             size = d.get("size", "2K"); accent = d.get("accent", "#2563EB")
             fn = f"{i:03d}.png"
-            res = gen_image(prompt, read_master(), os.path.join(OUT_DIR, fn), size, accent)
+            char_refs = load_char_refs()
+            res = gen_image(prompt, read_master(), os.path.join(OUT_DIR, fn), size, accent, char_refs)
             # plan.json aktualisieren
             try:
                 plan = json.load(open(PLAN_FILE))
