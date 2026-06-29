@@ -1,46 +1,51 @@
-VISUAL IDENTITY — STICK FIGURE VIDEO (apply to every frame without exception)
+MISSION — was dieses Bild leisten muss:
+Dieses Bild illustriert präzise, was der Erzähler in genau diesem Moment sagt. Es ist keine zufällige Szene — es ist eine punktgenaue, visuelle Erklärung der aktuellen Skript-Zeile. Das Bild muss zur Geschichte, zur Emotion UND zur erklärten Idee passen. Es soll sich anfühlen wie eine intelligente, konzeptionell starke Visualisierung — so als hätte ein erfahrener Animationsregisseur diesen einen Moment ausgewählt, um die Aussage des Erzählers zu verstärken.
 
-FIGURE CONSTRUCTION:
-Head: perfect circle, white fill, diameter ≈ 25% of total figure height. Slightly top-heavy look is correct.
-Neck: short single line.
-Torso: one vertical line, ≈ 30% of height.
-Arms: two lines meeting at one shoulder point on the torso. Arm length ≈ torso length.
-Legs: two lines from hip, ≈ 40% of height. Small flat oval feet.
-Line weight: medium-bold throughout — Sharpie marker feel, not ballpoint, not crayon. Same weight on every line of every figure.
-White fill: every enclosed shape on a figure (head, any clothing outline) is filled flat white. Never colored.
+KONTINUITÄT — alle Bilder gehören zum selben Video:
+Jedes Bild muss aussehen, als käme es von derselben Hand, mit denselben Werkzeugen, am selben Tag. Wer alle Bilder nebeneinander sieht, muss sofort erkennen: das ist ein zusammenhängendes Video. Gleicher Zeichenstil, gleiche Liniengewichte, gleiche Farbsprache, gleiche Figur-Proportionen in jedem Frame.
+Wenn ein Charakter-Referenzbild bereitgestellt wird: dessen Design EXAKT übernehmen — Proportionen, Linienstärke, erkennende Merkmale — in jedem Frame in dem diese Figur erscheint.
+Wenn eine Szene am gleichen Ort wie der vorherige Frame spielt: exakt dieselben Hintergrund-Props verwenden (gleiche Position, gleicher Stil).
 
-FACE & EXPRESSION:
-Eyes: two small solid dots, upper half of head, horizontally centered.
-Mouth: arc up = happy · arc down = sad · small circle = shocked or speaking · flat line = neutral.
-Exaggerate body language — it carries the emotion: arms flung wide = shock, arms raised = joy, shoulders drooping = sadness, leaning forward = anger or focus.
-For KO or death: X eyes. For embarrassment: small squiggly lines near head.
+FIGUR-KONSTRUKTION:
+Kopf: perfekter Kreis, weiß gefüllt (#FFFFFF), Durchmesser ≈ 25% der Gesamthöhe. Leicht top-heavy ist korrekt.
+Hals: kurze einzelne Linie (≈5% der Höhe).
+Torso: eine vertikale Linie (≈30% der Höhe).
+Arme: zwei Linien die an einem Schulter-Punkt am Torso zusammentreffen. Länge ≈ Torso.
+Beine: zwei Linien von der Hüfte (≈40% der Höhe). Kleine flache Oval-Füße.
+Liniengewicht: medium-bold und konstant durch — Sharpie-Marker-Gefühl, nicht Kugelschreiber, nicht Pinsel.
+Weiß-Regel: jede geschlossene Fläche einer Figur (Kopf, Kleidungsumrisse) ist flach weiß gefüllt. Nie farbig.
 
-CHARACTER CONSISTENCY:
-If a character reference is provided, match its design exactly — proportions, line weight, identifying features — in every frame that character appears. Never improvise a different look.
+GESICHT & AUSDRUCK:
+Augen: zwei kleine Vollpunkte, obere Hälfte des Kopfes.
+Mund: Kurve oben = happy · Kurve unten = sad · kleiner Kreis = Schock/Sprechen · flache Linie = neutral · X-Augen = KO.
+Körpersprache übertreiben: Arme weit oben = Freude, Schultern hängend = Trauer, Arme weit ausgebreitet = Schock, nach vorne gelehnt = Anspannung.
 
-BACKGROUND:
-Always solid flat white (#FFFFFF). No fill, no tint, no color wash. White space is intentional. Never render sky, floor, walls, or atmosphere as filled areas.
+HINTERGRUND:
+Immer: reines Weiß (#FFFFFF). Keine Füllung, kein Farbton, kein Wash. Weißer Raum ist bewusst eingesetzt — Negative Space lenkt den Fokus.
+Niemals: Himmel, Boden, Wände oder Atmosphäre als gefüllte Flächen rendern.
 
-ENVIRONMENT PROPS (use only what the scene needs, 1–3 max):
-Suggest location with outline-only geometric shapes: horizontal line = floor/ground, rectangle = door/wall/screen, triangle = roof/mountain, two parallel lines = road. Props can have a flat color fill if they are a specific colored object (red car = flat red; green tree = flat green circle on a stick). Minimize detail — readable silhouette only.
+UMGEBUNGS-PROPS (nur was die Szene braucht, max 3):
+Ort mit geometrischen Umriss-Formen andeuten: Linie = Boden, Rechteck = Tür/Wand/Bildschirm, Dreieck = Dach/Berg, zwei parallele Linien = Straße. Props können eine flache Farbe haben wenn es ein konkretes farbiges Objekt ist (rotes Auto = flaches Rot-Rechteck, grüner Baum = grüner Kreis auf Strich). Minimale Details — nur die lesbare Silhouette.
 
-COLOR SYSTEM (flat fills only — no gradients, no shadows, no shading, ever):
-Apply color to objects, props, and clothing only — never to backgrounds, never inside stick figure bodies.
-Choose colors semantically: grass = green, fire = orange-red, water = blue, danger/blood = red, money = green, night sky element = dark blue shape, etc.
-Keep the same color for the same object across all frames of the video.
-Maximum 3–4 flat colors per frame besides black and white.
-Introduce a color only when it serves the story — do not decorate.
+FARBSYSTEM (ausschließlich flache Farben — kein Gradient, kein Schatten, kein Shading):
+Farbe nur auf: Objekte, Props, Kleidungsstücke, Umgebungselemente.
+Nie auf: Hintergrund, Figuren-Innenflächen.
+Farbe semantisch wählen: Gras = grün, Feuer = orange-rot, Wasser = blau, Gefahr = rot, Geld = grün, Nacht-Element = dunkelblaue Form.
+Für denselben Gegenstand dieselbe Farbe in ALLEN Frames des Videos.
+Maximal 3–4 flache Farben pro Frame (neben Schwarz und Weiß).
+Farbe nur einsetzen wenn sie der Story dient — nicht dekorieren.
 
-COMPOSITION (16:9 wide frame):
-One subject, one action or emotion per frame — readable in under one second.
-Subject(s) centered with ≥15% white margin on all sides. Nothing important near the edges.
-Two figures interacting: face each other, placed center-left and center-right with space between.
-Full figures visible — never crop a character. Exception: deliberate close-up face reaction shot.
-Everything on one visual plane. No perspective, no depth, no 3D.
+KOMPOSITION (16:9 Querformat):
+Ein Motiv, eine Aktion oder Emotion pro Frame — in unter einer Sekunde lesbar.
+Motiv(e) zentriert, mit ≥15% Weißraum-Rand an allen Seiten.
+Zwei Figuren: einander zugewandt, links-rechts platziert, Abstand zwischen ihnen.
+Figuren immer komplett sichtbar — niemals anschneiden. Ausnahme: bewusstes Nahaufnahme-Reaktions-Shot.
+Alles auf einer visuellen Ebene. Keine Perspektive, keine Tiefe, kein 3D.
 
-SPEECH BUBBLES & TEXT:
-Use only when the scene description specifically calls for spoken words.
-Simple oval bubble, short hand-lettered text inside, tail pointing to the speaker.
+SPRECHBLASEN & TEXT:
+Nur wenn die Szenen-Beschreibung explizit gesprochene Wörter verlangt.
+Einfache ovale Blase, kurzer handgeschriebener Text, Schwanz zeigt zum Sprecher.
+Text muss korrekt geschrieben, kurz und gut lesbar sein.
 
-WHAT NEVER APPEARS:
-Colored backgrounds · colored stick figure interiors · gradients · shadows · shading · 3D rendering · photorealism · anime or manga style · Disney style · complex rendered environments · thick uniform outlines · detailed realistic faces · extra limbs · broken anatomy · watermarks · signatures.
+VERBOTEN:
+Gefärbter Hintergrund · farbige Figuren-Innenflächen · Gradient · Schatten · Shading · 3D-Rendering · Fotorealismus · Anime · Manga · Disney-Stil · komplexe Hintergründe · dicke gleichmäßige Outlines · detaillierte realistische Gesichter · kaputte Anatomie · zusätzliche Gliedmaßen · unlesbarer Text · Wasserzeichen · Signaturen.
