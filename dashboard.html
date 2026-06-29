@@ -298,7 +298,10 @@ function renderScenes(source){
     d.innerHTML=`
       <div>
         <div class="thumb" id="th${s.i}">${s.file?`<img src="/generated/${s.file}?t=${Date.now()}">`:'kein Bild'}</div>
-        <div class="acts"><button class="sm" onclick="genOne(${s.i})">Bild generieren</button></div>
+        <div class="acts">
+          <button class="sm" onclick="genOne(${s.i})">Bild generieren</button>
+          <button class="sm" id="dl${s.i}" onclick="dlOne(${s.i})" ${s.file?'':'disabled'} title="Bild herunterladen">⬇</button>
+        </div>
       </div>
       <div>
         <div class="meta">
@@ -317,11 +320,21 @@ function renderScenes(source){
 
 function setStatus(i,st){ const e=$('st'+i); if(e){e.textContent=st; e.className='st '+st;} }
 
+function dlOne(i){
+  const s=SCENES[i]; if(!s||!s.file) return;
+  const ts=(s.t||String(i)).replace(':','-');
+  const a=document.createElement('a');
+  a.href=`/generated/${s.file}`; a.download=`${ts}.png`; a.click();
+}
+
 async function genOne(i){
   setStatus(i,'läuft');
   const r=await api('/api/generate_one','POST',{i,prompt:SCENES[i].prompt});
-  if(r.ok){ setStatus(i,'fertig'); SCENES[i].file=r.file; $('th'+i).innerHTML=`<img src="/generated/${r.file}?t=${r.ts}">`; }
-  else{ setStatus(i,'fehler'); $('th'+i).textContent=r.error||'Fehler'; }
+  if(r.ok){
+    setStatus(i,'fertig'); SCENES[i].file=r.file;
+    $('th'+i).innerHTML=`<img src="/generated/${r.file}?t=${r.ts}">`;
+    const dlBtn=$('dl'+i); if(dlBtn) dlBtn.disabled=false;
+  } else{ setStatus(i,'fehler'); $('th'+i).textContent=r.error||'Fehler'; }
   return r.ok;
 }
 
