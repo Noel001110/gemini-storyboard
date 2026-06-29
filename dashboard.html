@@ -68,24 +68,12 @@
     </div>
   </div>
 
-  <!-- Settings (shared between both flows) -->
+  <!-- Settings -->
   <div class="card">
     <h2>Einstellungen</h2>
-    <div class="row">
+    <div class="row" style="align-items:center">
       <label>Sekunden / Bild<input type="number" id="sec" value="4" min="2" max="10" step="0.5"></label>
-      <label>Akzentfarbe
-        <span style="display:flex;gap:6px;align-items:center">
-          <input type="color" id="accentPick" value="#2563EB" style="width:38px;height:36px;padding:2px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;cursor:pointer" oninput="syncAccent('pick')">
-          <input type="text" id="accent" value="#2563EB" style="min-width:100px" oninput="syncAccent('hex')">
-        </span>
-      </label>
-      <label>Auflösung
-        <select id="size">
-          <option value="2K">2K (2752px)</option>
-          <option value="1K">1K</option>
-          <option value="4K">4K (kann Grunge)</option>
-        </select>
-      </label>
+      <span class="hint">Farben & Stil werden automatisch aus dem Kontext gewählt · immer 2K · weißer Hintergrund</span>
     </div>
   </div>
 
@@ -177,13 +165,6 @@ const api = (u,m,b) => fetch(u,{method:m||'GET',headers:{'Content-Type':'applica
 async function loadMaster(){ const r=await api('/api/master'); $('master').value=r.master||''; }
 async function saveMaster(){ await api('/api/master','POST',{master:$('master').value}); const n=$('saveNote'); n.style.opacity=1; setTimeout(()=>n.style.opacity=0,1500); }
 
-// ---- Accent ----
-function syncAccent(from){
-  const hex=$('accent'), pick=$('accentPick');
-  if(from==='pick'){ hex.value=pick.value; }
-  else if(/^#[0-9a-fA-F]{6}$/.test(hex.value)){ pick.value=hex.value; }
-}
-
 // ---- Word estimate ----
 function wordCount(s){ return (s.trim().match(/\S+/g)||[]).length; }
 function estimate(){
@@ -196,7 +177,7 @@ function estimate(){
 // ---- Manual plan ----
 async function makePlan(){
   const btn=$('planBtn'); btn.disabled=true; btn.textContent='Plane…';
-  const r=await api('/api/plan','POST',{script:$('script').value,wpm:+$('wpm').value,sec:+$('sec').value,accent:$('accent').value});
+  const r=await api('/api/plan','POST',{script:$('script').value,wpm:+$('wpm').value,sec:+$('sec').value});
   SCENES=r.scenes||[]; renderScenes('text'); btn.disabled=false; btn.textContent='Plan aus Skript erstellen';
   $('planArea').style.display=SCENES.length?'block':'none';
   if(r.characters) suggestCharsFromPlan(r.characters);
@@ -260,7 +241,7 @@ async function transcribeAudio(){
   setStep(2); $('transStatus').textContent='Transkribiere Audio … (30–90 s)';
   const r=await fetch('/api/transcribe',{
     method:'POST', headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({sec:+$('sec').value, accent:$('accent').value})
+    body:JSON.stringify({sec:+$('sec').value})
   }).then(r=>r.json());
 
   if(r.error){
@@ -308,7 +289,7 @@ function setStatus(i,st){ const e=$('st'+i); if(e){e.textContent=st; e.className
 
 async function genOne(i){
   setStatus(i,'läuft');
-  const r=await api('/api/generate_one','POST',{i,prompt:SCENES[i].prompt,size:$('size').value,accent:$('accent').value});
+  const r=await api('/api/generate_one','POST',{i,prompt:SCENES[i].prompt});
   if(r.ok){ setStatus(i,'fertig'); SCENES[i].file=r.file; $('th'+i).innerHTML=`<img src="/generated/${r.file}?t=${r.ts}">`; }
   else{ setStatus(i,'fehler'); $('th'+i).textContent=r.error||'Fehler'; }
   return r.ok;

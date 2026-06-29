@@ -116,7 +116,7 @@ def analyze_script(beats):
         print("Analyse-Fehler:", e)
         return {}
 
-def visual_prompts(scenes, master, accent, analysis=None):
+def visual_prompts(scenes, master, analysis=None):
     beats = [s["text"] for s in scenes]
 
     # Stage 1 — story structure analysis (skip if already provided)
@@ -144,8 +144,11 @@ def visual_prompts(scenes, master, accent, analysis=None):
     instr += (
         "PER-SCENE RULES:\n"
         "- Max ~40 words per description.\n"
-        "- Describe: subject + action + composition + emotion + flat colors to use.\n"
-        "- Primary accent color is " + accent + "; you may suggest 1–2 additional flat colors per scene.\n"
+        "- Describe: subject + action + composition + emotion.\n"
+        "- COLOR: choose flat colors that feel semantically right for objects/props in this scene "
+        "(e.g. grass=green, car=red, fire=orange). Use 2–4 flat colors max. "
+        "Stick figure interiors stay white. Background stays white. "
+        "Keep the same color for the same object across all scenes.\n"
         "- SENSITIVE content (violence / death / abuse / trafficking / child suffering): tasteful symbolism only — never graphic.\n"
         "- Do NOT describe art style (that is in the master prompt). Only describe scene content.\n\n"
         "CONTINUITY MARKERS (mandatory in your output):\n"
@@ -255,10 +258,15 @@ def gen_charsheet(name, description):
 
 
 # ---------- Bildgenerierung ----------
-def gen_image(scene_prompt, master, out_path, size, accent="#2563EB", char_refs=None):
-    acc = (f"\n\nFLAT COLOR PALETTE: primary accent is {accent}. You may use up to 2 additional flat colors "
-           "if the scene calls for it. All colors must be flat fills — no gradients, no shading. "
-           "Everything else is pure black (#000000) on clean white (#FFFFFF).")
+IMG_SIZE = "2K"
+
+def gen_image(scene_prompt, master, out_path, char_refs=None):
+    acc = (
+        "\n\nCOLOR RULES: use flat colors on objects/props only (no gradients, no shading). "
+        "Stick figure interiors = white. Background = white (#FFFFFF). "
+        "Choose colors that are semantically fitting (grass=green, fire=orange, etc.). "
+        "Max 3–4 flat colors per frame besides black and white."
+    )
     parts = []
     if char_refs:
         for cr in char_refs:
@@ -280,7 +288,7 @@ def gen_image(scene_prompt, master, out_path, size, accent="#2563EB", char_refs=
         "contents": [{"parts": parts}],
         "generationConfig": {
             "responseModalities": ["IMAGE"],
-            "imageConfig": {"aspectRatio": "16:9", "imageSize": size},
+            "imageConfig": {"aspectRatio": "16:9", "imageSize": IMG_SIZE},
         },
     }
     for attempt in range(5):
@@ -466,14 +474,13 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True})
         if p == "/api/plan":
             wpm = float(d.get("wpm", 150)); sec = float(d.get("sec", 4))
-            accent = d.get("accent", "#2563EB")
             text = clean_script(d.get("script", ""))
             if not text:
                 return self._send(200, {"scenes": []})
             scenes = segment(text, wpm, sec)
             beats = [s["text"] for s in scenes]
             analysis = analyze_script(beats)
-            prompts = visual_prompts(scenes, read_master(), accent, analysis)
+            prompts = visual_prompts(scenes, read_master(), analysis)
             for s, pr in zip(scenes, prompts):
                 s["prompt"] = pr
                 s["file"] = None
@@ -498,8 +505,7 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True, "size": len(raw), "name": d.get("name", "")})
 
         if p == "/api/transcribe":
-            sec    = float(d.get("sec", 4))
-            accent = d.get("accent", "#2563EB")
+            sec = float(d.get("sec", 4))
             try:
                 meta = json.load(open(AUDIO_META_FILE))
             except Exception:
@@ -524,7 +530,7 @@ class H(BaseHTTPRequestHandler):
             print(f"  [Audio] Analysiere Story …", flush=True)
             analysis = analyze_script([s["text"] for s in scenes])
             print(f"  [Audio] Generiere visuelle Prompts …", flush=True)
-            prompts = visual_prompts(scenes, read_master(), accent, analysis)
+            prompts = visual_prompts(scenes, read_master(), analysis)
             for s, pr in zip(scenes, prompts):
                 s["prompt"] = pr
             chars = analysis.get("characters", [])
@@ -581,10 +587,9 @@ class H(BaseHTTPRequestHandler):
 
         if p == "/api/generate_one":
             i = int(d["i"]); prompt = d.get("prompt", "")
-            size = d.get("size", "2K"); accent = d.get("accent", "#2563EB")
             fn = f"{i:03d}.png"
             char_refs = load_char_refs()
-            res = gen_image(prompt, read_master(), os.path.join(OUT_DIR, fn), size, accent, char_refs)
+            res = gen_image(prompt, read_master(), os.path.join(OUT_DIR, fn), char_refs)
             # plan.json aktualisieren
             try:
                 plan = json.load(open(PLAN_FILE))
