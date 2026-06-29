@@ -221,13 +221,35 @@ function setStep(n){
   });
 }
 
+let _pollTimer = null;
+function startStatusPoll(){
+  _pollTimer = setInterval(async()=>{
+    const s = await fetch('/api/transcribe_status').then(r=>r.json()).catch(()=>null);
+    if(!s) return;
+    const pct = Math.round(s.step / s.total * 100);
+    $('transStatus').textContent = s.msg || '…';
+    $('barFill').style.width = pct + '%';
+    // Highlight active step
+    const stepMap = {1:'step1', 2:'step2', 3:'step3', 4:'step3'};
+    ['step1','step2','step3'].forEach(id=>$(id).className='');
+    if(stepMap[s.step]) $(stepMap[s.step]).className='active';
+    if(!s.running){ stopStatusPoll(); }
+  }, 1200);
+}
+function stopStatusPoll(){
+  if(_pollTimer){ clearInterval(_pollTimer); _pollTimer=null; }
+}
+
 async function transcribeAudio(){
   if(!audioB64) return;
   const btn=$('transBtn');
   btn.disabled=true;
   $('transSteps').style.display='flex';
+  $('barFill').style.width='0%';
+  $('planArea').style.display='none';
 
-  setStep(1); $('transStatus').textContent='Upload zur Gemini Files API …';
+  // Step 1: upload to local server
+  setStep(1); $('transStatus').textContent='Datei wird hochgeladen …';
   const upRes=await fetch('/api/upload_audio',{
     method:'POST', headers:{'Content-Type':'application/json'},
     body:JSON.stringify({data:audioB64, mime:audioMime, name:audioName})
@@ -238,18 +260,26 @@ async function transcribeAudio(){
     btn.disabled=false; return;
   }
 
-  setStep(2); $('transStatus').textContent='Transkribiere Audio … (30–90 s)';
+  // Step 2-4: transcribe + plan (poll status in background)
+  setStep(2); $('transStatus').textContent='Verbinde mit Gemini …';
+  startStatusPoll();
+
   const r=await fetch('/api/transcribe',{
     method:'POST', headers:{'Content-Type':'application/json'},
     body:JSON.stringify({sec:+$('sec').value})
   }).then(r=>r.json());
 
+  stopStatusPoll();
+
   if(r.error){
     $('transStatus').textContent='Fehler: '+r.error;
+    $('barFill').style.width='0%';
     btn.disabled=false; return;
   }
 
-  setStep(3); $('transStatus').textContent='Fertig ✓';
+  $('barFill').style.width='100%';
+  $('transStatus').textContent='Fertig ✓';
+  ['step1','step2','step3'].forEach(id=>$(id).className='done');
   SCENES=r.scenes||[];
   renderScenes('audio');
   $('planArea').style.display=SCENES.length?'block':'none';

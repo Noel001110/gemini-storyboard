@@ -25,6 +25,14 @@ API = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateConten
 FILES_UPLOAD = "https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable"
 FILES_API    = "https://generativelanguage.googleapis.com/v1beta/{name}"
 
+# Shared transcription status (thread-safe via GIL for simple dict ops)
+TX_STATUS = {"step": 0, "total": 4, "msg": "Bereit", "running": False, "error": ""}
+
+def tx(step, msg):
+    TX_STATUS["step"] = step
+    TX_STATUS["msg"] = msg
+    print(f"  [TX {step}/{TX_STATUS['total']}] {msg}", flush=True)
+
 def key():
     return open(KEYFILE).read().strip()
 
@@ -423,6 +431,8 @@ class H(BaseHTTPRequestHandler):
         p = self.path.split("?")[0]
         if p == "/":
             return self._send(200, open(os.path.join(HERE, "dashboard.html"), encoding="utf-8").read(), "text/html; charset=utf-8")
+        if p == "/api/transcribe_status":
+            return self._send(200, dict(TX_STATUS))
         if p == "/api/master":
             return self._send(200, {"master": read_master()})
         if p == "/api/plan":
@@ -506,19 +516,24 @@ class H(BaseHTTPRequestHandler):
             print(f"  [Audio] Gespeichert: {os.path.basename(local_path)} ({len(raw)//1024} KB)", flush=True)
             return self._send(200, {"ok": True, "size": len(raw), "name": d.get("name", "")})
 
+        if p == "/api/transcribe_status":
+            return self._send(200, dict(TX_STATUS))
+
         if p == "/api/transcribe":
             sec = float(d.get("sec", 4))
             try:
                 meta = json.load(open(AUDIO_META_FILE))
             except Exception:
                 return self._send(400, {"error": "Keine Audio-Datei hochgeladen."})
+            TX_STATUS["running"] = True; TX_STATUS["error"] = ""
             try:
                 mb = os.path.getsize(meta["path"]) / 1024 / 1024
-                print(f"  [Audio] Transkribiere inline ({mb:.1f} MB) …", flush=True)
+                tx(1, f"Sende Audio an Gemini ({mb:.1f} MB) …")
                 beats = transcribe_and_segment(meta["path"], meta["mime"], sec)
-                print(f"  [Audio] {len(beats)} Beats erkannt.", flush=True)
+                tx(2, f"{len(beats)} Szenen transkribiert — baue Szenen …")
             except Exception as e:
                 import traceback; traceback.print_exc()
+                TX_STATUS["running"] = False; TX_STATUS["error"] = str(e)
                 return self._send(500, {"error": f"Transkription fehlgeschlagen: {e}"})
             scenes = []
             for i, b in enumerate(beats):
@@ -528,12 +543,14 @@ class H(BaseHTTPRequestHandler):
                     "text": b["text"], "t": fmt_t(float(b["start"])),
                     "file": None, "status": "geplant", "prompt": ""
                 })
-            print(f"  [Audio] Analysiere Story …", flush=True)
+            tx(3, f"Analysiere Story-Struktur ({len(scenes)} Szenen) …")
             analysis = analyze_script([s["text"] for s in scenes])
-            print(f"  [Audio] Generiere visuelle Prompts …", flush=True)
+            tx(4, f"Schreibe Bild-Prompts …")
             prompts = visual_prompts(scenes, read_master(), analysis)
             for s, pr in zip(scenes, prompts):
                 s["prompt"] = pr
+            tx(4, f"Fertig — {len(scenes)} Szenen bereit ✓")
+            TX_STATUS["running"] = False
             chars = analysis.get("characters", [])
             out = {"scenes": scenes, "sec": sec, "source": "audio", "characters": chars}
             json.dump(out, open(PLAN_FILE, "w"), ensure_ascii=False, indent=1)
