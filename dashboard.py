@@ -196,6 +196,27 @@ def load_char_refs():
                 pass
     return refs
 
+def analyze_char_image(img_bytes, mime="image/png"):
+    """Ask Gemini Vision to extract a text-only design description from a reference image."""
+    instr = (
+        "This image shows a character to be used as a visual design reference for a stick-figure animation. "
+        "Write a precise CHARACTER DESIGN SPECIFICATION based on what you see. "
+        "Describe ONLY the design elements: head shape and size relative to body, body proportions, "
+        "line weight (thin/medium/thick), clothing details, eye style, mouth style, any distinguishing marks. "
+        "Do NOT describe the pose, walking direction, or composition — only the visual design. "
+        "Write as a concise spec (max 80 words) that could be used to draw this character consistently in any pose."
+    )
+    body = {
+        "contents": [{"parts": [
+            {"text": instr},
+            {"inlineData": {"mimeType": mime, "data": base64.b64encode(img_bytes).decode()}}
+        ]}],
+        "generationConfig": {"temperature": 0.2},
+    }
+    r = post_gemini(TEXT_MODEL, body)
+    return r["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+
 def gen_charsheet(name, description):
     """Generate a character reference sheet image and return the bytes."""
     prompt = (
@@ -241,10 +262,17 @@ def gen_image(scene_prompt, master, out_path, size, accent="#2563EB", char_refs=
     parts = []
     if char_refs:
         for cr in char_refs:
+            desc_hint = f"\n   Design spec: {cr['description']}" if cr.get("description") else ""
             parts.append({"text": (
-                f"CHARACTER REFERENCE for '{cr['name']}': the image below shows the approved design. "
-                f"Match this character's proportions, head size and identifying features EXACTLY in every frame. "
-                f"Do NOT copy the composition or background from this reference — only the character design."
+                f"━━ CHARACTER DESIGN REFERENCE for '{cr['name']}' ━━\n"
+                f"The image below is a DESIGN STYLE GUIDE — not a pose template.{desc_hint}\n\n"
+                f"EXTRACT from this image: line thickness, head circle size, body proportions, "
+                f"clothing outline style, eye dots, mouth curve style.\n"
+                f"APPLY that design to draw '{cr['name']}' in whatever pose the scene below calls for.\n\n"
+                f"STRICTLY FORBIDDEN: do NOT copy the sideways angle, the walking pose, "
+                f"the specific leg/arm position, or any composition from this reference image. "
+                f"The reference shows design only — every scene gets its own pose and framing.\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             )})
             parts.append({"fileData": {"mimeType": cr.get("mime", "image/png"), "fileUri": cr["uri"]}})
     parts.append({"text": scene_prompt + acc + "\n\n" + master})
@@ -503,6 +531,31 @@ class H(BaseHTTPRequestHandler):
             out = {"scenes": scenes, "sec": sec, "source": "audio", "characters": chars}
             json.dump(out, open(PLAN_FILE, "w"), ensure_ascii=False, indent=1)
             return self._send(200, out)
+
+        if p == "/api/upload_charref":
+            # {name, image: base64, mime}
+            name = d.get("name", "Charakter").strip()
+            img_b64 = d.get("image", "")
+            mime = d.get("mime", "image/png")
+            if not img_b64:
+                return self._send(400, {"error": "image fehlt"})
+            img_bytes = base64.b64decode(img_b64)
+            safe = re.sub(r"[^\w\-]", "_", name.lower())
+            img_path  = os.path.join(CHARSHEET_DIR, f"{safe}.png")
+            meta_path = os.path.join(CHARSHEET_DIR, f"{safe}.json")
+            open(img_path, "wb").write(img_bytes)
+            print(f"  [Char] Analysiere Referenzbild für '{name}' …", flush=True)
+            try:
+                desc = analyze_char_image(img_bytes, mime)
+            except Exception as e:
+                desc = ""
+                print(f"  [Char] Analyse-Fehler (ignoriert): {e}", flush=True)
+            print(f"  [Char] Upload zu Gemini Files …", flush=True)
+            uri = gemini_upload_file(img_path, "image/png")
+            meta = {"name": name, "description": desc, "safe": safe, "uri": uri, "mime": "image/png"}
+            json.dump(meta, open(meta_path, "w"), ensure_ascii=False)
+            print(f"  [Char] Fertig. Beschreibung: {desc[:80]}", flush=True)
+            return self._send(200, {"ok": True, "name": name, "safe": safe, "uri": uri, "description": desc})
 
         if p == "/api/gen_charsheet":
             name = d.get("name", "").strip()

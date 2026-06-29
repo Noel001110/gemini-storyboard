@@ -132,10 +132,26 @@
   <div class="card" id="charCard" style="display:none">
     <h2>Charakter-Referenzen <span class="hint" style="text-transform:none;letter-spacing:0">(werden bei jedem Bild mitgeschickt)</span></h2>
     <div id="charList"></div>
-    <div class="row" style="margin-top:10px;align-items:flex-end;gap:10px">
-      <label style="flex:1">Name<input type="text" id="newCharName" placeholder="z.B. Max"></label>
-      <label style="flex:3">Design-Beschreibung<input type="text" id="newCharDesc" placeholder="z.B. circle head, spiky hair, striped shirt, long legs"></label>
-      <button class="sm ghost" onclick="addChar()">+ Charakter hinzufügen</button>
+    <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:12px;margin-top:10px">
+      <div style="font-size:12px;color:var(--mut);margin-bottom:8px">Referenzbild hochladen <span style="color:var(--ok)">(empfohlen)</span> — oder Charakter ohne Bild anlegen</div>
+      <div class="row" style="align-items:flex-end;gap:10px;flex-wrap:wrap">
+        <label style="flex:0 0 auto">Name<input type="text" id="newCharName" placeholder="z.B. Max" style="min-width:130px"></label>
+        <label style="flex:1;min-width:200px">Design-Beschreibung (optional)<input type="text" id="newCharDesc" placeholder="wird automatisch aus Bild extrahiert"></label>
+        <div style="display:flex;gap:8px;align-items:flex-end">
+          <div>
+            <div style="font-size:12px;color:var(--mut);margin-bottom:4px">Bild hochladen</div>
+            <label style="cursor:pointer">
+              <div id="refUploadBox" style="background:var(--panel);border:1px dashed var(--line);border-radius:6px;padding:8px 12px;font-size:12px;color:var(--mut);white-space:nowrap">
+                Bild wählen (PNG/JPG)
+              </div>
+              <input type="file" id="refImageFile" accept="image/*" style="display:none" onchange="refImageSelected()">
+            </label>
+          </div>
+          <button class="sm" id="uploadRefBtn" onclick="uploadCharRef()" disabled>Hochladen &amp; analysieren</button>
+          <button class="sm ghost" onclick="addChar()">Ohne Bild anlegen</button>
+        </div>
+      </div>
+      <img id="refPreview" style="display:none;margin-top:8px;max-height:120px;border-radius:6px;border:1px solid var(--line)">
     </div>
   </div>
 
@@ -343,6 +359,54 @@ function renderCharList(){
       </div>`;
     c.appendChild(d);
   });
+}
+
+// ---- Ref image upload ----
+let refImageB64 = null, refImageMime = null;
+
+function refImageSelected(){
+  const f = $('refImageFile').files[0];
+  if(!f) return;
+  refImageMime = f.type || 'image/png';
+  $('refUploadBox').textContent = f.name;
+  const prev = $('refPreview');
+  prev.src = URL.createObjectURL(f);
+  prev.style.display = 'block';
+  const reader = new FileReader();
+  reader.onload = e => {
+    refImageB64 = e.target.result.split(',')[1];
+    $('uploadRefBtn').disabled = false;
+  };
+  reader.readAsDataURL(f);
+}
+
+async function uploadCharRef(){
+  const name = $('newCharName').value.trim() || 'Charakter';
+  if(!refImageB64){ alert('Bitte zuerst ein Bild auswählen.'); return; }
+  const btn = $('uploadRefBtn');
+  btn.disabled = true; btn.textContent = 'Analysiere…';
+
+  const r = await fetch('/api/upload_charref',{
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({name, image: refImageB64, mime: refImageMime})
+  }).then(r=>r.json());
+
+  btn.textContent = 'Hochladen & analysieren'; btn.disabled = false;
+
+  if(!r.ok){ alert('Fehler: '+(r.error||'unbekannt')); return; }
+
+  // Fill description if Gemini extracted one
+  if(r.description) $('newCharDesc').value = r.description;
+
+  const existing = CHARS.find(c=>c.name.toLowerCase()===name.toLowerCase());
+  if(existing){ Object.assign(existing, {description:r.description||'', has_image:true, uri:r.uri, safe:r.safe}); }
+  else { CHARS.push({name, description:r.description||'', safe:r.safe, has_image:true, uri:r.uri, mime:'image/png'}); }
+
+  $('newCharName').value=''; $('newCharDesc').value='';
+  refImageB64=null; $('refPreview').style.display='none';
+  $('refUploadBox').textContent='Bild wählen (PNG/JPG)';
+  $('charCard').style.display='block';
+  renderCharList();
 }
 
 function suggestCharsFromPlan(chars){
