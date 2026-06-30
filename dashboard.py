@@ -56,6 +56,49 @@ def read_master():
 def write_master(txt):
     open(MASTER_FILE, "w", encoding="utf-8").write(txt.strip() + "\n")
 
+# ---------- Skript-Generator (Simplicissimus-Stil) ----------
+
+SCRIPT_SYSTEM = """\
+You are a documentary script writer. Your style matches Simplicissimus — the German YouTube channel known for narrative-documentary storytelling with investigative tension.
+
+STORYTELLING SCHEMA (always use this structure):
+1. HOOK: Open with ONE concrete person, moment, or place. Short, punchy sentences. No explanations yet — just tension.
+2. BUILD-UP: Introduce the central phenomenon through the specific case. Alternate facts with atmosphere.
+3. ESCALATION: Each new chapter raises the stakes. End chapters with tension, not closure — micro-cliffhangers.
+4. BROADER PATTERN: Zoom out from the specific case to the systemic/global picture.
+5. HUMAN COST: Ground the abstract in real human consequences. One concrete example.
+6. CLOSING: Leave the audience with an uncomfortable truth, an open question, or a realization that goes beyond the story.
+
+STYLE RULES:
+- Sentence rhythm: short punchy sentence. Then a slightly longer analytical one. Then short again.
+- Never open a chapter with a fact. Open with a scene, a person, or a rhetorical question.
+- Voiceover pace: ~150 words per minute. Each chapter: 80–150 words. Total: 8–14 chapters.
+- Tone: calm, analytical, journalistic — not sensational, not preachy.
+- Transitions between chapters must create forward momentum, not summarize what just happened.
+- Output clean voiceover text only. No stage directions. No brackets. No parentheses.
+- Chapter titles as ## headings. Blank line between paragraphs.
+- The output must NOT be word-for-word identical to the input — it must be freshly written in this style.
+"""
+
+def generate_script(raw_input: str, lang: str) -> str:
+    lang_instr = (
+        "Write the script in German (natural spoken German, not formal)."
+        if lang == "de"
+        else "Write the script in English (clear, neutral international English)."
+    )
+    user_msg = (
+        f"{lang_instr}\n\n"
+        f"Here is the raw input — a transcript, rough notes, or video ideas. "
+        f"Rewrite it as a polished documentary voiceover script following the schema above. "
+        f"Keep all key facts and arguments, but rephrase everything freshly:\n\n"
+        f"{raw_input}"
+    )
+    msgs = [
+        {"role": "system", "content": SCRIPT_SYSTEM},
+        {"role": "user", "content": user_msg},
+    ]
+    return post_kie_text(msgs, temp=0.8)
+
 # ---------- Skript -> Beats (inhaltlich, nach Zeit/Wort) ----------
 def clean_script(s):
     s = re.sub(r"\(?\b\d{1,2}:\d{2}\b\)?", " ", s)   # Timestamps entfernen
@@ -434,6 +477,18 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/master":
             write_master(d.get("master", ""))
             return self._send(200, {"ok": True})
+        if p == "/api/generate_script":
+            raw = d.get("text", "").strip()
+            lang = d.get("lang", "de")
+            if not raw:
+                return self._send(400, {"error": "Kein Text eingegeben."})
+            try:
+                print(f"  [Script] Generiere {lang.upper()} Skript ({len(raw)} Zeichen) …", flush=True)
+                result = generate_script(raw, lang)
+                return self._send(200, {"ok": True, "script": result})
+            except Exception as e:
+                import traceback; traceback.print_exc()
+                return self._send(500, {"error": str(e)})
         if p == "/api/plan":
             wpm = float(d.get("wpm", 150)); sec = float(d.get("sec", 4))
             text = clean_script(d.get("script", ""))

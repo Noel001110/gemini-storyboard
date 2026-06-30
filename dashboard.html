@@ -52,11 +52,31 @@
   .steps span.done{color:var(--ok)}
   .divider{display:flex;align-items:center;gap:10px;margin:18px 0;color:var(--mut);font-size:12px}
   .divider::before,.divider::after{content:'';flex:1;height:1px;background:var(--line)}
+  /* Tabs */
+  .tabs{display:flex;gap:0;border-bottom:1px solid var(--line);margin-bottom:24px}
+  .tab-btn{padding:10px 20px;cursor:pointer;font-size:13px;font-weight:600;color:var(--mut);border:none;background:none;border-bottom:2px solid transparent;margin-bottom:-1px;transition:color .15s}
+  .tab-btn.active{color:var(--txt);border-bottom-color:var(--acc)}
+  .tab-pane{display:none}
+  .tab-pane.active{display:block}
+  /* Script generator */
+  .lang-toggle{display:flex;gap:0;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .lang-toggle button{border:none;border-radius:0;background:var(--panel2);color:var(--mut);padding:7px 18px;font-size:13px;font-weight:600}
+  .lang-toggle button.sel{background:var(--acc);color:#fff}
+  .script-out{white-space:pre-wrap;font:13px/1.7 -apple-system,Segoe UI,sans-serif;padding:16px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;min-height:200px;color:var(--txt)}
+  .script-out h2{font-size:13px;color:var(--acc);margin:18px 0 4px}
+  .script-out p{margin:0 0 8px}
 </style>
 </head>
 <body>
-<header><span class="dot"></span><h1>Storyboard Generator</h1><span class="hint">ASDF Movie Style · Gemini 3 Pro · 2K · 16:9</span></header>
+<header><span class="dot"></span><h1>Storyboard Generator</h1><span class="hint">KIE.ai · nano-banana-2 · 2K · 16:9</span></header>
 <div class="wrap">
+
+  <div class="tabs">
+    <button class="tab-btn active" onclick="switchTab('storyboard',this)">🎬 Storyboard</button>
+    <button class="tab-btn" onclick="switchTab('script',this)">✍️ Skript-Generator</button>
+  </div>
+
+  <div class="tab-pane active" id="tab-storyboard">
 
   <!-- Master Prompt -->
   <div class="card">
@@ -154,6 +174,36 @@
     <div class="bar"><div id="barFill"></div></div>
     <div id="scenes" style="margin-top:14px"></div>
   </div>
+
+  </div><!-- /tab-pane storyboard -->
+
+  <!-- ✍️ Skript-Generator Tab -->
+  <div class="tab-pane" id="tab-script">
+
+    <div class="card">
+      <h2>Rohmaterial — Transkript, Notizen oder Video-Ideen</h2>
+      <textarea id="scriptInput" rows="12" placeholder="Transkript eines anderen Videos einfügen, eigene Notizen, Stichpunkte oder eine grobe Struktur …"></textarea>
+    </div>
+
+    <div class="card">
+      <h2>Ausgabe-Sprache</h2>
+      <div class="row" style="align-items:center;gap:16px">
+        <div class="lang-toggle">
+          <button class="sel" id="langDE" onclick="setLang('de')">🇩🇪 Deutsch</button>
+          <button id="langEN" onclick="setLang('en')">🇬🇧 English</button>
+        </div>
+        <button onclick="generateScript()" id="genScriptBtn">Skript generieren</button>
+        <span class="hint" id="scriptStatus"></span>
+      </div>
+      <div class="bar" style="margin-top:10px"><div id="scriptBar" style="height:100%;background:var(--ok);width:0;transition:width .3s"></div></div>
+    </div>
+
+    <div class="card" id="scriptOutCard" style="display:none">
+      <h2>Generiertes Sprecherscript <button class="sm ghost" onclick="copyScript()" style="margin-left:8px;text-transform:none;letter-spacing:0">Kopieren</button></h2>
+      <div class="script-out" id="scriptOut"></div>
+    </div>
+
+  </div><!-- /tab-pane script -->
 
 </div>
 <script>
@@ -471,6 +521,76 @@ async function genCharSheet(name, desc){
     alert('Fehler: '+(r.error||'unbekannt'));
     if(btn){ btn.disabled=false; btn.textContent='Referenzbild erstellen'; }
   }
+}
+
+// ---- Tabs ----
+function switchTab(id, btn){
+  document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  $('tab-'+id).classList.add('active');
+  btn.classList.add('active');
+}
+
+// ---- Skript-Generator ----
+let _scriptLang = 'de';
+function setLang(l){
+  _scriptLang = l;
+  $('langDE').classList.toggle('sel', l==='de');
+  $('langEN').classList.toggle('sel', l==='en');
+}
+
+let _scriptPoll = null;
+function startScriptBar(){
+  let w = 5; $('scriptBar').style.width = w+'%';
+  _scriptPoll = setInterval(()=>{ w = Math.min(w + (w < 60 ? 3 : 1), 92); $('scriptBar').style.width = w+'%'; }, 800);
+}
+function stopScriptBar(ok){
+  clearInterval(_scriptPoll);
+  $('scriptBar').style.width = ok ? '100%' : '0%';
+}
+
+function renderScriptMarkdown(md){
+  // Minimal markdown: ## headings → styled, blank lines → paragraphs
+  const html = md
+    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .split(/\n\n+/)
+    .map(block => block.startsWith('<h2>') ? block : `<p>${block.replace(/\n/g,' ')}</p>`)
+    .join('\n');
+  $('scriptOut').innerHTML = html;
+}
+
+async function generateScript(){
+  const raw = $('scriptInput').value.trim();
+  if(!raw){ $('scriptStatus').textContent='Bitte Text eingeben.'; return; }
+  const btn = $('genScriptBtn');
+  btn.disabled = true;
+  $('scriptStatus').textContent = 'Generiere Skript …';
+  $('scriptOutCard').style.display = 'none';
+  startScriptBar();
+
+  const r = await api('/api/generate_script','POST',{text: raw, lang: _scriptLang});
+  stopScriptBar(r.ok);
+
+  if(r.ok){
+    $('scriptStatus').textContent = 'Fertig ✓';
+    $('scriptOutCard').style.display = 'block';
+    renderScriptMarkdown(r.script);
+    // Store raw for copy
+    $('scriptOut').dataset.raw = r.script;
+  } else {
+    $('scriptStatus').textContent = 'Fehler: '+(r.error||'unbekannt');
+  }
+  btn.disabled = false;
+}
+
+function copyScript(){
+  const raw = $('scriptOut').dataset.raw || $('scriptOut').innerText;
+  navigator.clipboard.writeText(raw).then(()=>{
+    const btn = event.target; btn.textContent='Kopiert ✓';
+    setTimeout(()=>btn.textContent='Kopieren', 2000);
+  });
 }
 
 // ---- Init ----
