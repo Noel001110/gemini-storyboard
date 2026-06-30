@@ -8,7 +8,36 @@
   :root{--bg:#0f1115;--panel:#181b22;--panel2:#1f232c;--line:#2c313c;--txt:#e7ebf0;--mut:#8b93a1;--acc:#e4322b;--ok:#37b24d;--warn:#f08c00;}
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif}
-  header{padding:16px 24px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px}
+  /* Layout */
+  .layout{display:flex;min-height:100vh}
+  .sidebar{width:210px;flex-shrink:0;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:12px 8px;gap:2px;position:sticky;top:0;height:100vh;overflow-y:auto}
+  .sidebar-label{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--mut);padding:4px 10px 8px}
+  .ch-item{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--mut);transition:background .12s;user-select:none}
+  .ch-item:hover{background:var(--panel2)}
+  .ch-item.active{background:var(--panel2);color:var(--txt);font-weight:600}
+  .ch-dot{width:7px;height:7px;border-radius:50%;background:var(--line);flex-shrink:0}
+  .ch-item.active .ch-dot{background:var(--acc)}
+  .ch-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ch-del{opacity:0;font-size:11px;color:var(--mut);padding:2px 4px;border-radius:4px}
+  .ch-item:hover .ch-del{opacity:1}
+  .ch-del:hover{color:var(--acc)}
+  .ch-add{margin-top:auto;padding:8px 10px;border-radius:8px;border:1px dashed var(--line);color:var(--mut);font-size:12px;text-align:center;cursor:pointer;transition:border-color .12s}
+  .ch-add:hover{border-color:var(--txt);color:var(--txt)}
+  .ch-new-form{display:none;margin-top:8px;gap:6px;flex-direction:column}
+  .ch-new-form input{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--txt);font-size:12px;padding:6px 8px;outline:none}
+  .ch-new-form input:focus{border-color:var(--acc)}
+  .ch-new-form .row{display:flex;gap:4px}
+  .ch-new-form button{flex:1;font-size:11px;padding:5px 0}
+  /* Video */
+  .video-wrap{margin-top:6px;position:relative}
+  .video-wrap video{width:100%;border-radius:6px;background:#000;display:block}
+  .video-motion{font-size:10px;color:var(--mut);margin-top:3px;line-height:1.4;font-style:italic;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .btn-video{background:#1a2535;border-color:#2d4a6b;color:#6aabf7}
+  .btn-video:hover{background:#1e3048}
+  .btn-video:disabled{opacity:.45;cursor:not-allowed}
+  .main{flex:1;min-width:0;display:flex;flex-direction:column}
+  header{padding:14px 24px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px}
   header h1{font-size:16px;margin:0;font-weight:600}
   header .dot{width:9px;height:9px;border-radius:50%;background:var(--ok)}
   .wrap{max-width:1100px;margin:0 auto;padding:20px 24px 80px}
@@ -28,7 +57,19 @@
   .est b{color:var(--acc)}
   .bar{height:6px;background:var(--panel2);border-radius:4px;overflow:hidden;margin-top:10px}
   .bar>div{height:100%;background:var(--ok);width:0;transition:width .3s}
-  .scene{display:grid;grid-template-columns:300px 1fr;gap:14px;border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px;background:var(--panel2)}
+  .scene{border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px;background:var(--panel2)}
+  .scene-meta{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+  .scene-slots{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
+  .slot{border-radius:8px;overflow:hidden;position:relative;background:#000;aspect-ratio:16/9}
+  .slot img,.slot video{width:100%;height:100%;object-fit:cover;display:block}
+  .slot-empty{width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:var(--mut);font-size:12px;cursor:pointer;transition:background .15s}
+  .slot-empty:hover{background:#0f1820}
+  .slot-empty .slot-icon{font-size:28px;opacity:.5}
+  .slot-empty .slot-label{font-size:11px}
+  .slot-empty button{margin-top:4px;font-size:12px;padding:6px 14px}
+  .slot-bar{display:flex;gap:6px;margin-top:4px}
+  .slot-bar button{flex:1;font-size:11px;padding:5px 0}
+  .scene-body{display:grid;grid-template-columns:1fr;gap:6px}
   .thumb{aspect-ratio:16/9;background:#000;border-radius:6px;display:flex;align-items:center;justify-content:center;color:var(--mut);font-size:12px;overflow:hidden}
   .thumb img{width:100%;height:100%;object-fit:cover}
   .meta{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px;flex-wrap:wrap}
@@ -68,7 +109,28 @@
 </style>
 </head>
 <body>
-<header><span class="dot"></span><h1>Storyboard Generator</h1><span class="hint">KIE.ai · nano-banana-2 · 2K · 16:9</span></header>
+<div class="layout">
+
+<!-- ── Sidebar ─────────────────────────────────────── -->
+<div class="sidebar">
+  <div class="sidebar-label">Kanäle</div>
+  <div id="chList"></div>
+  <div style="margin-top:auto;padding-top:8px;border-top:1px solid var(--line)">
+    <div id="charRefStatus" style="font-size:10px;color:var(--mut);padding:2px 4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Kein Character-Ref</div>
+  </div>
+  <div class="ch-add" id="chAddBtn" onclick="showNewChannelForm()">+ Neuer Kanal</div>
+  <div class="ch-new-form" id="chNewForm">
+    <input type="text" id="chNewName" placeholder="Kanal-Name …" onkeydown="if(event.key==='Enter')confirmNewChannel();if(event.key==='Escape')hideNewChannelForm()">
+    <div class="row">
+      <button class="sm" onclick="confirmNewChannel()">Erstellen</button>
+      <button class="sm ghost" onclick="hideNewChannelForm()">Abbrechen</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Main ───────────────────────────────────────── -->
+<div class="main">
+<header><span class="dot"></span><h1>Storyboard Generator</h1><span class="hint" id="chLabel">—</span></header>
 <div class="wrap">
 
   <div class="tabs">
@@ -78,22 +140,91 @@
 
   <div class="tab-pane active" id="tab-storyboard">
 
-  <!-- Master Prompt -->
-  <div class="card">
-    <h2>Master-Prompt (Stil – gilt für jedes Bild)</h2>
+  <!-- Mode Toggle -->
+  <div class="card" style="padding:14px 16px">
+    <div class="row" style="align-items:center;gap:16px">
+      <strong style="font-size:13px">Modus:</strong>
+      <div style="display:flex;gap:6px">
+        <button id="modeBtnImg" class="sm" onclick="setMode('image')" style="background:var(--acc);color:#fff">📷 Bild</button>
+        <button id="modeBtnVid" class="sm ghost" onclick="setMode('video')">🎬 Video (T2V)</button>
+      </div>
+      <span class="hint" id="modeHint">Bilder werden generiert, Videos optional per I2V</span>
+    </div>
+  </div>
+
+  <!-- Image Mode Master Prompt -->
+  <div class="card" id="cardImgMaster">
+    <h2>📷 Bild-Master-Prompt (Charakter-Stil für Bilder)</h2>
     <textarea id="master" rows="6"></textarea>
     <div class="row" style="margin-top:8px">
-      <button class="sm ghost" onclick="saveMaster()">Stil speichern</button>
+      <button class="sm ghost" onclick="saveMaster()">Speichern</button>
       <span class="save-note" id="saveNote">gespeichert ✓</span>
     </div>
   </div>
 
-  <!-- Settings -->
-  <div class="card">
+  <!-- Video Mode Master Prompt -->
+  <div class="card" id="cardVidMaster" style="display:none">
+    <h2>🎬 Video-Master-Prompt</h2>
+    <p class="hint" style="margin-bottom:8px">Charakter + Story-Arc. Wird in jeden Szenen-Prompt eingebettet für Kontinuität.</p>
+    <textarea id="vidMaster" rows="8" placeholder="CHARACTER:\nSimple 2D stick figure — round head, straight limbs, thin black lines on white background.\n\nSTORY ARC:\n[Wer ist die Hauptfigur? Was ist ihre Reise?]\n\nVISUAL STYLE:\n2D flat line art. No mouth movement. Gestures and body language only."></textarea>
+    <div class="row" style="margin-top:8px">
+      <button class="sm ghost" onclick="saveVidMaster()">Speichern</button>
+      <span class="save-note" id="saveVidNote">gespeichert ✓</span>
+    </div>
+
+    <!-- Character Reference for Veo REFERENCE_2_VIDEO -->
+    <div style="border-top:1px solid var(--line);margin-top:16px;padding-top:14px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <span style="font-size:12px;font-weight:600;color:var(--mut);text-transform:uppercase;letter-spacing:.06em">Character Reference</span>
+        <span class="hint" style="font-size:11px">für Veo REFERENCE_2_VIDEO</span>
+      </div>
+
+      <!-- Current ref display -->
+      <div id="charRefBox" style="display:flex;align-items:center;gap:12px;padding:10px;background:var(--bg);border:1px solid var(--line);border-radius:8px;margin-bottom:10px">
+        <div id="charRefThumb" style="width:80px;height:45px;background:#000;border-radius:4px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:20px;color:var(--mut)">🎭</div>
+        <div style="flex:1;min-width:0">
+          <div id="charRefLabel" style="font-size:12px;color:var(--mut)">Kein Referenzbild gesetzt</div>
+          <div id="charRefUrl" style="font-size:10px;color:var(--mut);opacity:.6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>
+        </div>
+      </div>
+
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <button class="sm ghost" onclick="$('charRefUploadFile').click()" style="flex:1">📁 Bild hochladen</button>
+        <input type="file" id="charRefUploadFile" accept="image/*" style="display:none" onchange="charRefFileSelected()">
+        <button class="sm ghost" id="btnCharRef" onclick="genCharRef()" style="flex:1">✨ Aus Master generieren</button>
+        <button class="sm ghost" onclick="clearCharRef()" style="color:var(--mut)">✕ Löschen</button>
+      </div>
+      <!-- Upload preview + confirm -->
+      <div id="charRefUploadPreview" style="display:none;margin-top:10px">
+        <img id="charRefPreviewImg" style="max-height:100px;border-radius:6px;border:1px solid var(--line)">
+        <div class="row" style="margin-top:8px;gap:8px">
+          <button class="sm blue" id="charRefUploadBtn" onclick="uploadCharRefImage()">Hochladen &amp; als Referenz setzen</button>
+          <button class="sm ghost" onclick="cancelCharRefUpload()">Abbrechen</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings — content switches per mode -->
+  <div class="card" id="cardSettings">
     <h2>Einstellungen</h2>
-    <div class="row" style="align-items:center">
+    <!-- Image mode settings -->
+    <div id="settingsImg" class="row" style="align-items:center">
       <label>Sekunden / Bild<input type="number" id="sec" value="4" min="2" max="10" step="0.5"></label>
-      <span class="hint">Farben & Stil werden automatisch aus dem Kontext gewählt · immer 2K · weißer Hintergrund</span>
+      <span class="hint">Stil & Farben kommen aus dem Master-Prompt</span>
+    </div>
+    <!-- Video mode settings -->
+    <div id="settingsVid" style="display:none">
+      <div class="row" style="align-items:center;margin-bottom:12px">
+        <label>Video-Dauer
+          <select id="veoDuration">
+            <option value="4">4 Sekunden</option>
+            <option value="6">6 Sekunden</option>
+            <option value="8" selected>8 Sekunden (max.)</option>
+          </select>
+        </label>
+        <span class="hint">REFERENCE_2_VIDEO immer 8s · TEXT_2_VIDEO wählbar · Veo 3.1 Lite 1080p (35 Credits/Video)</span>
+      </div>
     </div>
   </div>
 
@@ -166,8 +297,9 @@
   <!-- Scene plan + generation -->
   <div id="planArea" style="display:none">
     <div class="toolbar">
-      <button onclick="genAll()" id="genAllBtn">Alle generieren</button>
-      <button class="ghost sm" onclick="location.href='/api/download'">ZIP herunterladen</button>
+      <button onclick="genAll()" id="genAllBtn">🖼 Alle Bilder</button>
+      <button onclick="genAllVideos()" id="genAllVidBtn" class="btn-video">🎬 Alle Videos</button>
+      <button class="ghost sm" onclick="location.href='/api/download?channel='+ACTIVE_CHANNEL">⬇ ZIP</button>
       <span class="hint" id="prog">0 / 0</span>
       <span class="est" style="margin-left:auto"><span id="srcBadge" class="hint"></span></span>
     </div>
@@ -205,29 +337,142 @@
 
   </div><!-- /tab-pane script -->
 
-</div>
+</div><!-- /wrap -->
+</div><!-- /main -->
+</div><!-- /layout -->
+
 <script>
 let SCENES = [];
+let ACTIVE_CHANNEL = 'default';
+let CHANNEL_NAME   = 'Kanal 1';
+let CURRENT_MODE   = 'image'; // 'image' | 'video'
+
 const $ = id => document.getElementById(id);
 const api = (u,m,b) => fetch(u,{method:m||'GET',headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined}).then(r=>r.json());
+// POST helper that always injects current channel
+const ch_api = (u,b={}) => api(u,'POST',{...b, channel: ACTIVE_CHANNEL});
+// GET helper with channel query param
+const ch_get = (u) => api(u + (u.includes('?')?'&':'?') + 'channel=' + ACTIVE_CHANNEL);
+
+// ── Channel sidebar ────────────────────────────────────────────────────────
+async function loadChannels(){
+  const r = await api('/api/channels');
+  const list = $('chList'); list.innerHTML = '';
+  (r.channels||[]).forEach(ch=>{
+    const el = document.createElement('div');
+    el.className = 'ch-item' + (ch.id===ACTIVE_CHANNEL?' active':'');
+    el.innerHTML = `<span class="ch-dot"></span><span class="ch-name">${ch.name}</span>`
+      + (ch.id!=='default'?`<span class="ch-del" onclick="deleteChannel(event,'${ch.id}')">✕</span>`:'');
+    el.onclick = e=>{ if(!e.target.classList.contains('ch-del')) switchChannel(ch.id, ch.name); };
+    list.appendChild(el);
+  });
+  $('chLabel').textContent = CHANNEL_NAME;
+}
+
+async function switchChannel(id, name){
+  ACTIVE_CHANNEL = id; CHANNEL_NAME = name;
+  SCENES = []; CHARS = [];
+  $('scenes').innerHTML = '';
+  $('planArea').style.display = 'none';
+  $('charCard').style.display  = 'none';
+  loadChannels();
+  loadMaster();
+  loadVidMaster();
+  loadCharsheets();
+  loadCharRefStatus();
+  const modeR = await ch_get('/api/get_mode');
+  applyMode(modeR.mode || 'image');
+  const r = await ch_get('/api/plan');
+  if(r.scenes && r.scenes.length){
+    SCENES = r.scenes;
+    renderScenes(r.source||'text');
+    $('planArea').style.display = 'block';
+    if(r.characters) suggestCharsFromPlan(r.characters);
+    if(CHARS.length) $('charCard').style.display='block';
+  }
+}
+
+function applyMode(mode){
+  CURRENT_MODE = mode;
+  const isVid = mode === 'video';
+  $('cardImgMaster').style.display = isVid ? 'none' : '';
+  $('cardVidMaster').style.display = isVid ? '' : 'none';
+  $('settingsImg').style.display   = isVid ? 'none' : '';
+  $('settingsVid').style.display   = isVid ? '' : 'none';
+  $('modeBtnImg').className        = isVid ? 'sm ghost' : 'sm';
+  $('modeBtnVid').className        = isVid ? 'sm' : 'sm ghost';
+  $('modeBtnImg').style.cssText    = isVid ? '' : 'background:var(--acc);color:#fff';
+  $('modeBtnVid').style.cssText    = isVid ? 'background:var(--acc);color:#fff' : '';
+  $('modeHint').textContent = isVid
+    ? 'Szenen direkt als Veo 3.1 Videos — kein Bild-Zwischenschritt'
+    : 'Bilder generieren, optional per I2V animieren';
+  // Toolbar: hide "Alle Bilder" in video mode
+  $('genAllBtn').style.display = isVid ? 'none' : '';
+  if(SCENES.length) renderScenes();
+}
+
+async function setMode(mode){
+  await ch_api('/api/set_mode', {mode});
+  applyMode(mode);
+}
+
+async function loadVidMaster(){
+  const r = await ch_get('/api/vid_master');
+  if($('vidMaster')) $('vidMaster').value = r.master || '';
+}
+
+async function saveVidMaster(){
+  const txt = $('vidMaster').value;
+  await ch_api('/api/vid_master', {master: txt});
+  const n = $('saveVidNote'); n.style.opacity=1;
+  setTimeout(()=>n.style.opacity=0, 2000);
+}
+
+function showNewChannelForm(){
+  $('chAddBtn').style.display='none';
+  const form=$('chNewForm'); form.style.display='flex';
+  $('chNewName').value=''; $('chNewName').focus();
+}
+function hideNewChannelForm(){
+  $('chNewForm').style.display='none';
+  $('chAddBtn').style.display='';
+}
+async function confirmNewChannel(){
+  const name=$('chNewName').value.trim(); if(!name) return;
+  hideNewChannelForm();
+  const r = await api('/api/channels','POST',{name, channel: ACTIVE_CHANNEL});
+  if(r.ok){ await switchChannel(r.id, r.name); }
+}
+
+async function deleteChannel(e, id){
+  e.stopPropagation();
+  if(!confirm('Kanal löschen? (Bilder bleiben auf der Festplatte)')) return;
+  await api('/api/channels/delete','POST',{channel: id});
+  if(ACTIVE_CHANNEL===id) await switchChannel('default','Kanal 1');
+  loadChannels();
+}
 
 // ---- Master ----
-async function loadMaster(){ const r=await api('/api/master'); $('master').value=r.master||''; }
-async function saveMaster(){ await api('/api/master','POST',{master:$('master').value}); const n=$('saveNote'); n.style.opacity=1; setTimeout(()=>n.style.opacity=0,1500); }
+async function loadMaster(){ const r=await ch_get('/api/master'); $('master').value=r.master||''; }
+async function saveMaster(){ await ch_api('/api/master',{master:$('master').value}); const n=$('saveNote'); n.style.opacity=1; setTimeout(()=>n.style.opacity=0,1500); }
 
 // ---- Word estimate ----
 function wordCount(s){ return (s.trim().match(/\S+/g)||[]).length; }
 function estimate(){
-  const w=wordCount($('script').value), wpm=+$('wpm').value, sec=+$('sec').value;
+  const w=wordCount($('script').value), wpm=+$('wpm').value;
+  const isVideo = CURRENT_MODE === 'video';
+  const sec = isVideo ? +(($('veoDuration')||{}).value||8) : +$('sec').value;
   if(!w){ $('est').textContent='—'; return; }
-  const mins=w/wpm, total=mins*60, imgs=Math.max(1,Math.round(total/sec));
-  $('est').innerHTML=`${w} Wörter · ~${total.toFixed(0)}s Audio · <b>${imgs} Bilder</b>`;
+  const mins=w/wpm, total=mins*60, n=Math.max(1,Math.round(total/sec));
+  const label = isVideo ? 'Videos' : 'Bilder';
+  $('est').innerHTML=`${w} Wörter · ~${total.toFixed(0)}s Audio · <b>${n} ${label}</b>`;
 }
 
 // ---- Manual plan ----
 async function makePlan(){
   const btn=$('planBtn'); btn.disabled=true; btn.textContent='Plane…';
-  const r=await api('/api/plan','POST',{script:$('script').value,wpm:+$('wpm').value,sec:+$('sec').value});
+  const sec = CURRENT_MODE === 'video' ? +(($('veoDuration')||{}).value||8) : +$('sec').value;
+  const r=await ch_api('/api/plan',{script:$('script').value,wpm:+$('wpm').value,sec});
   SCENES=r.scenes||[]; renderScenes('text'); btn.disabled=false; btn.textContent='Plan aus Skript erstellen';
   $('planArea').style.display=SCENES.length?'block':'none';
   if(r.characters) suggestCharsFromPlan(r.characters);
@@ -302,7 +547,7 @@ async function transcribeAudio(){
   setStep(1); $('transStatus').textContent='Datei wird hochgeladen …';
   const upRes=await fetch('/api/upload_audio',{
     method:'POST', headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({data:audioB64, mime:audioMime, name:audioName})
+    body:JSON.stringify({data:audioB64, mime:audioMime, name:audioName, channel:ACTIVE_CHANNEL})
   }).then(r=>r.json());
 
   if(!upRes.ok){
@@ -314,9 +559,10 @@ async function transcribeAudio(){
   setStep(2); $('transStatus').textContent='Verbinde mit Gemini …';
   startStatusPoll();
 
+  const transSec = CURRENT_MODE === 'video' ? +(($('veoDuration')||{}).value||8) : +$('sec').value;
   const r=await fetch('/api/transcribe',{
     method:'POST', headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({sec:+$('sec').value})
+    body:JSON.stringify({sec:transSec, channel:ACTIVE_CHANNEL})
   }).then(r=>r.json());
 
   stopStatusPoll();
@@ -342,27 +588,83 @@ function renderScenes(source){
   const c=$('scenes'); c.innerHTML='';
   const isAudio = source==='audio';
   $('srcBadge').textContent = isAudio ? '🎙 Echte Audio-Timestamps' : '⏱ WPM-Schätzung';
+  const isVideo = CURRENT_MODE === 'video';
   SCENES.forEach(s=>{
     const d=document.createElement('div'); d.className='scene'; d.id='sc'+s.i;
     const tagClass = isAudio ? 'tag audio' : 'tag';
+    const hasImg   = !!s.file;
+    const hasVideo = !!s.video_file;
+
+    // Image mode: two slots (image + I2V). Video mode: one wide video slot.
+    const vidPromptVal = (s.video_prompt||'').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const slotsHtml = isVideo ? `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:8px">
+        <div>
+          <div class="slot" id="vw${s.i}" style="aspect-ratio:16/9">
+            ${hasVideo
+              ? `<video src="/generated/${s.video_file}?channel=${ACTIVE_CHANNEL}" controls loop playsinline></video>`
+              : `<div class="slot-empty"><span class="slot-icon">🎬</span><span class="slot-label">Noch kein Video</span></div>`}
+          </div>
+          <div class="slot-bar" style="margin-top:4px">
+            <button class="sm btn-video" id="vbtn${s.i}" onclick="genT2V(${s.i})">🎬 Generieren</button>
+            <button class="sm btn-video" id="dlv${s.i}" onclick="dlVideo(${s.i})" ${hasVideo?'':'disabled'}>⬇</button>
+          </div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <div style="font-size:11px;color:var(--mut);font-weight:600;text-transform:uppercase;letter-spacing:.05em">Video-Prompt</div>
+          <textarea id="vpr${s.i}" rows="5"
+            style="font-size:11px;line-height:1.5;resize:vertical;flex:1"
+            placeholder="Leer = wird automatisch aus dem Skript generiert …"
+            oninput="SCENES[${s.i}].video_prompt=this.value"
+          >${vidPromptVal}</textarea>
+          <div style="display:flex;gap:6px">
+            <button class="sm ghost" id="prevbtn${s.i}" onclick="previewPrompt(${s.i})" style="flex:1;font-size:11px" title="Prompt neu generieren">🔄 Neu</button>
+            <button class="sm ghost" onclick="$('vpr${s.i}').value='';SCENES[${s.i}].video_prompt=''" style="font-size:11px;color:var(--mut)" title="Prompt leeren">✕</button>
+          </div>
+        </div>
+      </div>` : `
+      <div class="scene-slots">
+        <div>
+          <div class="slot" id="th${s.i}">
+            ${hasImg
+              ? `<img src="/generated/${s.file}?t=${Date.now()}&channel=${ACTIVE_CHANNEL}">`
+              : `<div class="slot-empty"><span class="slot-icon">🖼</span><span class="slot-label">Kein Bild</span></div>`}
+          </div>
+          <div class="slot-bar">
+            <button class="sm" onclick="genOne(${s.i})">🖼 Bild generieren</button>
+            <button class="sm" id="dl${s.i}" onclick="dlOne(${s.i})" ${hasImg?'':'disabled'}>⬇</button>
+          </div>
+        </div>
+        <div>
+          <div class="slot" id="vw${s.i}">
+            ${hasVideo
+              ? `<video src="/generated/${s.video_file}?channel=${ACTIVE_CHANNEL}" controls loop playsinline></video>`
+              : `<div class="slot-empty" onclick="${hasImg?`genVideo(${s.i})`:''}" style="${hasImg?'cursor:pointer':'opacity:.4;cursor:default'}">
+                  <span class="slot-icon">🎬</span>
+                  <span class="slot-label">${hasImg?'Klicken zum Animieren':'Erst Bild generieren'}</span>
+                </div>`}
+          </div>
+          <div class="slot-bar">
+            <button class="sm btn-video" id="vbtn${s.i}" onclick="genVideo(${s.i})" ${hasImg?'':'disabled'}>🎬 Animieren</button>
+            <button class="sm btn-video" id="dlv${s.i}" onclick="dlVideo(${s.i})" ${hasVideo?'':'disabled'}>⬇</button>
+          </div>
+        </div>
+      </div>`;
+
     d.innerHTML=`
-      <div>
-        <div class="thumb" id="th${s.i}">${s.file?`<img src="/generated/${s.file}?t=${Date.now()}">`:'kein Bild'}</div>
-        <div class="acts">
-          <button class="sm" onclick="genOne(${s.i})">Bild generieren</button>
-          <button class="sm" id="dl${s.i}" onclick="dlOne(${s.i})" ${s.file?'':'disabled'} title="Bild herunterladen">⬇</button>
-        </div>
+      <div class="scene-meta">
+        <span class="tag">#${s.i+1}</span>
+        <span class="${tagClass}">${s.t}</span>
+        <span class="tag">~${s.dur}s</span>
+        <span class="st ${s.status}" id="st${s.i}">${s.status}</span>
       </div>
-      <div>
-        <div class="meta">
-          <span class="tag">#${s.i+1}</span>
-          <span class="${tagClass}">${s.t}</span>
-          <span class="tag">~${s.dur}s</span>
-          <span class="st ${s.status}" id="st${s.i}">${s.status}</span>
-        </div>
+      ${slotsHtml}
+      ${isVideo ? '' : `
+      <div class="scene-body">
         <p class="beat">„${s.text}"</p>
         <textarea id="pr${s.i}" oninput="SCENES[${s.i}].prompt=this.value">${s.prompt||''}</textarea>
-      </div>`;
+      </div>`}
+      `;
     c.appendChild(d);
   });
   $('prog').textContent=`0 / ${SCENES.length}`;
@@ -377,15 +679,237 @@ function dlOne(i){
   a.href=`/generated/${s.file}`; a.download=`${ts}.png`; a.click();
 }
 
+function _imgProgress(i, pct){
+  $('th'+i).innerHTML=`<div class="slot-empty">
+    <span class="slot-label" style="font-size:13px;color:var(--txt)">${pct}%</span>
+    <div style="width:75%;height:3px;background:var(--line);border-radius:2px;margin-top:6px">
+      <div style="width:${pct}%;height:100%;background:var(--acc);border-radius:2px;transition:width .4s"></div>
+    </div>
+    <span class="slot-label" style="margin-top:4px">Generiere Bild …</span>
+  </div>`;
+}
+
 async function genOne(i){
   setStatus(i,'läuft');
-  const r=await api('/api/generate_one','POST',{i,prompt:SCENES[i].prompt});
+  _imgProgress(i, 0);
+  const r = await ch_api('/api/generate_one',{i, prompt:SCENES[i].prompt});
+  if(!r.job_id){ setStatus(i,'fehler'); return false; }
+  // Poll until done
+  while(true){
+    await new Promise(res=>setTimeout(res,2000));
+    const s = await fetch(`/api/job_status?job_id=${r.job_id}`).then(r=>r.json()).catch(()=>null);
+    if(!s) continue;
+    if(s.progress) _imgProgress(i, s.progress);
+    if(s.status==='done'){
+      setStatus(i,'fertig');
+      SCENES[i].file=s.file; SCENES[i].source_url=s.source_url;
+      $('th'+i).innerHTML=`<img src="/generated/${s.file}?t=${s.ts}&channel=${ACTIVE_CHANNEL}">`;
+      const dlBtn=$('dl'+i); if(dlBtn) dlBtn.disabled=false;
+      $('vw'+i).innerHTML=`<div class="slot-empty" onclick="genVideo(${i})" style="cursor:pointer">
+        <span class="slot-icon">🎬</span>
+        <span class="slot-label">Klicken zum Animieren</span>
+      </div>`;
+      const vBtn=$('vbtn'+i); if(vBtn) vBtn.disabled=false;
+      return true;
+    }
+    if(s.status==='error'){
+      setStatus(i,'fehler');
+      $('th'+i).innerHTML=`<div class="slot-empty"><span class="slot-label" style="color:var(--acc)">${s.error||'Fehler'}</span></div>`;
+      return false;
+    }
+  }
+}
+
+async function genVideo(i){
+  const btn=$('vbtn'+i);
+  if(btn){ btn.disabled=true; btn.textContent='⏳ …'; }
+  setStatus(i,'video…');
+  $('vw'+i).innerHTML=`<div class="slot-empty"><span class="slot-icon">⏳</span><span class="slot-label">Wird animiert …</span></div>`;
+  const scene=SCENES.find(s=>s.i===i)||{};
+  const r=await ch_api('/api/generate_video',{i, scene_dur: scene.dur||6});
   if(r.ok){
-    setStatus(i,'fertig'); SCENES[i].file=r.file;
-    $('th'+i).innerHTML=`<img src="/generated/${r.file}?t=${r.ts}">`;
-    const dlBtn=$('dl'+i); if(dlBtn) dlBtn.disabled=false;
-  } else{ setStatus(i,'fehler'); $('th'+i).textContent=r.error||'Fehler'; }
+    SCENES[i].video_file=r.file; SCENES[i].motion_prompt=r.motion;
+    setStatus(i,'fertig');
+    $('vw'+i).innerHTML=`<video src="/generated/${r.file}?channel=${ACTIVE_CHANNEL}&t=${r.ts}" controls loop playsinline autoplay muted></video>`;
+    const dlvBtn=$('dlv'+i); if(dlvBtn) dlvBtn.disabled=false;
+    if(btn){ btn.textContent='🎬 Animieren'; btn.disabled=false; }
+  } else {
+    setStatus(i,'fehler');
+    $('vw'+i).innerHTML=`<div class="slot-empty" onclick="genVideo(${i})" style="cursor:pointer">
+      <span class="slot-icon">🎬</span>
+      <span class="slot-label" style="color:var(--acc)">${r.error||'Fehler'}</span>
+      <button class="sm btn-video" onclick="event.stopPropagation();genVideo(${i})">Nochmal versuchen</button>
+    </div>`;
+    if(btn){ btn.textContent='🎬 Animieren'; btn.disabled=!SCENES[i].source_url; }
+  }
   return r.ok;
+}
+
+function dlVideo(i){
+  const s=SCENES[i]; if(!s||!s.video_file) return;
+  const ts=(s.t||String(i)).replace(':','-');
+  const a=document.createElement('a');
+  a.href=`/generated/${s.video_file}?channel=${ACTIVE_CHANNEL}`; a.download=`${ts}.mp4`; a.click();
+}
+
+function _applyCharRef(url){
+  const sidebar = $('charRefStatus');
+  if(url){
+    const name = url.split('/').pop().slice(0,28);
+    if(sidebar){ sidebar.textContent='✅ '+name; sidebar.title=url; }
+    // Update main ref box
+    const lbl=$('charRefLabel'), urlEl=$('charRefUrl'), thumb=$('charRefThumb');
+    if(lbl) lbl.textContent='Referenz gesetzt';
+    if(lbl) lbl.style.color='var(--ok)';
+    if(urlEl){ urlEl.textContent=url; urlEl.style.display='block'; }
+    if(thumb){ thumb.innerHTML=`<img src="${url}" style="width:100%;height:100%;object-fit:cover;border-radius:4px">`; }
+  } else {
+    if(sidebar){ sidebar.textContent='Kein Character-Ref'; sidebar.title=''; }
+    const lbl=$('charRefLabel'), urlEl=$('charRefUrl'), thumb=$('charRefThumb');
+    if(lbl){ lbl.textContent='Kein Referenzbild gesetzt'; lbl.style.color='var(--mut)'; }
+    if(urlEl){ urlEl.textContent=''; urlEl.style.display='none'; }
+    if(thumb) thumb.innerHTML='🎭';
+  }
+}
+
+async function loadCharRefStatus(){
+  try{
+    const r = await ch_get('/api/char_ref');
+    _applyCharRef(r.url || null);
+  }catch(e){}
+}
+
+async function genCharRef(){
+  const btn=$('btnCharRef');
+  if(!btn) return;
+  btn.disabled=true; btn.textContent='⏳ Generiere …';
+  try{
+    const r=await ch_api('/api/gen_char_ref',{});
+    if(r.ok){ _applyCharRef(r.url); }
+    else alert('Fehler: '+(r.error||'unbekannt'));
+  }catch(e){ alert('Fehler: '+e); }
+  btn.disabled=false; btn.textContent='✨ Aus Master generieren';
+}
+
+async function clearCharRef(){
+  await ch_api('/api/set_char_ref',{url:''});
+  _applyCharRef(null);
+}
+
+let _charRefB64=null, _charRefMime=null;
+function charRefFileSelected(){
+  const f=$('charRefUploadFile').files[0]; if(!f) return;
+  _charRefMime = f.type||'image/png';
+  const prev=$('charRefPreviewImg');
+  if(prev) prev.src=URL.createObjectURL(f);
+  $('charRefUploadPreview').style.display='block';
+  const reader=new FileReader();
+  reader.onload=e=>{ _charRefB64=e.target.result.split(',')[1]; };
+  reader.readAsDataURL(f);
+}
+function cancelCharRefUpload(){
+  _charRefB64=null; $('charRefUploadPreview').style.display='none';
+  $('charRefUploadFile').value='';
+}
+async function uploadCharRefImage(){
+  if(!_charRefB64){ alert('Kein Bild ausgewählt'); return; }
+  const btn=$('charRefUploadBtn');
+  btn.disabled=true; btn.textContent='⏳ Hochladen …';
+  const r=await fetch('/api/upload_charref',{
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({name:'char_ref', image:_charRefB64, mime:_charRefMime, channel:ACTIVE_CHANNEL})
+  }).then(r=>r.json());
+  btn.disabled=false; btn.textContent='Hochladen & als Referenz setzen';
+  if(!r.ok){ alert('Fehler: '+(r.error||'unbekannt')); return; }
+  // Store as char_ref_url via set_char_ref
+  await ch_api('/api/set_char_ref',{url: r.uri});
+  _applyCharRef(r.uri);
+  cancelCharRefUpload();
+}
+
+async function previewPrompt(i){
+  const btn=$('prevbtn'+i);
+  if(btn){ btn.disabled=true; btn.textContent='⏳ …'; }
+  const r = await ch_api('/api/preview_t2v_prompt', {i});
+  if(btn){ btn.disabled=false; btn.textContent='🔍 Vorschau'; }
+  if(r.ok){
+    const ta=$('vpr'+i);
+    if(ta){ ta.value=r.prompt; SCENES[i].video_prompt=r.prompt; }
+  } else {
+    alert('Fehler: '+(r.error||'unbekannt'));
+  }
+}
+
+function _veoProgress(i, pct, label){
+  $('vw'+i).innerHTML=`<div class="slot-empty">
+    <span class="slot-label" style="font-size:13px;color:var(--txt)">${pct}%</span>
+    <div style="width:75%;height:3px;background:var(--line);border-radius:2px;margin-top:6px">
+      <div style="width:${pct}%;height:100%;background:#2563EB;border-radius:2px;transition:width .4s"></div>
+    </div>
+    <span class="slot-label" style="margin-top:4px">${label}</span>
+  </div>`;
+}
+
+async function genT2V(i){
+  const btn=$('vbtn'+i);
+  if(btn){ btn.disabled=true; btn.textContent='⏳ …'; }
+  setStatus(i,'video…');
+  _veoProgress(i, 10, 'Sende an Veo 3.1 …');
+  const dur = parseInt(($('veoDuration')||{}).value||'8');
+  const customPrompt = ($('vpr'+i)||{}).value||'';
+  const r = await ch_api('/api/generate_t2v', {i, duration: dur, custom_prompt: customPrompt});
+  if(!r.ok || !r.job_id){
+    setStatus(i,'fehler');
+    $('vw'+i).innerHTML=`<div class="slot-empty">
+      <span class="slot-label" style="color:var(--acc)">${r.error||'Fehler'}</span>
+      <button class="sm btn-video" style="margin-top:8px" onclick="genT2V(${i})">Nochmal</button>
+    </div>`;
+    if(btn){ btn.textContent='🎬 Generieren'; btn.disabled=false; }
+    return false;
+  }
+  const ta=$('vpr'+i);
+  if(ta && r.video_prompt){ ta.value=r.video_prompt; SCENES[i].video_prompt=r.video_prompt; }
+  _veoProgress(i, 15, r.chained ? '🔗 Setzt vorherige Szene fort …' : 'Veo 3.1 generiert …');
+
+  const job_id = r.job_id;
+  while(true){
+    await new Promise(res=>setTimeout(res, 8000));
+    const s = await fetch(`/api/job_status?job_id=${job_id}`).then(r=>r.json()).catch(()=>null);
+    if(!s) continue;
+    const pct = s.progress||15;
+    _veoProgress(i, pct, pct < 80 ? 'Veo 3.1 generiert …' : '1080p Upscaling …');
+    if(s.status==='done'){
+      SCENES[i].video_file = s.file;
+      setStatus(i,'fertig');
+      $('vw'+i).innerHTML=`<video src="/generated/${s.file}?channel=${ACTIVE_CHANNEL}&t=${s.ts}" controls loop playsinline autoplay muted></video>`;
+      const dlvBtn=$('dlv'+i); if(dlvBtn) dlvBtn.disabled=false;
+      if(btn){ btn.textContent='🎬 Generieren'; btn.disabled=false; }
+      return true;
+    }
+    if(s.status==='error'){
+      setStatus(i,'fehler');
+      $('vw'+i).innerHTML=`<div class="slot-empty">
+        <span class="slot-label" style="color:var(--acc)">${s.error||'Fehler'}</span>
+        <button class="sm btn-video" style="margin-top:8px" onclick="genT2V(${i})">Nochmal</button>
+      </div>`;
+      if(btn){ btn.textContent='🎬 Generieren'; btn.disabled=false; }
+      return false;
+    }
+  }
+}
+
+async function genAllVideos(){
+  const btn=$('genAllVidBtn'); btn.disabled=true;
+  const isVideo = CURRENT_MODE === 'video';
+  let scenes = isVideo ? SCENES : SCENES.filter(s=>s.file);
+  let done=0, total=scenes.length;
+  $('prog').textContent=`Videos: 0 / ${total}`;
+  for(const s of scenes){
+    await (isVideo ? genT2V(s.i) : genVideo(s.i));
+    done++; $('prog').textContent=`Videos: ${done} / ${total}`;
+    $('barFill').style.width=(done/total*100)+'%';
+  }
+  btn.disabled=false; $('barFill').style.width='100%';
 }
 
 async function genAll(){
@@ -403,7 +927,7 @@ async function genAll(){
 let CHARS = []; // [{name, description, safe, has_image, uri}]
 
 async function loadCharsheets(){
-  const r = await fetch('/api/charsheets').then(r=>r.json());
+  const r = await fetch('/api/charsheets?channel='+ACTIVE_CHANNEL).then(r=>r.json());
   CHARS = r.sheets || [];
   renderCharList();
 }
@@ -415,7 +939,7 @@ function renderCharList(){
     const d = document.createElement('div');
     d.style.cssText='display:grid;grid-template-columns:180px 1fr auto;gap:10px;align-items:start;margin-bottom:10px;padding:10px;background:var(--panel2);border:1px solid var(--line);border-radius:8px';
     const imgTag = ch.has_image
-      ? `<img src="/charsheets/${ch.safe}.png?t=${Date.now()}" style="width:100%;border-radius:4px;aspect-ratio:16/9;object-fit:cover">`
+      ? `<img src="/charsheets/${ch.safe}.png?t=${Date.now()}&channel=${ACTIVE_CHANNEL}" style="width:100%;border-radius:4px;aspect-ratio:16/9;object-fit:cover">`
       : `<div style="width:100%;aspect-ratio:16/9;background:#000;border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--mut);font-size:11px">kein Bild</div>`;
     const uriTag = ch.uri
       ? `<span class="tag" style="color:var(--ok);border-color:var(--ok)">✓ Referenz aktiv</span>`
@@ -462,7 +986,7 @@ async function uploadCharRef(){
 
   const r = await fetch('/api/upload_charref',{
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({name, image: refImageB64, mime: refImageMime})
+    body: JSON.stringify({name, image: refImageB64, mime: refImageMime, channel: ACTIVE_CHANNEL})
   }).then(r=>r.json());
 
   btn.textContent = 'Hochladen & analysieren'; btn.disabled = false;
@@ -511,7 +1035,7 @@ async function genCharSheet(name, desc){
   if(btn){ btn.disabled=true; btn.textContent='Generiere…'; }
   const r = await fetch('/api/gen_charsheet',{
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({name, description: desc})
+    body: JSON.stringify({name, description: desc, channel: ACTIVE_CHANNEL})
   }).then(r=>r.json());
   if(r.ok){
     const ch = CHARS.find(c=>c.name===name);
@@ -594,10 +1118,20 @@ function copyScript(){
 }
 
 // ---- Init ----
-loadMaster();
-loadCharsheets();
 (async()=>{
-  const r=await api('/api/plan');
+  const ch = await api('/api/channels');
+  const channels = ch.channels || [{id:'default',name:'Kanal 1'}];
+  ACTIVE_CHANNEL = channels[0].id;
+  CHANNEL_NAME   = channels[0].name;
+  loadChannels();
+  loadMaster();
+  loadVidMaster();
+  loadCharsheets();
+  loadCharRefStatus();
+  // Load persisted mode BEFORE rendering scenes
+  const modeR = await ch_get('/api/get_mode');
+  applyMode(modeR.mode || 'image');
+  const r = await ch_get('/api/plan');
   if(r.scenes&&r.scenes.length){
     SCENES=r.scenes;
     renderScenes(r.source||'text');
