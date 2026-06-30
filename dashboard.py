@@ -7,8 +7,7 @@ import urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-GEMINI_KEY_FILE = os.path.expanduser("~/.gemini_key")
-KIE_KEY_FILE    = os.path.expanduser("~/.kie_key")
+KIE_KEY_FILE = os.path.expanduser("~/.kie_key")
 MASTER_FILE = os.path.join(HERE, "master_prompt.txt")
 OUT_DIR = os.path.join(HERE, "generated")
 PLAN_FILE = os.path.join(OUT_DIR, "plan.json")
@@ -20,15 +19,10 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(CHARSHEET_DIR, exist_ok=True)
 
 # KIE.ai — image generation
-KIE_API     = "https://api.kie.ai/api/v1/jobs"
-KIE_MODEL   = "nano-banana-2"
-
-# Gemini — text planning + audio transcription
-TEXT_MODEL  = "gemini-2.5-flash"
-AUDIO_MODEL = "gemini-2.5-flash"
-GEMINI_API  = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent"
-FILES_UPLOAD = "https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable"
-FILES_API    = "https://generativelanguage.googleapis.com/v1beta/{name}"
+KIE_API      = "https://api.kie.ai/api/v1/jobs"
+KIE_MODEL    = "nano-banana-2"
+# KIE.ai — text + audio (OpenAI-compatible)
+KIE_CHAT_URL = "https://api.kie.ai/gemini-2.5-flash/v1/chat/completions"
 
 # Shared transcription status (thread-safe via GIL for simple dict ops)
 TX_STATUS = {"step": 0, "total": 4, "msg": "Bereit", "running": False, "error": ""}
@@ -38,17 +32,19 @@ def tx(step, msg):
     TX_STATUS["msg"] = msg
     print(f"  [TX {step}/{TX_STATUS['total']}] {msg}", flush=True)
 
-def key():
-    return open(GEMINI_KEY_FILE).read().strip()
-
 def kie_key():
     return open(KIE_KEY_FILE).read().strip()
 
-def post_gemini(model, body):
-    req = urllib.request.Request(
-        GEMINI_API.format(model), data=json.dumps(body).encode(),
-        headers={"x-goog-api-key": key(), "Content-Type": "application/json"})
-    return json.load(urllib.request.urlopen(req, timeout=240))
+def post_kie_text(messages, json_mode=False, temp=0.7):
+    """KIE.ai OpenAI-compatible chat completions (Gemini 2.5 Flash)."""
+    body = {"model": "gemini-2.5-flash", "messages": messages, "temperature": temp}
+    if json_mode:
+        body["response_format"] = {"type": "json_object"}
+    hdrs = {"Authorization": f"Bearer {kie_key()}", "Content-Type": "application/json"}
+    req = urllib.request.Request(KIE_CHAT_URL, data=json.dumps(body).encode(), headers=hdrs)
+    with urllib.request.urlopen(req, timeout=240) as r:
+        resp = json.load(r)
+    return resp["choices"][0]["message"]["content"]
 
 # ---------- Master-Prompt ----------
 def read_master():
@@ -120,13 +116,8 @@ def analyze_script(beats):
         "- callbacks: array of {at: index, references: index} — beats that visually reference an earlier beat\n\n"
         "BEATS:\n" + json.dumps(beats, ensure_ascii=False)
     )
-    body = {
-        "contents": [{"parts": [{"text": instr}]}],
-        "generationConfig": {"responseMimeType": "application/json", "temperature": 0.2},
-    }
     try:
-        r = post_gemini(TEXT_MODEL, body)
-        txt = r["candidates"][0]["content"]["parts"][0]["text"]
+        txt = post_kie_text([{"role": "user", "content": instr}], json_mode=True, temp=0.2)
         return json.loads(txt)
     except Exception as e:
         print("Analyse-Fehler:", e)
@@ -178,20 +169,15 @@ def visual_prompts(scenes, master, analysis=None):
         "BEATS:\n" + json.dumps(beats, ensure_ascii=False) + "\n\n"
         "Return a JSON array of strings, one per beat, same order and same length as BEATS."
     )
-    body = {
-        "contents": [{"parts": [{"text": instr}]}],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "responseSchema": {"type": "ARRAY", "items": {"type": "STRING"}},
-            "temperature": 0.7,
-        },
-    }
     try:
-        r = post_gemini(TEXT_MODEL, body)
-        txt = r["candidates"][0]["content"]["parts"][0]["text"]
+        txt = post_kie_text([{"role": "user", "content": instr}], json_mode=True, temp=0.7)
         arr = json.loads(txt)
         if isinstance(arr, list) and len(arr) == len(beats):
             return [str(x) for x in arr]
+        # unwrap if nested (some models return {"prompts": [...]})
+        for v in arr.values() if isinstance(arr, dict) else []:
+            if isinstance(v, list) and len(v) == len(beats):
+                return [str(x) for x in v]
     except Exception as e:
         print("Planner-Fehler:", e)
     return beats  # Fallback
@@ -225,15 +211,12 @@ def analyze_char_image(img_bytes, mime="image/png"):
         "Do NOT describe the pose, walking direction, or composition — only the visual design. "
         "Write as a concise spec (max 80 words) that could be used to draw this character consistently in any pose."
     )
-    body = {
-        "contents": [{"parts": [
-            {"text": instr},
-            {"inlineData": {"mimeType": mime, "data": base64.b64encode(img_bytes).decode()}}
-        ]}],
-        "generationConfig": {"temperature": 0.2},
-    }
-    r = post_gemini(TEXT_MODEL, body)
-    return r["candidates"][0]["content"]["parts"][0]["text"].strip()
+    b64 = base64.b64encode(img_bytes).decode()
+    msgs = [{"role": "user", "content": [
+        {"type": "text", "text": instr},
+        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+    ]}]
+    return post_kie_text(msgs, temp=0.2).strip()
 
 
 def gen_charsheet(name, description):
@@ -250,27 +233,14 @@ def gen_charsheet(name, description):
         f"White background (#FFFFFF), black ink only, medium-weight lines, no shading. "
         f"Label each pose clearly below in small neat text."
     )
-    body = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "responseModalities": ["IMAGE"],
-            "imageConfig": {"aspectRatio": "16:9"},
-        },
-    }
-    for attempt in range(4):
-        try:
-            r = post_gemini(IMG_MODEL, body)
-        except urllib.error.HTTPError as e:
-            if e.code in (429, 500, 503):
-                time.sleep(min(30, 4 * 2 ** attempt)); continue
-            raise
-        cand = (r.get("candidates") or [{}])[0]
-        for p in cand.get("content", {}).get("parts", []):
-            d = p.get("inlineData") or p.get("inline_data")
-            if d:
-                return base64.b64decode(d["data"])
-        time.sleep(3)
-    raise RuntimeError("Character sheet generation failed")
+    tmp = os.path.join(CHARSHEET_DIR, f"_tmp_{re.sub(r'[^\\w]','_',name)}.jpg")
+    res = gen_image(prompt, "", tmp)
+    if res["ok"]:
+        data = open(tmp, "rb").read()
+        try: os.unlink(tmp)
+        except: pass
+        return data
+    raise RuntimeError(f"Character sheet generation failed: {res.get('error')}")
 
 
 # ---------- Bildgenerierung via KIE.ai ----------
@@ -349,53 +319,10 @@ def gen_image(scene_prompt, master, out_path, char_refs=None):
 
     return {"ok": False, "error": "KIE Timeout (>4 min)"}
 
-# ---------- Audio → Gemini Files API ----------
-
-def gemini_upload_file(local_path, mime_type):
-    """Upload a file to the Gemini Files API using the resumable protocol. Returns the file URI."""
-    file_size = os.path.getsize(local_path)
-    display_name = os.path.basename(local_path)
-    meta_body = json.dumps({"file": {"display_name": display_name}}).encode()
-
-    # 1. Start upload session
-    req = urllib.request.Request(FILES_UPLOAD, data=meta_body, method="POST")
-    req.add_header("x-goog-api-key", key())
-    req.add_header("X-Goog-Upload-Protocol", "resumable")
-    req.add_header("X-Goog-Upload-Command", "start")
-    req.add_header("X-Goog-Upload-Header-Content-Length", str(file_size))
-    req.add_header("X-Goog-Upload-Header-Content-Type", mime_type)
-    req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        upload_url = resp.getheader("X-Goog-Upload-URL")
-
-    # 2. Upload bytes
-    with open(local_path, "rb") as f:
-        data = f.read()
-    upload_req = urllib.request.Request(upload_url, data=data, method="POST")
-    upload_req.add_header("Content-Length", str(file_size))
-    upload_req.add_header("X-Goog-Upload-Offset", "0")
-    upload_req.add_header("X-Goog-Upload-Command", "upload, finalize")
-    with urllib.request.urlopen(upload_req, timeout=180) as resp:
-        result = json.load(resp)
-
-    file_name = result["file"]["name"]
-    file_uri  = result["file"]["uri"]
-
-    # 3. Wait for ACTIVE state
-    status_url = FILES_API.format(name=file_name)
-    for _ in range(20):
-        req2 = urllib.request.Request(status_url)
-        req2.add_header("x-goog-api-key", key())
-        with urllib.request.urlopen(req2, timeout=10) as r2:
-            info = json.load(r2)
-        if info.get("state") == "ACTIVE":
-            return file_uri
-        time.sleep(3)
-    return file_uri  # proceed anyway
 
 
 def transcribe_and_segment(local_path, mime_type, sec_per_img):
-    """Transcribe audio inline (base64) and split into timed beats — no Files API needed."""
+    """Transcribe audio via KIE.ai Gemini 2.5 Flash (inline base64 data URI)."""
     with open(local_path, "rb") as f:
         audio_b64 = base64.b64encode(f.read()).decode()
     instr = (
@@ -407,32 +334,15 @@ def transcribe_and_segment(local_path, mime_type, sec_per_img):
         f"3. For each beat provide:\n"
         f"   - start: start time in seconds (float, based on actual audio timing)\n"
         f"   - text: exact spoken words of that beat\n"
+        f"Return ONLY a JSON array: [{{'start': 0.0, 'text': '...'}}] — no markdown, no explanation."
     )
-    body = {
-        "contents": [{
-            "parts": [
-                {"text": instr},
-                {"inlineData": {"mimeType": mime_type, "data": audio_b64}}
-            ]
-        }],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "responseSchema": {
-                "type": "ARRAY",
-                "items": {
-                    "type": "OBJECT",
-                    "properties": {
-                        "start": {"type": "NUMBER"},
-                        "text": {"type": "STRING"}
-                    },
-                    "required": ["start", "text"]
-                }
-            },
-            "temperature": 0.1,
-        }
-    }
-    r = post_gemini(AUDIO_MODEL, body)
-    txt = r["candidates"][0]["content"]["parts"][0]["text"]
+    msgs = [{"role": "user", "content": [
+        {"type": "text", "text": instr},
+        {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{audio_b64}"}},
+    ]}]
+    txt = post_kie_text(msgs, json_mode=True, temp=0.1)
+    # strip possible markdown code fences
+    txt = re.sub(r"```[a-z]*\n?", "", txt).strip()
     return json.loads(txt)
 
 
@@ -614,12 +524,10 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 desc = ""
                 print(f"  [Char] Analyse-Fehler (ignoriert): {e}", flush=True)
-            print(f"  [Char] Upload zu Gemini Files …", flush=True)
-            uri = gemini_upload_file(img_path, "image/png")
-            meta = {"name": name, "description": desc, "safe": safe, "uri": uri, "mime": "image/png"}
+            meta = {"name": name, "description": desc, "safe": safe, "mime": "image/png"}
             json.dump(meta, open(meta_path, "w"), ensure_ascii=False)
             print(f"  [Char] Fertig. Beschreibung: {desc[:80]}", flush=True)
-            return self._send(200, {"ok": True, "name": name, "safe": safe, "uri": uri, "description": desc})
+            return self._send(200, {"ok": True, "name": name, "safe": safe, "description": desc})
 
         if p == "/api/gen_charsheet":
             name = d.get("name", "").strip()
@@ -630,15 +538,13 @@ class H(BaseHTTPRequestHandler):
             img_path  = os.path.join(CHARSHEET_DIR, f"{safe}.png")
             meta_path = os.path.join(CHARSHEET_DIR, f"{safe}.json")
             try:
-                print(f"  [Char] Generiere Character-Sheet für '{name}' …", flush=True)
+                print(f"  [Char] Generiere Character-Sheet für '{name}' via KIE …", flush=True)
                 img_bytes = gen_charsheet(name, desc)
                 open(img_path, "wb").write(img_bytes)
-                print(f"  [Char] Lade hoch zu Gemini Files …", flush=True)
-                uri = gemini_upload_file(img_path, "image/png")
-                meta = {"name": name, "description": desc, "safe": safe, "uri": uri, "mime": "image/png"}
+                meta = {"name": name, "description": desc, "safe": safe, "mime": "image/jpg"}
                 json.dump(meta, open(meta_path, "w"), ensure_ascii=False)
-                print(f"  [Char] Fertig: {uri}", flush=True)
-                return self._send(200, {"ok": True, "name": name, "safe": safe, "uri": uri})
+                print(f"  [Char] Fertig.", flush=True)
+                return self._send(200, {"ok": True, "name": name, "safe": safe})
             except Exception as e:
                 import traceback; traceback.print_exc()
                 return self._send(500, {"error": str(e)})
@@ -667,10 +573,8 @@ def main():
     port = 8000
     if "--port" in sys.argv:
         port = int(sys.argv[sys.argv.index("--port") + 1])
-    if not os.path.exists(GEMINI_KEY_FILE):
-        print("WARN: ~/.gemini_key fehlt — Transkription/Planung wird scheitern.")
     if not os.path.exists(KIE_KEY_FILE):
-        print("WARN: ~/.kie_key fehlt — Bildgenerierung wird scheitern.")
+        print("WARN: ~/.kie_key fehlt — alle KI-Funktionen werden scheitern.")
     srv = ThreadingHTTPServer(("127.0.0.1", port), H)
     print(f"Dashboard läuft: http://localhost:{port}  (Strg+C zum Beenden)")
     srv.serve_forever()
