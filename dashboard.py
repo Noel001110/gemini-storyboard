@@ -7,7 +7,8 @@ import urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-KEYFILE = os.path.expanduser("~/.gemini_key")
+GEMINI_KEY_FILE = os.path.expanduser("~/.gemini_key")
+KIE_KEY_FILE    = os.path.expanduser("~/.kie_key")
 MASTER_FILE = os.path.join(HERE, "master_prompt.txt")
 OUT_DIR = os.path.join(HERE, "generated")
 PLAN_FILE = os.path.join(OUT_DIR, "plan.json")
@@ -18,10 +19,14 @@ os.makedirs(OUT_DIR, exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(CHARSHEET_DIR, exist_ok=True)
 
-IMG_MODEL   = "gemini-3-pro-image"
+# KIE.ai — image generation
+KIE_API     = "https://api.kie.ai/api/v1/jobs"
+KIE_MODEL   = "nano-banana-2"
+
+# Gemini — text planning + audio transcription
 TEXT_MODEL  = "gemini-2.5-flash"
 AUDIO_MODEL = "gemini-2.5-flash"
-API = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent"
+GEMINI_API  = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent"
 FILES_UPLOAD = "https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable"
 FILES_API    = "https://generativelanguage.googleapis.com/v1beta/{name}"
 
@@ -34,11 +39,14 @@ def tx(step, msg):
     print(f"  [TX {step}/{TX_STATUS['total']}] {msg}", flush=True)
 
 def key():
-    return open(KEYFILE).read().strip()
+    return open(GEMINI_KEY_FILE).read().strip()
+
+def kie_key():
+    return open(KIE_KEY_FILE).read().strip()
 
 def post_gemini(model, body):
     req = urllib.request.Request(
-        API.format(model), data=json.dumps(body).encode(),
+        GEMINI_API.format(model), data=json.dumps(body).encode(),
         headers={"x-goog-api-key": key(), "Content-Type": "application/json"})
     return json.load(urllib.request.urlopen(req, timeout=240))
 
@@ -265,60 +273,81 @@ def gen_charsheet(name, description):
     raise RuntimeError("Character sheet generation failed")
 
 
-# ---------- Bildgenerierung ----------
-IMG_SIZE = "2K"
+# ---------- Bildgenerierung via KIE.ai ----------
 
 def gen_image(scene_prompt, master, out_path, char_refs=None):
-    acc = (
-        "\n\nCOLOR RULES: use flat colors on objects/props only (no gradients, no shading). "
-        "Stick figure interiors = white. Background = white (#FFFFFF). "
-        "Choose colors that are semantically fitting (grass=green, fire=orange, etc.). "
-        "Max 3–4 flat colors per frame besides black and white."
-    )
-    parts = []
+    char_hint = ""
     if char_refs:
         for cr in char_refs:
-            desc_hint = f"\n   Design spec: {cr['description']}" if cr.get("description") else ""
-            parts.append({"text": (
-                f"━━ CHARACTER DESIGN REFERENCE for '{cr['name']}' ━━\n"
-                f"The image below is a DESIGN STYLE GUIDE — not a pose template.{desc_hint}\n\n"
-                f"EXTRACT from this image: line thickness, head circle size, body proportions, "
-                f"clothing outline style, eye dots, mouth curve style.\n"
-                f"APPLY that design to draw '{cr['name']}' in whatever pose the scene below calls for.\n\n"
-                f"STRICTLY FORBIDDEN: do NOT copy the sideways angle, the walking pose, "
-                f"the specific leg/arm position, or any composition from this reference image. "
-                f"The reference shows design only — every scene gets its own pose and framing.\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            )})
-            parts.append({"fileData": {"mimeType": cr.get("mime", "image/png"), "fileUri": cr["uri"]}})
-    parts.append({"text": scene_prompt + acc + "\n\n" + master})
+            desc = cr.get("description", "")
+            name = cr.get("name", "Figur")
+            if desc:
+                char_hint += (
+                    f"\n\nCHARACTER DESIGN for '{name}': {desc}"
+                    f"\nApply this exact design in whatever pose this scene requires."
+                )
+    color_rules = (
+        "\n\nCOLOR RULES: flat colors on objects/props only — no gradients, no shading. "
+        "Stick figure interiors = white. Background = pure white (#FFFFFF). "
+        "Semantic color choices (grass=green, fire=orange, water=blue, etc.). "
+        "Max 3–4 flat colors per frame besides black and white."
+    )
+    full_prompt = scene_prompt + char_hint + color_rules + "\n\n" + master
+
+    hdrs = {"Authorization": f"Bearer {kie_key()}", "Content-Type": "application/json"}
     body = {
-        "contents": [{"parts": parts}],
-        "generationConfig": {
-            "responseModalities": ["IMAGE"],
-            "imageConfig": {"aspectRatio": "16:9", "imageSize": IMG_SIZE},
+        "model": KIE_MODEL,
+        "input": {
+            "prompt": full_prompt,
+            "aspect_ratio": "16:9",
+            "resolution": "2K",
+            "output_format": "jpg",
         },
     }
-    for attempt in range(5):
+
+    # 1. Task erstellen
+    try:
+        req = urllib.request.Request(f"{KIE_API}/createTask", data=json.dumps(body).encode(), headers=hdrs)
+        with urllib.request.urlopen(req, timeout=30) as r:
+            resp = json.load(r)
+    except urllib.error.HTTPError as e:
+        return {"ok": False, "error": f"KIE HTTP {e.code}: {e.read().decode()[:200]}"}
+
+    if resp.get("code") != 200:
+        return {"ok": False, "error": f"KIE: {resp.get('msg', str(resp))}"}
+
+    task_id = resp["data"]["taskId"]
+    print(f"  [KIE] Task {task_id} gestartet …", flush=True)
+
+    # 2. Pollen bis fertig (max ~4 min)
+    poll_url = f"{KIE_API}/recordInfo?taskId={task_id}"
+    poll_hdrs = {"Authorization": f"Bearer {kie_key()}"}
+    for _ in range(80):
+        time.sleep(3)
         try:
-            r = post_gemini(IMG_MODEL, body)
-        except urllib.error.HTTPError as e:
-            if e.code in (429, 500, 503):
-                time.sleep(min(40, 4 * 2 ** attempt)); continue
-            return {"ok": False, "error": f"HTTP {e.code}: {e.read().decode()[:200]}"}
-        cand = (r.get("candidates") or [{}])[0]
-        for p in cand.get("content", {}).get("parts", []):
-            d = p.get("inlineData") or p.get("inline_data")
-            if d:
-                open(out_path, "wb").write(base64.b64decode(d["data"]))
-                return {"ok": True}
-        fr = cand.get("finishReason", "")
-        if fr == "IMAGE_SAFETY":
-            return {"ok": False, "error": "Safety-Filter blockiert — Prompt entschärfen"}
-        if attempt < 4:
-            time.sleep(3); continue
-        return {"ok": False, "error": f"Kein Bild ({fr or 'leer'})"}
-    return {"ok": False, "error": "Rate-Limit"}
+            with urllib.request.urlopen(urllib.request.Request(poll_url, headers=poll_hdrs), timeout=15) as r2:
+                info = json.load(r2).get("data", {})
+        except Exception as e:
+            print(f"  [KIE] Poll-Fehler: {e}", flush=True); continue
+
+        state = info.get("state", "")
+        print(f"  [KIE] {state} ({info.get('progress', 0)}%)", flush=True)
+
+        if state == "success":
+            try:
+                urls = json.loads(info.get("resultJson", "{}")).get("resultUrls", [])
+            except Exception:
+                urls = []
+            if not urls:
+                return {"ok": False, "error": "KIE: kein Bild in resultUrls"}
+            with urllib.request.urlopen(urls[0], timeout=60) as img_r:
+                open(out_path, "wb").write(img_r.read())
+            return {"ok": True, "file": os.path.basename(out_path), "ts": int(time.time())}
+
+        if state == "fail":
+            return {"ok": False, "error": f"KIE fehlgeschlagen: {info.get('failMsg', 'unbekannt')}"}
+
+    return {"ok": False, "error": "KIE Timeout (>4 min)"}
 
 # ---------- Audio → Gemini Files API ----------
 
@@ -447,13 +476,14 @@ class H(BaseHTTPRequestHandler):
                 plan = json.load(open(PLAN_FILE))
                 for s in plan.get("scenes", []):
                     t = s.get("t", "").replace(":", "-")
+                    ts_map[f"{s['i']:03d}.jpg"] = f"{t}.jpg"
                     ts_map[f"{s['i']:03d}.png"] = f"{t}.png"
             except Exception:
                 pass
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w") as z:
                 for f in sorted(os.listdir(OUT_DIR)):
-                    if f.endswith(".png"):
+                    if f.endswith(".png") or f.endswith(".jpg"):
                         arcname = ts_map.get(f, f)
                         z.write(os.path.join(OUT_DIR, f), arcname)
             return self._send(200, buf.getvalue(), "application/zip")
@@ -615,10 +645,9 @@ class H(BaseHTTPRequestHandler):
 
         if p == "/api/generate_one":
             i = int(d["i"]); prompt = d.get("prompt", "")
-            fn = f"{i:03d}.png"
+            fn = f"{i:03d}.jpg"
             char_refs = load_char_refs()
             res = gen_image(prompt, read_master(), os.path.join(OUT_DIR, fn), char_refs)
-            # plan.json aktualisieren
             try:
                 plan = json.load(open(PLAN_FILE))
                 for s in plan["scenes"]:
@@ -638,8 +667,10 @@ def main():
     port = 8000
     if "--port" in sys.argv:
         port = int(sys.argv[sys.argv.index("--port") + 1])
-    if not os.path.exists(KEYFILE):
-        print("WARN: ~/.gemini_key fehlt — Bildgenerierung wird scheitern.")
+    if not os.path.exists(GEMINI_KEY_FILE):
+        print("WARN: ~/.gemini_key fehlt — Transkription/Planung wird scheitern.")
+    if not os.path.exists(KIE_KEY_FILE):
+        print("WARN: ~/.kie_key fehlt — Bildgenerierung wird scheitern.")
     srv = ThreadingHTTPServer(("127.0.0.1", port), H)
     print(f"Dashboard läuft: http://localhost:{port}  (Strg+C zum Beenden)")
     srv.serve_forever()
