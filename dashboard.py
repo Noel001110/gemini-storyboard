@@ -18,20 +18,61 @@ CHANNELS_FILE = os.path.join(CHANNELS_DIR, "channels.json")
 # {job_id: {status:"running"|"done"|"error", progress:0-100, file, source_url, error}}
 JOBS: dict = {}
 
-# ── Per-channel path helpers ──────────────────────────────────────────────────
+# ── Per-channel path helpers (channel = brand/style, holds N videos) ──────────
 def ch_dir(cid):        return os.path.join(CHANNELS_DIR, cid)
 def ch_master(cid):     return os.path.join(ch_dir(cid), "master_prompt.txt")
 def ch_vid_master(cid): return os.path.join(ch_dir(cid), "video_master_prompt.txt")
-def ch_out(cid):        return os.path.join(ch_dir(cid), "generated")
-def ch_plan(cid):       return os.path.join(ch_out(cid), "plan.json")
 def ch_sheets(cid):     return os.path.join(ch_dir(cid), "charsheets")
-def ch_uploads(cid):    return os.path.join(ch_dir(cid), "uploads")
-def ch_audio(cid):      return os.path.join(ch_uploads(cid), "audio_meta.json")
-def ch_mode(cid):       return os.path.join(ch_dir(cid), "mode.txt")  # "image" | "video"
+def ch_videos_file(cid):return os.path.join(ch_dir(cid), "videos.json")
 
-def get_mode(cid) -> str:
-    try: return open(ch_mode(cid)).read().strip()
-    except: return "image"
+# ── Per-video path helpers (one video = one script/plan/generated set) ────────
+def v_dir(cid, vid):     return os.path.join(ch_dir(cid), "videos", vid)
+def v_out(cid, vid):     return os.path.join(v_dir(cid, vid), "generated")
+def v_plan(cid, vid):    return os.path.join(v_out(cid, vid), "plan.json")
+def v_uploads(cid, vid): return os.path.join(v_dir(cid, vid), "uploads")
+def v_audio(cid, vid):   return os.path.join(v_uploads(cid, vid), "audio_meta.json")
+
+def ensure_channel(cid):
+    os.makedirs(ch_dir(cid), exist_ok=True)
+    os.makedirs(ch_sheets(cid), exist_ok=True)
+
+def ensure_video(cid, vid):
+    os.makedirs(v_out(cid, vid), exist_ok=True)
+    os.makedirs(v_uploads(cid, vid), exist_ok=True)
+
+def load_videos(cid):
+    try:    return json.load(open(ch_videos_file(cid)))
+    except: return []
+
+def save_videos(cid, videos):
+    ensure_channel(cid)
+    json.dump(videos, open(ch_videos_file(cid), "w"), ensure_ascii=False, indent=1)
+
+def create_video(cid, name, mode="image"):
+    videos = load_videos(cid)
+    safe = re.sub(r"[^\w]", "_", name.lower())[:30] or "video"
+    ids = {v["id"] for v in videos}
+    vid = safe if safe not in ids else f"{safe}_{int(time.time())%10000}"
+    entry = {"id": vid, "name": name, "mode": mode, "created_ts": int(time.time())}
+    videos.append(entry)
+    save_videos(cid, videos)
+    ensure_video(cid, vid)
+    return entry
+
+def get_video_entry(cid, vid):
+    for v in load_videos(cid):
+        if v["id"] == vid: return v
+    return None
+
+def get_video_mode(cid, vid) -> str:
+    v = get_video_entry(cid, vid)
+    return (v or {}).get("mode", "image")
+
+def set_video_mode(cid, vid, mode):
+    videos = load_videos(cid)
+    for v in videos:
+        if v["id"] == vid: v["mode"] = mode
+    save_videos(cid, videos)
 
 IMAGE_MASTER_DEFAULT = """\
 CHARACTER VISUAL (used as reference for every image):
@@ -58,10 +99,6 @@ No photorealism. No color. No mouth movement. No lip sync.
 Camera: Ken Burns zoom or slow pan matching scene emotion.
 """
 
-def ensure_channel(cid):
-    for d in [ch_out(cid), ch_sheets(cid), ch_uploads(cid)]:
-        os.makedirs(d, exist_ok=True)
-
 # ── Channel list ──────────────────────────────────────────────────────────────
 def load_channels():
     try:    return json.load(open(CHANNELS_FILE))
@@ -72,34 +109,70 @@ def save_channels(chs):
     json.dump(chs, open(CHANNELS_FILE, "w"), ensure_ascii=False, indent=1)
 
 # ── First-run migration: move flat files → channels/default/ ─────────────────
+def _legacy_mode(cid):
+    p = os.path.join(ch_dir(cid), "mode.txt")
+    try:
+        m = open(p).read().strip()
+        return m if m in ("image", "video") else "image"
+    except: return "image"
+
+def _migrate_legacy_video(cid):
+    """One-time move: old single-plan channel layout (channels/<cid>/generated/plan.json)
+    → channels/<cid>/videos/video_1/generated/plan.json. Preserves in-progress work."""
+    if os.path.exists(ch_videos_file(cid)):
+        return  # already migrated
+    legacy_out     = os.path.join(ch_dir(cid), "generated")
+    legacy_uploads = os.path.join(ch_dir(cid), "uploads")
+    # Very first ever run (pre-channel layout): merge root generated/ into legacy_out
+    if cid == "default":
+        root_gen = os.path.join(HERE, "generated")
+        if os.path.exists(root_gen) and not os.path.exists(legacy_out):
+            shutil.copytree(root_gen, legacy_out)
+        root_cs = os.path.join(HERE, "charsheets")
+        if os.path.exists(root_cs):
+            os.makedirs(ch_sheets(cid), exist_ok=True)
+            for f in os.listdir(root_cs):
+                dst = os.path.join(ch_sheets(cid), f)
+                if not os.path.exists(dst):
+                    try: shutil.copy2(os.path.join(root_cs, f), dst)
+                    except: pass
+        old_master = os.path.join(HERE, "master_prompt.txt")
+        if os.path.exists(old_master) and not os.path.exists(ch_master(cid)):
+            shutil.copy2(old_master, ch_master(cid))
+
+    has_legacy = os.path.exists(os.path.join(legacy_out, "plan.json")) or os.path.exists(legacy_out)
+    if has_legacy:
+        entry = create_video(cid, "Video 1", mode=_legacy_mode(cid))
+        vid = entry["id"]
+        if os.path.exists(legacy_out):
+            for f in os.listdir(legacy_out):
+                shutil.move(os.path.join(legacy_out, f), os.path.join(v_out(cid, vid), f))
+            shutil.rmtree(legacy_out, ignore_errors=True)
+        if os.path.exists(legacy_uploads):
+            for f in os.listdir(legacy_uploads):
+                shutil.move(os.path.join(legacy_uploads, f), os.path.join(v_uploads(cid, vid), f))
+            shutil.rmtree(legacy_uploads, ignore_errors=True)
+        # fix audio_meta.json's stored absolute path to point at new location
+        am = v_audio(cid, vid)
+        if os.path.exists(am):
+            try:
+                meta = json.load(open(am))
+                new_path = os.path.join(v_uploads(cid, vid), os.path.basename(meta.get("path", "")))
+                if os.path.exists(new_path):
+                    meta["path"] = new_path
+                    json.dump(meta, open(am, "w"))
+            except: pass
+        print(f"  [Migrate] Kanal '{cid}': altes Layout → 'Video 1' ({vid})", flush=True)
+    else:
+        save_videos(cid, [])
+
 def init_channels():
     os.makedirs(CHANNELS_DIR, exist_ok=True)
     if not os.path.exists(CHANNELS_FILE):
         save_channels([{"id": "default", "name": "Kanal 1"}])
-        ensure_channel("default")
-        # copy old master_prompt.txt
-        old_master = os.path.join(HERE, "master_prompt.txt")
-        if os.path.exists(old_master) and not os.path.exists(ch_master("default")):
-            shutil.copy2(old_master, ch_master("default"))
-        # copy old generated/
-        old_gen = os.path.join(HERE, "generated")
-        if os.path.exists(old_gen):
-            for f in os.listdir(old_gen):
-                dst = os.path.join(ch_out("default"), f)
-                if not os.path.exists(dst):
-                    try: shutil.copy2(os.path.join(old_gen, f), dst)
-                    except: pass
-        # copy old charsheets/
-        old_cs = os.path.join(HERE, "charsheets")
-        if os.path.exists(old_cs):
-            for f in os.listdir(old_cs):
-                dst = os.path.join(ch_sheets("default"), f)
-                if not os.path.exists(dst):
-                    try: shutil.copy2(os.path.join(old_cs, f), dst)
-                    except: pass
-    else:
-        for ch in load_channels():
-            ensure_channel(ch["id"])
+    for ch in load_channels():
+        ensure_channel(ch["id"])
+        _migrate_legacy_video(ch["id"])
 
 init_channels()
 
@@ -108,6 +181,10 @@ KIE_API      = "https://api.kie.ai/api/v1/jobs"
 KIE_MODEL    = "nano-banana-2"
 # KIE.ai — text + audio (OpenAI-compatible)
 KIE_CHAT_URL = "https://api.kie.ai/gemini-2.5-flash/v1/chat/completions"
+# KIE.ai — native Gemini format (contents/parts), used for gemini-3-5-flash which
+# supports thinkingConfig.thinkingLevel — helps counteract "lazy"/generic output on
+# later items in a batch. Verified working 2026-07-02 against the real API.
+GEMINI_NATIVE_URL = "https://api.kie.ai/gemini/v1/models/{model}:generateContent"
 
 # Shared transcription status (thread-safe via GIL for simple dict ops)
 TX_STATUS = {"step": 0, "total": 4, "msg": "Bereit", "running": False, "error": ""}
@@ -138,6 +215,42 @@ def post_kie_text(messages, json_mode=False, temp=0.7):
     with urllib.request.urlopen(req, timeout=240) as r:
         resp = json.load(r)
     return resp["choices"][0]["message"]["content"]
+
+def post_gemini_native(messages, json_mode=False, temp=0.7, model="gemini-3-5-flash",
+                        thinking_level="high"):
+    """KIE.ai native Gemini format (gemini-3-5-flash) — supports thinkingConfig for
+    more consistent reasoning on later items in a batch. `messages` uses the same
+    [{"role","content"}] shape as post_kie_text() for drop-in compatibility;
+    role "system" is folded into the first user turn since Gemini has no system role
+    in this endpoint's contents array."""
+    contents = []
+    system_txt = ""
+    for m in messages:
+        if m["role"] == "system":
+            system_txt += m["content"] + "\n\n"
+            continue
+        role = "model" if m["role"] == "assistant" else "user"
+        text = (system_txt + m["content"]) if (role == "user" and system_txt) else m["content"]
+        if role == "user": system_txt = ""
+        contents.append({"role": role, "parts": [{"text": text}]})
+
+    gen_cfg = {"temperature": temp, "thinkingConfig": {"thinkingLevel": thinking_level}}
+    if json_mode:
+        gen_cfg["responseMimeType"] = "application/json"
+    body = {"stream": False, "contents": contents, "generationConfig": gen_cfg}
+    hdrs = {
+        "Authorization": f"Bearer {kie_key()}",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Origin": "https://kie.ai",
+        "Referer": "https://kie.ai/",
+        "Accept": "application/json, text/plain, */*",
+    }
+    url = GEMINI_NATIVE_URL.format(model=model)
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=hdrs)
+    with urllib.request.urlopen(req, timeout=240) as r:
+        resp = json.load(r)
+    return resp["candidates"][0]["content"]["parts"][0]["text"]
 
 # ---------- Master-Prompt ----------
 def read_master(cid="default"):
@@ -238,83 +351,182 @@ def fmt_t(s):
 # ---------- Beats -> visuelle Prompts (2-stufig: Analyse + Prompts) ----------
 
 def analyze_script(beats):
-    """Stage 1 — map recurring locations, characters, props and callbacks across the whole script."""
+    """Stage 1 — read the ENTIRE script once and extract a structured entity map
+    (locations, characters, recurring symbols, emotional arc, callbacks) that gets
+    passed into every downstream prompt-generation call. Prevents scene-by-scene
+    isolated interpretation."""
     instr = (
-        "Analyze this narration script (JSON array of text beats, 0-indexed). Return a JSON object with:\n"
-        "- locations: array of {name: string, beats: [indices], props: [1-3 minimal background props as short strings]} "
-        "— distinct settings in order of first appearance\n"
-        "- characters: array of {name: string, description: string, beats: [indices]} "
-        "— recurring named people with a brief visual description (clothing, hair, posture)\n"
-        "- props: array of string — important recurring objects or symbols\n"
-        "- arc: string — 3-word emotional arc (e.g. 'despair → hope → triumph')\n"
-        "- callbacks: array of {at: index, references: index} — beats that visually reference an earlier beat\n\n"
+        "You are analyzing a complete video narration script (JSON array of text beats, "
+        "0-indexed) for a visual-prompt generation pipeline. Read the ENTIRE script once "
+        "before answering. Extract ONLY facts that actually appear or are clearly implied "
+        "in the script — invent nothing.\n\n"
+        "Return this exact JSON object:\n"
+        "{\n"
+        '  "locations": [{"id": "loc_01", "name": string, "description": string, '
+        '"first_appears_beat": N}],\n'
+        '  "characters": [{"id": "char_01", "name_or_role": string, "visual_description": '
+        'string, "anonymize": bool, "first_appears_beat": N}],\n'
+        '  "recurring_symbols": [{"id": "sym_01", "object": string, "meaning": string, '
+        '"beats": [N, N]}],\n'
+        '  "emotional_arc": {"opening": "ONE word", "midpoint": "ONE word", "resolution": "ONE word"},\n'
+        '  "callbacks": [{"from_beat": N, "to_beat": M, "shared_element": string}]\n'
+        "}\n\n"
+        'Rule: set "anonymize": true for every real, identifiable named person (public '
+        "figures, named victims/individuals) — these get depicted later only as a "
+        "silhouette or symbolic stand-in, never named or shown photorealistically.\n\n"
         "BEATS:\n" + json.dumps(beats, ensure_ascii=False)
     )
+    for attempt in (1, 2):
+        try:
+            txt = post_kie_text([{"role": "user", "content": instr}], json_mode=True, temp=0.2)
+            return json.loads(txt)
+        except Exception as e:
+            print(f"Analyse-Fehler (Versuch {attempt}):", e)
+    return {}
+
+IMAGE_PROMPT_CHUNK_SIZE = 9    # scenes per LLM call — same reasoning as video: avoid context degradation
+IMAGE_PROMPT_MIN_LEN    = 220  # chars — stills need less than video (no camera-move description) but still concrete
+
+_IMAGE_PROMPT_FEWSHOT = """\
+EXAMPLE — TOO SHORT / MISSES THE CONTENT (do not do this):
+Line: "Reports suggested that people around him were monitored before his murder."
+Bad image_prompt: "Dark ominous scene, surveillance concept"
+→ Wrong: doesn't say WHO was monitored, doesn't show the surveillance mechanism, loses the actual fact.
+
+EXAMPLE — CORRECT:
+Line: "Reports suggested that people around him were monitored before his murder."
+core_statement: "The target's inner circle was surveilled before his death."
+concrete_entity: "char_target (anonymized), sym_surveillance_device"
+Good image_prompt: "An empty chair in a press room, a phone resting on the floor beside it,
+a faint glow on the phone screen suggesting active surveillance, dim somber lighting, nobody
+visible in frame, composition emphasizing absence and unease"
+→ Why better: translates "inner circle monitored" into a concrete object (glowing phone =
+surveillance symbol), and is specific enough to define setting/light/focus — not just a mood word.\
+"""
+
+def _validate_image_prompt_entry(entry: dict) -> bool:
+    ip = (entry.get("image_prompt") or "").strip()
+    if len(ip) < IMAGE_PROMPT_MIN_LEN:
+        return False
+    entity = (entry.get("concrete_entity") or "").strip().lower()
+    if entity and entity not in ("none", "n/a", "-"):
+        words = [w for w in re.findall(r"[a-zA-Z]{4,}", entity) if w not in ("char", "loc", "sym")]
+        if words and not any(w.lower() in ip.lower() for w in words):
+            return False
+    return True
+
+def _image_prompt_chunk(chunk_beats: list, chunk_offset: int, total: int,
+                         analysis_ctx: str) -> list:
+    """One LLM call for a small chunk of scenes (still images — no story-phase/camera-move
+    logic like video; instead forces explicit character-consistency notes, since stills have
+    no 'last frame of previous clip' anchor to inherit continuity from)."""
+    numbered = "\n".join(f"{chunk_offset+i+1}. {t}" for i, t in enumerate(chunk_beats))
+
+    instr = f"""\
+You are a storyboard director turning narration into single still images. You receive a
+structural ANALYSIS of the full script and a CHUNK of consecutive narrator lines. Work
+through each line using the forced fields below — do not skip straight to the final prompt.
+
+ANALYSIS (entities, locations, symbols, emotional arc, callbacks — extracted from the FULL script):
+{analysis_ctx}
+
+{_IMAGE_PROMPT_FEWSHOT}
+
+For EACH line in the chunk below, produce an object with ALL of these fields, in order:
+{{
+  "scene": N,
+  "core_statement": "What is this line actually claiming/showing? One sentence.",
+  "concrete_entity": "The EXACT entity id from ANALYSIS (locations/characters/recurring_symbols)
+                       relevant here. If none fits, name the new concrete thing from the line
+                       itself (person/place/object/technology). Abstract metaphor ONLY if the
+                       line truly has no concrete referent.",
+  "callback_check": "Does ANALYSIS.callbacks say this scene references an earlier one? If yes,
+                      name the recurring element that MUST appear in image_prompt. Else 'none'.",
+  "character_consistency": "Since this is a single still with no motion/continuity anchor from
+                             a previous clip, restate exactly how the character(s) must look
+                             (from ANALYSIS.characters visual_description) so every frame stays
+                             identical — head shape, proportions, distinguishing features.",
+  "image_prompt": "The final image text. MUST visibly include concrete_entity AND the
+                    callback_check element (if not 'none'). MUST reflect character_consistency
+                    exactly if a character appears. NO art-style words here (line weight, color
+                    palette etc. — that's applied separately from the master prompt). Must
+                    explicitly name: (1) the concrete main subject, (2) the setting/location,
+                    (3) the composition/framing. A prompt that only describes a vague mood
+                    without these three elements is invalid. Minimum {IMAGE_PROMPT_MIN_LEN} characters."
+}}
+
+HARD RULE: if a line names a concrete person, place, or technology, image_prompt MUST show
+exactly that — check this yourself against your own concrete_entity field before writing it.
+
+SENSITIVE content (violence/death/abuse/trafficking): tasteful symbolism only, never graphic.
+
+NARRATOR LINES IN THIS CHUNK:
+{numbered}
+
+Return a JSON array of {len(chunk_beats)} objects, one per line above, in the same order.
+"""
+    txt = post_gemini_native([{"role": "user", "content": instr}], json_mode=True, temp=0.6)
+    arr = json.loads(txt)
+    if isinstance(arr, dict):
+        for v in arr.values():
+            if isinstance(v, list) and len(v) == len(chunk_beats):
+                arr = v; break
+    if not isinstance(arr, list) or len(arr) != len(chunk_beats):
+        raise ValueError(f"unexpected chunk response shape ({type(arr)}, len={len(arr) if isinstance(arr,list) else '?'})")
+    return arr
+
+def _image_prompt_single_retry(beat_text: str, beat_i: int, total: int, analysis_ctx: str) -> dict:
+    """Focused single-scene retry for entries that failed validation in the batch call."""
     try:
-        txt = post_kie_text([{"role": "user", "content": instr}], json_mode=True, temp=0.2)
-        return json.loads(txt)
+        result = _image_prompt_chunk([beat_text], beat_i, total, analysis_ctx)
+        return result[0]
     except Exception as e:
-        print("Analyse-Fehler:", e)
-        return {}
+        print(f"  [Plan] Bild-Einzel-Retry Szene {beat_i} fehlgeschlagen: {e}", flush=True)
+        return {
+            "scene": beat_i + 1, "concrete_entity": "",
+            "image_prompt": f"Scene illustrating: {beat_text[:80]}. Simple, clear composition.",
+        }
 
 def visual_prompts(scenes, master, analysis=None):
+    """Generate all still-image prompts, chunked (not all-in-one) with forced intermediate
+    reasoning fields and a validation+retry pass — same structure as video_prompts_batch(),
+    adapted for stills (no story-phase/camera-move logic, explicit character-consistency
+    field instead since there's no chain-extend anchor between separate images).
+
+    Returns list of prompt strings, one per scene, same order as scenes. Style (master
+    prompt) is NOT included here — it's appended separately in _build_image_prompt().
+    """
     beats = [s["text"] for s in scenes]
+    total = len(beats)
+    if total == 0:
+        return []
 
-    # Stage 1 — story structure analysis (skip if already provided)
     if analysis is None:
-        print(f"  [Plan] Analysiere {len(beats)} Beats …", flush=True)
+        print(f"  [Plan] Analysiere {total} Beats …", flush=True)
         analysis = analyze_script(beats)
-    analysis_ctx = json.dumps(analysis, ensure_ascii=False, indent=1) if analysis else ""
+    analysis_ctx = json.dumps(analysis, ensure_ascii=False, indent=1) if analysis else "{}"
 
-    # Stage 2 — generate per-beat image prompts with full continuity context
-    print(f"  [Plan] Generiere Bild-Prompts …", flush=True)
-    instr = (
-        "You are a storyboard director for an ASDF Movie-style stick-figure animation.\n"
-        "Turn this narration into ONE visual scene description per beat.\n\n"
-    )
-    if analysis_ctx:
-        arc = analysis.get("arc", "")
-        instr += (
-            "STORY STRUCTURE — use this for visual continuity:\n" + analysis_ctx + "\n\n"
-            "CONTINUITY RULES (strictly enforced):\n"
-            "1. Beats sharing the same LOCATION: keep background props consistent (same horizon line, same door, same props).\n"
-            "2. Character 'Yeonmi' looks identical every frame: circle head, bob-haircut side lines, trapezoid skirt.\n"
-            "3. CALLBACK beats (see callbacks above): echo the earlier scene's framing or prop explicitly.\n"
-            "4. Emotional arc is '" + arc + "' — let the color mood shift accordingly across the sequence.\n\n"
-        )
-    instr += (
-        "PER-SCENE RULES:\n"
-        "- Max ~40 words per description.\n"
-        "- Describe: subject + action + composition + emotion.\n"
-        "- COLOR: choose flat colors that feel semantically right for objects/props in this scene "
-        "(e.g. grass=green, car=red, fire=orange). Use 2–4 flat colors max. "
-        "Stick figure interiors stay white. Background stays white. "
-        "Keep the same color for the same object across all scenes.\n"
-        "- SENSITIVE content (violence / death / abuse / trafficking / child suffering): tasteful symbolism only — never graphic.\n"
-        "- Do NOT describe art style (that is in the master prompt). Only describe scene content.\n\n"
-        "CONTINUITY MARKERS (mandatory in your output):\n"
-        "- First beat in a new location → begin prompt with: [NEW SCENE: location name | prop1, prop2, prop3]\n"
-        "  Example: [NEW SCENE: kitchen | horizontal floor line, small square window upper-right]\n"
-        "- Subsequent beats in the SAME location → begin prompt with: [SAME SCENE: location name | prop1, prop2]\n"
-        "  This tells the image model to keep those exact background elements.\n"
-        "- If a beat directly continues an action from the previous beat → append at end: [CONT ACTION]\n"
-        "These markers are part of the prompt text and will be sent to the image model.\n\n"
-        "ART STYLE context (stick-figure ASDF Movie style — follow exactly, no deviations):\n" + master + "\n\n"
-        "BEATS:\n" + json.dumps(beats, ensure_ascii=False) + "\n\n"
-        "Return a JSON array of strings, one per beat, same order and same length as BEATS."
-    )
-    try:
-        txt = post_kie_text([{"role": "user", "content": instr}], json_mode=True, temp=0.7)
-        arr = json.loads(txt)
-        if isinstance(arr, list) and len(arr) == len(beats):
-            return [str(x) for x in arr]
-        # unwrap if nested (some models return {"prompts": [...]})
-        for v in arr.values() if isinstance(arr, dict) else []:
-            if isinstance(v, list) and len(v) == len(beats):
-                return [str(x) for x in v]
-    except Exception as e:
-        print("Planner-Fehler:", e)
-    return beats  # Fallback
+    prompts: list[str] = []
+    chunks = [beats[i:i+IMAGE_PROMPT_CHUNK_SIZE] for i in range(0, total, IMAGE_PROMPT_CHUNK_SIZE)]
+    offset = 0
+    for ci, chunk in enumerate(chunks):
+        print(f"  [Plan] Bild-Chunk {ci+1}/{len(chunks)} ({len(chunk)} Szenen) …", flush=True)
+        try:
+            entries = _image_prompt_chunk(chunk, offset, total, analysis_ctx)
+        except Exception as e:
+            print(f"  [Plan] Bild-Chunk-Fehler: {e} — Fallback für diesen Chunk", flush=True)
+            entries = [{"image_prompt": f"Scene illustrating: {t[:80]}. Simple, clear composition.",
+                        "concrete_entity": ""} for t in chunk]
+
+        for j, entry in enumerate(entries):
+            beat_i = offset + j
+            if not _validate_image_prompt_entry(entry):
+                print(f"  [Plan] Szene {beat_i} zu kurz/generisch — Einzel-Retry …", flush=True)
+                entry = _image_prompt_single_retry(beats[beat_i], beat_i, total, analysis_ctx)
+            prompts.append(str(entry.get("image_prompt") or f"Scene illustrating: {beats[beat_i][:80]}."))
+        offset += len(chunk)
+
+    return prompts
 
 def story_phase(i: int, total: int) -> str:
     return (
@@ -324,88 +536,182 @@ def story_phase(i: int, total: int) -> str:
         "RESOLUTION"
     )
 
-def video_prompts_batch(scenes: list, vid_master: str, has_char_ref: bool = False) -> list:
-    """Single LLM call to generate all T2V video prompts with full story context.
+VIDEO_PROMPT_CHUNK_SIZE = 9   # scenes per LLM call — keeps analysis focus from degrading over long batches
+VIDEO_PROMPT_MIN_LEN    = 280  # chars — forces setting/light/camera to be spelled out, not just a mood word
 
-    Returns list of prompt strings, one per scene, same order as scenes.
-    """
-    beats = [s["text"] for s in scenes]
-    total = len(beats)
-    phase_label = lambda i: story_phase(i, total)
-    numbered_beats = "\n".join(
-        f"{i+1}. [{phase_label(i)}] {t}" for i, t in enumerate(beats)
+_VIDEO_PROMPT_FEWSHOT = """\
+EXAMPLE — TOO SHORT / MISSES THE CONTENT (do not do this):
+Line: "Reports suggested that people around him were monitored before his murder."
+Bad video_prompt: "Dark ominous scene, surveillance concept, cinematic lighting"
+→ Wrong: doesn't say WHO was monitored, doesn't show the surveillance mechanism, loses the actual fact in the line.
+
+EXAMPLE — CORRECT:
+Line: "Reports suggested that people around him were monitored before his murder."
+core_statement: "The target's inner circle was surveilled before his death."
+concrete_entity: "char_target (anonymized), sym_surveillance_device"
+Good video_prompt: "An empty chair in a press room, a phone resting on the floor beside it,
+a faint red glow pulsing from the phone screen suggesting active surveillance, dim somber
+lighting from a single overhead source, nobody visible in frame, close-up composition
+emphasizing absence and unease"
+→ Why better: translates "inner circle monitored" into a concrete object (glowing phone =
+surveillance symbol), AND is long enough to define setting/light/framing — not just a mood word.\
+"""
+
+def _validate_video_prompt_entry(entry: dict) -> bool:
+    vp = (entry.get("video_prompt") or "").strip()
+    if len(vp) < VIDEO_PROMPT_MIN_LEN:
+        return False
+    entity = (entry.get("concrete_entity") or "").strip().lower()
+    if entity and entity not in ("none", "n/a", "-"):
+        # crude heuristic: does at least one meaningful word from concrete_entity show up in the prompt?
+        words = [w for w in re.findall(r"[a-zA-Z]{4,}", entity) if w not in ("char", "loc", "sym")]
+        if words and not any(w.lower() in vp.lower() for w in words):
+            return False
+    return True
+
+def _video_prompt_chunk(chunk_beats: list, chunk_offset: int, total: int,
+                         analysis_ctx: str, vid_master: str, prev_prompts: list,
+                         has_char_ref: bool) -> list:
+    """One LLM call for a small chunk of scenes (8-10), forcing intermediate reasoning
+    fields per scene before the final video_prompt text. Returns list of entry dicts."""
+    numbered = "\n".join(
+        f"{chunk_offset+i+1}. [{story_phase(chunk_offset+i, total)}] {t}"
+        for i, t in enumerate(chunk_beats)
     )
-
     ref_note = (
         "A character reference image will be supplied to the video model — "
         "focus prompts on ACTION and MOVEMENT, not appearance."
         if has_char_ref else
         "No reference image — describe character appearance briefly in each prompt as defined in CHARACTER CONTEXT."
     )
+    prev_ctx = (
+        "PREVIOUSLY GENERATED PROMPTS (last 2, for visual continuity — reuse the same "
+        "visual representation for any recurring entity shown here):\n" +
+        "\n".join(f"  • {p[:160]}" for p in prev_prompts[-2:])
+        if prev_prompts else ""
+    )
 
     instr = f"""\
-You are a video scene director for a documentary/factual video. Read the ENTIRE script below
-first and identify what it is actually ABOUT — the real people, organizations, places,
-technologies, and events it names — before writing a single prompt.
+You are a video scene director for a documentary/factual video. You receive a structural
+ANALYSIS of the full script and a CHUNK of consecutive narrator lines. Work through each
+line in order using the forced fields below — do not skip straight to the final prompt text.
 
-STEP 1 — UNDERSTAND THE SUBJECT (do this silently before writing prompts):
-Read all narrator lines below as one continuous text. Identify:
-- the central subject/topic (what is this documentary actually about?)
-- recurring concrete entities: named people, organizations, places, objects, technologies
-- which entity is being referenced at each point in the timeline
+ANALYSIS (entities, locations, symbols, emotional arc, callbacks — extracted from the FULL script):
+{analysis_ctx}
 
-STEP 2 — GROUND EVERY PROMPT IN THE ACTUAL SUBJECT, NOT A GENERIC INTERPRETATION:
-This is the most important rule. Do NOT default to abstract metaphor (a figure stumbling,
-spinning, pointing at a box) when the line names something concrete. If a line mentions a
-specific person, place, organization, or technology, show THAT thing — or a clear visual
-stand-in for it (e.g. a phone screen with a suspicious message, a world map with marked
-locations, a building exterior, a document/code on a screen, a person matching a described
-role at a desk). Only fall back to abstract gesture/symbol when a line is pure commentary
-with no concrete referent (e.g. "That sounds simple. Even convincing.").
+{prev_ctx}
 
-STEP 3 — VISUAL CONSISTENCY FOR RECURRING ENTITIES:
-Once you depict an entity (a place, an organization, an object), reuse the SAME visual
-representation every time that entity reappears later in the script. This builds a visual
-language the viewer learns to recognize, instead of a new random image each time.
-
-CHARACTER & STYLE CONTEXT (visual style only — follow exactly, do not deviate):
-{vid_master.strip()[:3000]}
+CHARACTER & STYLE CONTEXT (visual style only — do not repeat this in video_prompt, style is applied separately):
+{vid_master.strip()}
 
 REFERENCE IMAGE: {ref_note}
 
-RULES FOR EACH PROMPT:
-1. SUBJECT FIRST — what concrete thing from STEP 1/2 is this line actually about? Show it.
-2. ACTION/CAMERA MOVEMENT — what happens or moves in the frame. No speaking, no lip sync.
-3. CAMERA — one deliberate move: zoom-in=revelation | zoom-out=scale | pan-right=progress | pan-left=past | static=tension
-4. CONTINUITY — reuse visual anchors per STEP 3 when the same entity recurs.
-5. STYLE — apply only what's defined in CHARACTER & STYLE CONTEXT above.
-6. LENGTH — 55–80 words per prompt. Dense, specific. No preamble, no meta-commentary.
+{_VIDEO_PROMPT_FEWSHOT}
 
-FULL NARRATOR SCRIPT (read completely before writing any prompt):
-{numbered_beats}
+For EACH line in the chunk below, produce an object with ALL of these fields, in order:
+{{
+  "scene": N,
+  "core_statement": "What is this line actually claiming/showing? One sentence.",
+  "concrete_entity": "The EXACT entity id from ANALYSIS (locations/characters/recurring_symbols)
+                       relevant here. If none fits, name the new concrete thing from the line
+                       itself (person/place/object/technology). Abstract metaphor ONLY if the
+                       line truly has no concrete referent.",
+  "callback_check": "Does ANALYSIS.callbacks say this scene references an earlier one? If yes,
+                      name the recurring element that MUST appear in video_prompt. Else 'none'.",
+  "shot_framing": "Derive shot size ONLY from the story phase tag:
+                    OPENING -> wide/establishing shot
+                    RISING ACTION -> medium shot, light tension cues in frame
+                    CLIMAX -> close-up, high intensity, tight framing
+                    RESOLUTION -> wide/distanced, calmer composition",
+  "video_prompt": "The final image text. MUST visibly include concrete_entity AND the
+                    callback_check element (if not 'none'). MUST implement shot_framing.
+                    NO style text here — style is appended separately after this call.
+                    Must explicitly name: (1) the concrete main subject, (2) the setting/
+                    location, (3) a lighting mood, (4) the camera angle/shot size.
+                    A prompt that only describes a vague mood without these four elements
+                    is invalid. Minimum {VIDEO_PROMPT_MIN_LEN} characters."
+}}
 
-Return a JSON array of {total} strings — one prompt per line, same order as the script above.
+HARD RULE: if a line names a concrete person, place, or technology, video_prompt MUST show
+exactly that — check this yourself against your own concrete_entity field before writing it.
+
+NARRATOR LINES IN THIS CHUNK:
+{numbered}
+
+Return a JSON array of {len(chunk_beats)} objects, one per line above, in the same order.
 """
-    print(f"  [VidPrompt] Batch-Generierung: {total} Szenen in einem Call …", flush=True)
+    # gemini-3-5-flash + thinkingLevel=high: counteracts the "gets lazy/generic on
+    # later batch items" behavior seen with 2.5-flash on long scripts.
+    txt = post_gemini_native([{"role": "user", "content": instr}], json_mode=True, temp=0.45)
+    arr = json.loads(txt)
+    if isinstance(arr, dict):
+        for v in arr.values():
+            if isinstance(v, list) and len(v) == len(chunk_beats):
+                arr = v; break
+    if not isinstance(arr, list) or len(arr) != len(chunk_beats):
+        raise ValueError(f"unexpected chunk response shape ({type(arr)}, len={len(arr) if isinstance(arr,list) else '?'})")
+    return arr
+
+def _video_prompt_single_retry(beat_text: str, beat_i: int, total: int,
+                                analysis_ctx: str, vid_master: str, prev_prompts: list,
+                                has_char_ref: bool) -> dict:
+    """Focused single-scene retry for entries that failed validation in the batch call —
+    smaller call, less room for the model to get 'lazy'."""
     try:
-        txt = post_kie_text([{"role": "user", "content": instr}], json_mode=True, temp=0.45)
-        arr = json.loads(txt)
-        # Handle direct list or wrapped {"prompts": [...]} etc.
-        if isinstance(arr, list) and len(arr) == total:
-            return [str(x) for x in arr]
-        for v in (arr.values() if isinstance(arr, dict) else []):
-            if isinstance(v, list) and len(v) == total:
-                return [str(x) for x in v]
-        print("  [VidPrompt] Unerwartetes Format, nutze Fallback", flush=True)
+        result = _video_prompt_chunk([beat_text], beat_i, total, analysis_ctx, vid_master,
+                                      prev_prompts, has_char_ref)
+        return result[0]
     except Exception as e:
-        print(f"  [VidPrompt] Batch-Fehler: {e}", flush=True)
-    # Fallback: simple per-scene description from the text (style is appended at
-    # submission time regardless, see _build_video_prompt)
-    return [
-        f"Scene illustrating: {s['text'][:80]}. "
-        "Character center frame, deliberate gesture matching the scene energy. Camera slow zoom-in."
-        for s in scenes
-    ]
+        print(f"  [VidPrompt] Einzel-Retry Szene {beat_i} fehlgeschlagen: {e}", flush=True)
+        return {
+            "scene": beat_i + 1, "concrete_entity": "",
+            "video_prompt": f"Scene illustrating: {beat_text[:80]}. "
+                             "Character center frame, deliberate gesture matching the scene energy. Camera slow zoom-in.",
+        }
+
+def video_prompts_batch(scenes: list, vid_master: str, has_char_ref: bool = False) -> list:
+    """Generate all T2V video prompts, chunked (not all-in-one) to avoid context
+    degradation over long scripts, with forced intermediate reasoning fields and a
+    validation+retry pass for entries that come back too short/generic.
+
+    Returns list of prompt strings, one per scene, same order as scenes.
+    """
+    beats = [s["text"] for s in scenes]
+    total = len(beats)
+    if total == 0:
+        return []
+
+    print(f"  [VidPrompt] Analysiere {total} Szenen …", flush=True)
+    analysis = analyze_script(beats)
+    analysis_ctx = json.dumps(analysis, ensure_ascii=False, indent=1) if analysis else "{}"
+
+    prompts: list[str] = []
+    prev_prompts: list[str] = []
+    chunks = [beats[i:i+VIDEO_PROMPT_CHUNK_SIZE] for i in range(0, total, VIDEO_PROMPT_CHUNK_SIZE)]
+    offset = 0
+    for ci, chunk in enumerate(chunks):
+        print(f"  [VidPrompt] Chunk {ci+1}/{len(chunks)} ({len(chunk)} Szenen) …", flush=True)
+        try:
+            entries = _video_prompt_chunk(chunk, offset, total, analysis_ctx, vid_master,
+                                           prev_prompts, has_char_ref)
+        except Exception as e:
+            print(f"  [VidPrompt] Chunk-Fehler: {e} — Fallback für diesen Chunk", flush=True)
+            entries = [{"video_prompt": f"Scene illustrating: {t[:80]}. "
+                        "Character center frame, deliberate gesture matching the scene energy. Camera slow zoom-in.",
+                        "concrete_entity": ""} for t in chunk]
+
+        for j, entry in enumerate(entries):
+            beat_i = offset + j
+            if not _validate_video_prompt_entry(entry):
+                print(f"  [VidPrompt] Szene {beat_i} zu kurz/generisch — Einzel-Retry …", flush=True)
+                entry = _video_prompt_single_retry(beats[beat_i], beat_i, total, analysis_ctx,
+                                                    vid_master, prev_prompts, has_char_ref)
+            vp = str(entry.get("video_prompt") or f"Scene illustrating: {beats[beat_i][:80]}.")
+            prompts.append(vp)
+            prev_prompts.append(vp)
+        offset += len(chunk)
+
+    return prompts
 
 # ---------- Character sheets ----------
 
@@ -442,7 +748,7 @@ def analyze_char_image(img_bytes, mime="image/png"):
     return post_kie_text(msgs, temp=0.2).strip()
 
 
-def gen_charsheet(name, description):
+def gen_charsheet(cid, name, description):
     """Generate a character reference sheet image and return the bytes."""
     prompt = (
         f"CHARACTER REFERENCE SHEET — '{name}'.\n"
@@ -456,7 +762,7 @@ def gen_charsheet(name, description):
         f"White background (#FFFFFF), black ink only, medium-weight lines, no shading. "
         f"Label each pose clearly below in small neat text."
     )
-    tmp = os.path.join(ch_sheets("default"), f"_tmp_{re.sub(r'[^\\w]','_',name)}.jpg")
+    tmp = os.path.join(ch_sheets(cid), f"_tmp_{re.sub(r'[^\\w]','_',name)}.jpg")
     res = gen_image(prompt, "", tmp)
     if res["ok"]:
         data = open(tmp, "rb").read()
@@ -549,7 +855,7 @@ def _image_job_worker(job_id: str, task_id: str, out_path: str, plan_path: str, 
 
 
 def _veo_job_worker(job_id: str, task_id: str, scene: dict,
-                    out_path: str, plan_path: str, cid: str, video_prompt: str, chain_len: int = 0):
+                    out_path: str, plan_path: str, cid: str, vid: str, video_prompt: str, chain_len: int = 0):
     """Background thread: polls Veo, downloads video, mixes audio, updates plan."""
     print(f"  [Veo] Worker {job_id} / task {task_id} gestartet", flush=True)
     JOBS[job_id] = {"status": "running", "progress": 20, "file": None, "error": None}
@@ -562,7 +868,7 @@ def _veo_job_worker(job_id: str, task_id: str, scene: dict,
     JOBS[job_id]["progress"] = 80
     video_url = poll["video_url"]
     i = scene["i"]
-    fn_silent = os.path.join(ch_out(cid), f"{i:03d}_veo_silent.mp4")
+    fn_silent = os.path.join(v_out(cid, vid), f"{i:03d}_veo_silent.mp4")
     fn_final  = os.path.basename(out_path)
 
     # Download
@@ -578,7 +884,7 @@ def _veo_job_worker(job_id: str, task_id: str, scene: dict,
     # Audio mix
     has_audio = False
     try:
-        audio_meta = json.load(open(ch_audio(cid)))
+        audio_meta = json.load(open(v_audio(cid, vid)))
         audio_path = audio_meta.get("path", "")
         if os.path.exists(audio_path):
             import subprocess
@@ -754,14 +1060,26 @@ def make_t2v_prompt(scene_text: str, scene_i: int, total_scenes: int,
         + (f"{prev_context}\n\n" if prev_context else "") +
         "Write the video prompt for THIS line. If it names a concrete person, place, "
         "organization, or technology, show that thing (or a clear visual stand-in) — do not "
-        "default to an abstract gesture unless the line truly has no concrete referent."
+        "default to an abstract gesture unless the line truly has no concrete referent.\n\n"
+        f"The prompt must be at least {VIDEO_PROMPT_MIN_LEN} characters and explicitly name: "
+        "(1) the concrete main subject, (2) the setting/location, (3) a lighting mood, "
+        "(4) the camera angle/shot size. A vague mood description without these four "
+        "elements is not acceptable."
     )
-    try:
-        result = post_kie_text([
+    def _call():
+        result = post_gemini_native([
             {"role": "system", "content": T2V_PROMPT_SYSTEM},
             {"role": "user",   "content": user_msg},
         ], temp=0.40)
         return result.strip()
+    try:
+        result = _call()
+        if len(result) < VIDEO_PROMPT_MIN_LEN:
+            print(f"  [T2V] Prompt zu kurz ({len(result)} Zeichen) — ein Retry …", flush=True)
+            retry = _call()
+            if len(retry) > len(result):
+                result = retry
+        return result
     except Exception:
         return (
             f"Scene illustrating: {scene_text[:80]}. "
@@ -1044,16 +1362,19 @@ class H(BaseHTTPRequestHandler):
         p = urlparse(self.path).path
         qs = parse_qs(urlparse(self.path).query)
         cid = qs.get("channel", ["default"])[0]
+        vid = qs.get("video", [""])[0]
         if p == "/":
             return self._send(200, open(os.path.join(HERE, "dashboard.html"), encoding="utf-8").read(), "text/html; charset=utf-8")
         if p == "/api/channels":
             return self._send(200, {"channels": load_channels()})
+        if p == "/api/videos":
+            return self._send(200, {"videos": load_videos(cid)})
         if p == "/api/char_ref":
             ref_path = os.path.join(ch_dir(cid), "char_ref_url.txt")
             url = open(ref_path).read().strip() if os.path.exists(ref_path) else ""
             return self._send(200, {"url": url})
         if p == "/api/get_mode":
-            return self._send(200, {"mode": get_mode(cid)})
+            return self._send(200, {"mode": get_video_mode(cid, vid)})
         if p == "/api/vid_master":
             try:    txt = open(ch_vid_master(cid)).read()
             except: txt = VIDEO_MASTER_DEFAULT
@@ -1066,12 +1387,12 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/master":
             return self._send(200, {"master": read_master(cid)})
         if p == "/api/plan":
-            try:    return self._send(200, json.load(open(ch_plan(cid))))
+            try:    return self._send(200, json.load(open(v_plan(cid, vid))))
             except: return self._send(200, {"scenes": []})
         if p == "/api/download":
             ts_map = {}
             try:
-                plan = json.load(open(ch_plan(cid)))
+                plan = json.load(open(v_plan(cid, vid)))
                 for s in plan.get("scenes", []):
                     t = s.get("t", "").replace(":", "-")
                     ts_map[f"{s['i']:03d}.jpg"] = f"{t}.jpg"
@@ -1079,12 +1400,12 @@ class H(BaseHTTPRequestHandler):
             except: pass
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w") as z:
-                for f in sorted(os.listdir(ch_out(cid))):
+                for f in sorted(os.listdir(v_out(cid, vid))):
                     if f.endswith(".png") or f.endswith(".jpg"):
-                        z.write(os.path.join(ch_out(cid), f), ts_map.get(f, f))
+                        z.write(os.path.join(v_out(cid, vid), f), ts_map.get(f, f))
             return self._send(200, buf.getvalue(), "application/zip")
         if p.startswith("/generated/"):
-            fp = os.path.join(ch_out(cid), os.path.basename(p))
+            fp = os.path.join(v_out(cid, vid), os.path.basename(p))
             if os.path.exists(fp):
                 b = open(fp, "rb").read()
                 name = os.path.basename(fp)
@@ -1116,6 +1437,25 @@ class H(BaseHTTPRequestHandler):
         try:    d = self._read()
         except: return self._send(400, {"error": "bad json"})
         cid = d.get("channel", "default")
+        vid = d.get("video", "")
+
+        # ── Video management (one video = one script/plan within a channel) ────
+        if p == "/api/videos":
+            name = d.get("name", "Neues Video").strip()
+            entry = create_video(cid, name)
+            return self._send(200, {"ok": True, **entry})
+        if p == "/api/videos/delete":
+            videos = [v for v in load_videos(cid) if v["id"] != vid]
+            save_videos(cid, videos)
+            shutil.rmtree(v_dir(cid, vid), ignore_errors=True)
+            return self._send(200, {"ok": True})
+        if p == "/api/videos/rename":
+            new_name = d.get("name", "").strip()
+            videos = load_videos(cid)
+            for v in videos:
+                if v["id"] == vid and new_name: v["name"] = new_name
+            save_videos(cid, videos)
+            return self._send(200, {"ok": True})
 
         # ── Channel management ────────────────────────────────────────────────
         if p == "/api/channels":
@@ -1170,8 +1510,10 @@ class H(BaseHTTPRequestHandler):
             wpm = float(d.get("wpm", 150)); sec = float(d.get("sec", 4))
             text = clean_script(d.get("script", ""))
             if not text: return self._send(200, {"scenes": []})
+            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
+            ensure_video(cid, vid)
             # Clear old generated files when loading new script
-            out = ch_out(cid)
+            out = v_out(cid, vid)
             for f in os.listdir(out):
                 if f.endswith((".jpg", ".png", ".mp4")):
                     try:
@@ -1193,14 +1535,14 @@ class H(BaseHTTPRequestHandler):
                 s["video_prompt"] = vp
                 s["phase"] = story_phase(s["i"], len(scenes))
             out = {"scenes": scenes, "wpm": wpm, "sec": sec, "characters": analysis.get("characters", [])}
-            json.dump(out, open(ch_plan(cid), "w"), ensure_ascii=False, indent=1)
+            json.dump(out, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
             return self._send(200, out)
 
         # ── Mode toggle ───────────────────────────────────────────────────────
         if p == "/api/set_mode":
             mode = d.get("mode", "image")
             if mode not in ("image", "video"): mode = "image"
-            open(ch_mode(cid), "w").write(mode)
+            set_video_mode(cid, vid, mode)
             return self._send(200, {"ok": True, "mode": mode})
 
         # ── Video master prompt ───────────────────────────────────────────────
@@ -1214,7 +1556,7 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/preview_t2v_prompt":
             i = int(d["i"])
             try:
-                plan = json.load(open(ch_plan(cid)))
+                plan = json.load(open(v_plan(cid, vid)))
                 scene = next((s for s in plan["scenes"] if s["i"] == i), None)
             except Exception as e:
                 return self._send(500, {"error": f"Plan lesen: {e}"})
@@ -1231,7 +1573,7 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/generate_t2v":
             i = int(d["i"])
             try:
-                plan = json.load(open(ch_plan(cid)))
+                plan = json.load(open(v_plan(cid, vid)))
                 scene = next((s for s in plan["scenes"] if s["i"] == i), None)
             except Exception as e:
                 return self._send(500, {"error": f"Plan lesen: {e}"})
@@ -1310,14 +1652,14 @@ class H(BaseHTTPRequestHandler):
                 return self._send(500, {"error": res["error"]})
 
             task_id = res["task_id"]
-            job_id  = f"veo_{cid}_{i}_{int(time.time())}"
-            out_path = os.path.join(ch_out(cid), f"{i:03d}.mp4")
+            job_id  = f"veo_{cid}_{vid}_{i}_{int(time.time())}"
+            out_path = os.path.join(v_out(cid, vid), f"{i:03d}.mp4")
             JOBS[job_id] = {"status": "running", "progress": 15, "file": None, "error": None}
             print(f"  [Veo] Task {task_id} → Job {job_id}", flush=True)
 
             t = threading.Thread(
                 target=_veo_job_worker,
-                args=(job_id, task_id, scene, out_path, ch_plan(cid), cid, video_prompt, chain_len),
+                args=(job_id, task_id, scene, out_path, v_plan(cid, vid), cid, vid, video_prompt, chain_len),
                 daemon=True
             )
             t.start()
@@ -1328,11 +1670,13 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/upload_audio":
             try:    raw = base64.b64decode(d["data"])
             except: return self._send(400, {"error": "Ungültige Base64-Daten"})
+            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
+            ensure_video(cid, vid)
             ext = (d.get("name", "audio.bin").rsplit(".", 1)[-1].lower()) or "bin"
-            local_path = os.path.join(ch_uploads(cid), f"voiceover.{ext}")
+            local_path = os.path.join(v_uploads(cid, vid), f"voiceover.{ext}")
             open(local_path, "wb").write(raw)
             json.dump({"path": local_path, "mime": d.get("mime", "audio/mpeg"), "name": d.get("name", "")},
-                      open(ch_audio(cid), "w"))
+                      open(v_audio(cid, vid), "w"))
             print(f"  [Audio] {os.path.basename(local_path)} ({len(raw)//1024} KB)", flush=True)
             return self._send(200, {"ok": True, "size": len(raw), "name": d.get("name", "")})
 
@@ -1342,11 +1686,12 @@ class H(BaseHTTPRequestHandler):
         # ── Transcribe ────────────────────────────────────────────────────────
         if p == "/api/transcribe":
             sec = float(d.get("sec", 4))
-            try:    meta = json.load(open(ch_audio(cid)))
+            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
+            try:    meta = json.load(open(v_audio(cid, vid)))
             except: return self._send(400, {"error": "Keine Audio-Datei hochgeladen."})
             TX_STATUS["running"] = True; TX_STATUS["error"] = ""
             # Clear old generated files when transcribing new audio
-            out = ch_out(cid)
+            out = v_out(cid, vid)
             for f in os.listdir(out):
                 if f.endswith((".jpg", ".png", ".mp4")):
                     try:
@@ -1384,7 +1729,7 @@ class H(BaseHTTPRequestHandler):
             tx(4, f"Fertig — {len(scenes)} Szenen bereit ✓")
             TX_STATUS["running"] = False
             out = {"scenes": scenes, "sec": sec, "source": "audio", "characters": analysis.get("characters", [])}
-            json.dump(out, open(ch_plan(cid), "w"), ensure_ascii=False, indent=1)
+            json.dump(out, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
             return self._send(200, out)
 
         # ── Character refs ────────────────────────────────────────────────────
@@ -1411,7 +1756,7 @@ class H(BaseHTTPRequestHandler):
             safe = re.sub(r"[^\w\-]", "_", name.lower())
             tmp  = os.path.join(ch_sheets(cid), f"_tmp_{safe}.jpg")
             try:
-                img_bytes = gen_charsheet(name, desc)
+                img_bytes = gen_charsheet(cid, name, desc)
                 open(os.path.join(ch_sheets(cid), f"{safe}.png"), "wb").write(img_bytes)
                 json.dump({"name": name, "description": desc, "safe": safe, "mime": "image/jpg"},
                           open(os.path.join(ch_sheets(cid), f"{safe}.json"), "w"), ensure_ascii=False)
@@ -1424,26 +1769,26 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/generate_one":
             i = int(d["i"]); prompt = d.get("prompt", "")
             fn = f"{i:03d}.jpg"
-            out_path = os.path.join(ch_out(cid), fn)
+            out_path = os.path.join(v_out(cid, vid), fn)
             full_prompt = _build_image_prompt(prompt, read_master(cid), load_char_refs(cid))
             try:
                 task_id = _kie_submit_image(full_prompt)
             except Exception as e:
                 return self._send(500, {"error": str(e)})
-            job_id = f"{cid}_{i}_{int(time.time())}"
+            job_id = f"{cid}_{vid}_{i}_{int(time.time())}"
             JOBS[job_id] = {"status": "running", "progress": 0, "file": None,
                             "source_url": None, "ts": None, "error": None}
             # Mark scene as running in plan
             try:
-                plan = json.load(open(ch_plan(cid)))
+                plan = json.load(open(v_plan(cid, vid)))
                 for s in plan["scenes"]:
                     if s["i"] == i:
                         s["prompt"] = prompt; s["status"] = "läuft"
-                json.dump(plan, open(ch_plan(cid), "w"), ensure_ascii=False, indent=1)
+                json.dump(plan, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
             except: pass
             threading.Thread(
                 target=_image_job_worker,
-                args=(job_id, task_id, out_path, ch_plan(cid), i),
+                args=(job_id, task_id, out_path, v_plan(cid, vid), i),
                 daemon=True
             ).start()
             return self._send(200, {"ok": True, "job_id": job_id})
@@ -1456,7 +1801,7 @@ class H(BaseHTTPRequestHandler):
             duration = max(6, min(30, round(scene_dur)))
             # Load scene from plan
             try:
-                plan = json.load(open(ch_plan(cid)))
+                plan = json.load(open(v_plan(cid, vid)))
                 scene = next((s for s in plan["scenes"] if s["i"] == i), None)
             except Exception as e:
                 return self._send(500, {"error": f"Plan lesen fehlgeschlagen: {e}"})
@@ -1473,7 +1818,7 @@ class H(BaseHTTPRequestHandler):
                 local_file = scene.get("file")
                 if not local_file:
                     return self._send(400, {"error": "Kein Bild und kein Character-Ref — zuerst ein Bild generieren."})
-                local_path = os.path.join(ch_out(cid), local_file)
+                local_path = os.path.join(v_out(cid, vid), local_file)
                 if not os.path.exists(local_path):
                     return self._send(400, {"error": f"Bild-Datei nicht gefunden: {local_file}"})
                 print(f"  [Video] Lade Szenen-Bild hoch …", flush=True)
@@ -1483,7 +1828,7 @@ class H(BaseHTTPRequestHandler):
                         if s["i"] == i:
                             s["source_url"] = source_url
                             s["source_url_ts"] = int(time.time())
-                    json.dump(plan, open(ch_plan(cid), "w"), ensure_ascii=False, indent=1)
+                    json.dump(plan, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
                 except Exception as e:
                     return self._send(500, {"error": f"Bild-Upload fehlgeschlagen: {e}"})
 
@@ -1507,8 +1852,8 @@ class H(BaseHTTPRequestHandler):
             video_url = res["video_url"]
             fn_silent = f"{i:03d}_silent.mp4"
             fn        = f"{i:03d}.mp4"
-            silent_path = os.path.join(ch_out(cid), fn_silent)
-            out_path    = os.path.join(ch_out(cid), fn)
+            silent_path = os.path.join(v_out(cid, vid), fn_silent)
+            out_path    = os.path.join(v_out(cid, vid), fn)
             try:
                 dl_req = urllib.request.Request(video_url,
                     headers={"Referer": "https://kie.ai/", "User-Agent": "Mozilla/5.0"})
@@ -1519,7 +1864,7 @@ class H(BaseHTTPRequestHandler):
             # Mix in voiceover segment if available
             has_audio = False
             try:
-                audio_meta = json.load(open(ch_audio(cid)))
+                audio_meta = json.load(open(v_audio(cid, vid)))
                 audio_path = audio_meta.get("path", "")
                 if os.path.exists(audio_path):
                     start = float(scene.get("start", 0))
@@ -1550,7 +1895,7 @@ class H(BaseHTTPRequestHandler):
                     if s["i"] == i:
                         s["video_file"] = fn
                         s["video_prompt"] = video_prompt
-                json.dump(plan, open(ch_plan(cid), "w"), ensure_ascii=False, indent=1)
+                json.dump(plan, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
             except: pass
             print(f"  [Video] Szene {i} fertig → {fn} (audio={'ja' if has_audio else 'nein'})", flush=True)
             return self._send(200, {"ok": True, "file": fn, "video_prompt": video_prompt, "ts": int(time.time())})

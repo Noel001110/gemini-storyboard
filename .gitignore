@@ -7,8 +7,17 @@ anchor.png
 *.jpg
 *.jpeg
 
+# All runtime channel/video data (master prompts, plans, generated media, uploads)
+channels/
+
+# Legacy root-level upload dir (pre-channels layout)
+/uploads/
+
 # Old per-session JSON files
 /*.json
+
+# Backup files
+*.bak
 
 # Logs
 *.log
