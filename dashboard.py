@@ -378,7 +378,7 @@ def analyze_script(beats):
     )
     for attempt in (1, 2):
         try:
-            txt = post_kie_text([{"role": "user", "content": instr}], json_mode=True, temp=0.2)
+            txt = post_gemini_native([{"role": "user", "content": instr}], json_mode=True, temp=0.2)
             return json.loads(txt)
         except Exception as e:
             print(f"Analyse-Fehler (Versuch {attempt}):", e)
@@ -404,13 +404,25 @@ visible in frame, composition emphasizing absence and unease"
 surveillance symbol), and is specific enough to define setting/light/focus — not just a mood word.\
 """
 
-def _validate_image_prompt_entry(entry: dict) -> bool:
+def _anonymized_words(analysis: dict) -> set:
+    """Words belonging to characters marked anonymize=true in the Stage-1 analysis.
+    These must NOT be required to appear literally in a prompt — the whole point of
+    anonymize=true is that the person is depicted as a silhouette/symbol, never named."""
+    words = set()
+    for c in (analysis or {}).get("characters", []):
+        if c.get("anonymize"):
+            for field in (c.get("id", ""), c.get("name_or_role", "")):
+                words.update(w.lower() for w in re.findall(r"[a-zA-Z]{4,}", field))
+    return words
+
+def _validate_image_prompt_entry(entry: dict, anonymized_words: set = frozenset()) -> bool:
     ip = (entry.get("image_prompt") or "").strip()
     if len(ip) < IMAGE_PROMPT_MIN_LEN:
         return False
     entity = (entry.get("concrete_entity") or "").strip().lower()
     if entity and entity not in ("none", "n/a", "-"):
-        words = [w for w in re.findall(r"[a-zA-Z]{4,}", entity) if w not in ("char", "loc", "sym")]
+        words = [w for w in re.findall(r"[a-zA-Z]{4,}", entity)
+                 if w not in ("char", "loc", "sym", "anonymized") and w.lower() not in anonymized_words]
         if words and not any(w.lower() in ip.lower() for w in words):
             return False
     return True
@@ -487,7 +499,7 @@ def _image_prompt_single_retry(beat_text: str, beat_i: int, total: int, analysis
             "image_prompt": f"Scene illustrating: {beat_text[:80]}. Simple, clear composition.",
         }
 
-def visual_prompts(scenes, master, analysis=None):
+def visual_prompts(scenes, analysis=None):
     """Generate all still-image prompts, chunked (not all-in-one) with forced intermediate
     reasoning fields and a validation+retry pass — same structure as video_prompts_batch(),
     adapted for stills (no story-phase/camera-move logic, explicit character-consistency
@@ -505,6 +517,7 @@ def visual_prompts(scenes, master, analysis=None):
         print(f"  [Plan] Analysiere {total} Beats …", flush=True)
         analysis = analyze_script(beats)
     analysis_ctx = json.dumps(analysis, ensure_ascii=False, indent=1) if analysis else "{}"
+    anon_words = _anonymized_words(analysis)
 
     prompts: list[str] = []
     chunks = [beats[i:i+IMAGE_PROMPT_CHUNK_SIZE] for i in range(0, total, IMAGE_PROMPT_CHUNK_SIZE)]
@@ -520,7 +533,7 @@ def visual_prompts(scenes, master, analysis=None):
 
         for j, entry in enumerate(entries):
             beat_i = offset + j
-            if not _validate_image_prompt_entry(entry):
+            if not _validate_image_prompt_entry(entry, anon_words):
                 print(f"  [Plan] Szene {beat_i} zu kurz/generisch — Einzel-Retry …", flush=True)
                 entry = _image_prompt_single_retry(beats[beat_i], beat_i, total, analysis_ctx)
             prompts.append(str(entry.get("image_prompt") or f"Scene illustrating: {beats[beat_i][:80]}."))
@@ -557,14 +570,15 @@ emphasizing absence and unease"
 surveillance symbol), AND is long enough to define setting/light/framing — not just a mood word.\
 """
 
-def _validate_video_prompt_entry(entry: dict) -> bool:
+def _validate_video_prompt_entry(entry: dict, anonymized_words: set = frozenset()) -> bool:
     vp = (entry.get("video_prompt") or "").strip()
     if len(vp) < VIDEO_PROMPT_MIN_LEN:
         return False
     entity = (entry.get("concrete_entity") or "").strip().lower()
     if entity and entity not in ("none", "n/a", "-"):
         # crude heuristic: does at least one meaningful word from concrete_entity show up in the prompt?
-        words = [w for w in re.findall(r"[a-zA-Z]{4,}", entity) if w not in ("char", "loc", "sym")]
+        words = [w for w in re.findall(r"[a-zA-Z]{4,}", entity)
+                 if w not in ("char", "loc", "sym", "anonymized") and w.lower() not in anonymized_words]
         if words and not any(w.lower() in vp.lower() for w in words):
             return False
     return True
@@ -684,6 +698,7 @@ def video_prompts_batch(scenes: list, vid_master: str, has_char_ref: bool = Fals
     print(f"  [VidPrompt] Analysiere {total} Szenen …", flush=True)
     analysis = analyze_script(beats)
     analysis_ctx = json.dumps(analysis, ensure_ascii=False, indent=1) if analysis else "{}"
+    anon_words = _anonymized_words(analysis)
 
     prompts: list[str] = []
     prev_prompts: list[str] = []
@@ -702,7 +717,7 @@ def video_prompts_batch(scenes: list, vid_master: str, has_char_ref: bool = Fals
 
         for j, entry in enumerate(entries):
             beat_i = offset + j
-            if not _validate_video_prompt_entry(entry):
+            if not _validate_video_prompt_entry(entry, anon_words):
                 print(f"  [VidPrompt] Szene {beat_i} zu kurz/generisch — Einzel-Retry …", flush=True)
                 entry = _video_prompt_single_retry(beats[beat_i], beat_i, total, analysis_ctx,
                                                     vid_master, prev_prompts, has_char_ref)
@@ -1522,7 +1537,7 @@ class H(BaseHTTPRequestHandler):
                     except: pass
             scenes = segment(text, wpm, sec)
             analysis = analyze_script([s["text"] for s in scenes])
-            prompts  = visual_prompts(scenes, read_master(cid), analysis)
+            prompts  = visual_prompts(scenes, analysis)
             for s, pr in zip(scenes, prompts):
                 s["prompt"] = pr; s["file"] = None
                 s["status"] = "geplant"; s["t"] = fmt_t(s["start"])
@@ -1716,7 +1731,7 @@ class H(BaseHTTPRequestHandler):
             tx(3, f"Analysiere Story-Struktur ({len(scenes)} Szenen) …")
             analysis = analyze_script([s["text"] for s in scenes])
             tx(4, "Schreibe Bild-Prompts …")
-            prompts = visual_prompts(scenes, read_master(cid), analysis)
+            prompts = visual_prompts(scenes, analysis)
             for s, pr in zip(scenes, prompts): s["prompt"] = pr
             tx(4, f"Schreibe Video-Prompts für {len(scenes)} Szenen …")
             try: vid_master = open(ch_vid_master(cid)).read().strip()
