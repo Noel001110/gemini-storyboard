@@ -299,7 +299,7 @@ def visual_prompts(scenes, master, analysis=None):
         "  This tells the image model to keep those exact background elements.\n"
         "- If a beat directly continues an action from the previous beat → append at end: [CONT ACTION]\n"
         "These markers are part of the prompt text and will be sent to the image model.\n\n"
-        "ART STYLE context (stick-figure ASDF Movie style — for reference only):\n" + master[:400] + "\n\n"
+        "ART STYLE context (stick-figure ASDF Movie style — follow exactly, no deviations):\n" + master + "\n\n"
         "BEATS:\n" + json.dumps(beats, ensure_ascii=False) + "\n\n"
         "Return a JSON array of strings, one per beat, same order and same length as BEATS."
     )
@@ -1170,6 +1170,14 @@ class H(BaseHTTPRequestHandler):
             wpm = float(d.get("wpm", 150)); sec = float(d.get("sec", 4))
             text = clean_script(d.get("script", ""))
             if not text: return self._send(200, {"scenes": []})
+            # Clear old generated files when loading new script
+            out = ch_out(cid)
+            for f in os.listdir(out):
+                if f.endswith((".jpg", ".png", ".mp4")):
+                    try:
+                        os.remove(os.path.join(out, f))
+                        print(f"  [Plan] Gelösche alte Datei: {f}", flush=True)
+                    except: pass
             scenes = segment(text, wpm, sec)
             analysis = analyze_script([s["text"] for s in scenes])
             prompts  = visual_prompts(scenes, read_master(cid), analysis)
@@ -1337,6 +1345,14 @@ class H(BaseHTTPRequestHandler):
             try:    meta = json.load(open(ch_audio(cid)))
             except: return self._send(400, {"error": "Keine Audio-Datei hochgeladen."})
             TX_STATUS["running"] = True; TX_STATUS["error"] = ""
+            # Clear old generated files when transcribing new audio
+            out = ch_out(cid)
+            for f in os.listdir(out):
+                if f.endswith((".jpg", ".png", ".mp4")):
+                    try:
+                        os.remove(os.path.join(out, f))
+                        print(f"  [Transcribe] Gelösche alte Datei: {f}", flush=True)
+                    except: pass
             try:
                 mb = os.path.getsize(meta["path"]) / 1024 / 1024
                 tx(1, f"Sende Audio an KIE ({mb:.1f} MB) …")
