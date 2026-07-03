@@ -297,6 +297,25 @@
       </div>
     </div>
 
+    <!-- Title & Thumbnail -->
+    <div class="card">
+      <h2>🎯 Titel &amp; Thumbnail</h2>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+        <div>
+          <div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Titel-Optionen</div>
+          <div id="titleList" style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px"></div>
+          <button class="sm ghost" onclick="genTitles()" id="genTitlesBtn">✍️ Titel generieren</button>
+        </div>
+        <div>
+          <div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Thumbnail</div>
+          <div class="slot" id="thumbSlot" style="margin-bottom:10px">
+            <div class="slot-empty"><span class="slot-icon">🖼</span><span class="slot-label">Noch kein Thumbnail</span></div>
+          </div>
+          <button class="sm ghost" onclick="genThumbnail()" id="genThumbBtn">✨ Thumbnail generieren</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Video mode settings (duration) -->
     <div class="card" id="cardSettings">
       <h2>Einstellungen</h2>
@@ -359,9 +378,14 @@
 
     <!-- Scene plan + generation -->
     <div id="planArea" style="display:none">
+      <div id="batchStatusBar" style="display:none;align-items:center;gap:10px;padding:10px 14px;border-radius:var(--radius);margin-bottom:10px;background:var(--acc-soft);border:1px solid var(--acc);font-weight:600;font-size:13px;color:var(--acc)">
+        <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--acc);animation:pulse 1.2s ease-in-out infinite"></span>
+        <span id="batchStatusText">Generiert gerade …</span>
+      </div>
+      <style>@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}</style>
       <div class="toolbar">
-        <button onclick="genAll()" id="genAllBtn">🖼 Alle Bilder</button>
-        <button onclick="genAllVideos()" id="genAllVidBtn" class="btn-video">🎬 Alle Videos</button>
+        <button onclick="genAll()" id="genAllBtn">🖼 Alle Bilder generieren</button>
+        <button onclick="stopGenAll()" id="stopAllBtn" class="ghost" style="display:none;color:var(--danger);border-color:var(--danger)">⏹ Stoppen</button>
         <button class="ghost sm" onclick="downloadZip()">⬇ ZIP</button>
         <span class="hint" id="prog">0 / 0</span>
         <span class="est" style="margin-left:auto"><span id="srcBadge" class="hint"></span></span>
@@ -555,7 +579,183 @@ async function openVideo(vid, name){
     renderScenes(r.source||'text');
     $('planArea').style.display = 'block';
     if(r.characters) suggestCharsFromPlan(r.characters);
+    const batchSt = await ch_get('/api/generate_all_status').catch(() => null);
+    if(batchSt && batchSt.running){
+      startBatchPoll();
+    } else {
+      _setGenAllUI(false);
+      _watchRunningScenes();
+    }
   }
+  loadVideoMeta();
+}
+
+// ---- Title & Thumbnail ----
+let VIDEO_META = {titles: [], selected_title: '', thumbnail_prompt: '', has_thumbnail: false};
+
+async function loadVideoMeta(){
+  VIDEO_META = await ch_get('/api/video_meta').catch(() => ({titles:[], selected_title:'', thumbnail_prompt:'', has_thumbnail:false}));
+  renderTitleList();
+  renderThumbnail();
+}
+
+function renderTitleList(){
+  const c = $('titleList'); c.innerHTML = '';
+  if(!VIDEO_META.titles || !VIDEO_META.titles.length){
+    c.innerHTML = '<p class="hint" style="margin:0">Noch keine Titel — generieren, sobald ein Skript vorhanden ist.</p>';
+    return;
+  }
+  VIDEO_META.titles.forEach(t => {
+    const sel = t === VIDEO_META.selected_title;
+    const el = document.createElement('div');
+    el.style.cssText = `padding:9px 12px;border-radius:8px;border:1px solid ${sel?'var(--acc)':'var(--border)'};background:${sel?'var(--acc-soft)':'var(--surface-2)'};font-size:13px;cursor:pointer;display:flex;align-items:center;gap:8px`;
+    el.innerHTML = `<span style="flex-shrink:0">${sel?'✅':'⚪'}</span><span>${t}</span><span class="hint" style="margin-left:auto;flex-shrink:0">${t.length} Zeichen</span>`;
+    el.onclick = () => selectTitle(t);
+    c.appendChild(el);
+  });
+}
+
+async function genTitles(){
+  const btn = $('genTitlesBtn'); btn.disabled = true; btn.textContent = '⏳ Generiere …';
+  const r = await ch_api('/api/generate_titles', {});
+  btn.disabled = false; btn.textContent = '✍️ Titel generieren';
+  if(!r.ok){ alert('Fehler: '+(r.error||'unbekannt')); return; }
+  VIDEO_META.titles = r.titles;
+  renderTitleList();
+}
+
+async function selectTitle(t){
+  VIDEO_META.selected_title = t;
+  renderTitleList();
+  await ch_api('/api/select_title', {title: t});
+}
+
+function renderThumbnail(){
+  const slot = $('thumbSlot');
+  if(VIDEO_META.has_thumbnail){
+    slot.innerHTML = `<img src="/generated/thumbnail.jpg?t=${Date.now()}&channel=${ACTIVE_CHANNEL}&video=${ACTIVE_VIDEO}">`;
+  } else {
+    slot.innerHTML = `<div class="slot-empty"><span class="slot-icon">🖼</span><span class="slot-label">Noch kein Thumbnail</span></div>`;
+  }
+}
+
+async function genThumbnail(){
+  const btn = $('genThumbBtn'); btn.disabled = true; btn.textContent = '⏳ Generiere …';
+  $('thumbSlot').innerHTML = `<div class="slot-empty"><span class="slot-icon">⏳</span><span class="slot-label">Wird generiert …</span></div>`;
+  const r = await ch_api('/api/generate_thumbnail', {});
+  btn.disabled = false; btn.textContent = '✨ Thumbnail generieren';
+  if(!r.ok){
+    alert('Fehler: '+(r.error||'unbekannt'));
+    renderThumbnail();
+    return;
+  }
+  VIDEO_META.has_thumbnail = true;
+  VIDEO_META.thumbnail_prompt = r.prompt;
+  renderThumbnail();
+}
+
+// Applies one fresh scene (from /api/plan) onto the local SCENES/DOM state. Shared by
+// both the lone-scene watcher below and the server-side batch poller — same sync logic
+// either way, since the backend writes results into plan.json regardless of who asked.
+function _applyFreshScene(fresh){
+  const local = SCENES.find(s => s.i === fresh.i);
+  if(!local) return;
+  if(fresh.file && !local.file){
+    local.file = fresh.file; local.source_url = fresh.source_url; local.status = 'fertig';
+    const th = $('th'+fresh.i);
+    if(th) th.innerHTML = `<img src="/generated/${fresh.file}?t=${Date.now()}&channel=${ACTIVE_CHANNEL}&video=${ACTIVE_VIDEO}">`;
+    setStatus(fresh.i, 'fertig');
+    const dlBtn = $('dl'+fresh.i); if(dlBtn) dlBtn.disabled = false;
+  } else if(fresh.status === 'fehler' && local.status !== 'fehler'){
+    local.status = 'fehler';
+    const th = $('th'+fresh.i);
+    if(th) th.innerHTML = `<div class="slot-empty"><span class="slot-label" style="color:var(--danger)">Fehlgeschlagen</span></div>`;
+    setStatus(fresh.i, 'fehler');
+  } else if(fresh.status === 'läuft' && local.status !== 'läuft'){
+    local.status = 'läuft';
+    setStatus(fresh.i, 'läuft');
+    const th = $('th'+fresh.i);
+    if(th) th.innerHTML = `<div class="slot-empty"><span class="slot-icon">⏳</span><span class="slot-label">Wird generiert …</span></div>`;
+  }
+}
+
+async function _refreshScenesFromPlan(){
+  const r = await ch_get('/api/plan').catch(() => null);
+  if(!r || !r.scenes) return;
+  r.scenes.forEach(_applyFreshScene);
+}
+
+// After a page reload, a single scene still marked "läuft" (started via the individual
+// "Bild generieren" button, not the batch) is being generated by a thread the browser
+// lost track of — no job_id survives a reload. Poll the plan file itself until it
+// resolves; no job_id needed since the backend writes results there regardless of who's
+// watching. (The batch case is handled separately by _pollBatchStatus below.)
+let _watchTimer = null;
+function _watchRunningScenes(){
+  if(_watchTimer){ clearInterval(_watchTimer); _watchTimer = null; }
+  const running = SCENES.filter(s => s.status === 'läuft' && !s.file);
+  if(!running.length) return;
+  running.forEach(s => {
+    const th = $('th'+s.i);
+    if(th) th.innerHTML = `<div class="slot-empty"><span class="slot-icon">⏳</span><span class="slot-label">Läuft weiter im Hintergrund …</span></div>`;
+  });
+  _watchTimer = setInterval(async () => {
+    const r = await ch_get('/api/plan').catch(() => null);
+    if(!r || !r.scenes) return;
+    let stillRunning = false;
+    r.scenes.forEach(fresh => {
+      _applyFreshScene(fresh);
+      const local = SCENES.find(s => s.i === fresh.i);
+      if(local && local.status === 'läuft' && !local.file) stillRunning = true;
+    });
+    if(!stillRunning){ clearInterval(_watchTimer); _watchTimer = null; }
+  }, 4000);
+}
+
+// Server-side "Alle Bilder generieren" — this just displays progress; the actual
+// generation loop lives in the Python process and keeps running even if this tab (or
+// every tab) closes. Polling this is what makes state always correct on load/reload.
+let _batchPollTimer = null;
+function _setGenAllUI(running, currentI){
+  $('genAllBtn').style.display = running ? 'none' : '';
+  const stopBtn = $('stopAllBtn');
+  stopBtn.style.display = running ? '' : 'none';
+  stopBtn.disabled = false; stopBtn.textContent = '⏹ Stoppen';
+  const bar = $('batchStatusBar');
+  if(running){
+    bar.style.display = 'flex';
+    const scene = SCENES.find(s=>s.i===currentI);
+    const label = scene ? `„${(scene.text||'').slice(0,60)}${(scene.text||'').length>60?'…':''}"` : '';
+    $('batchStatusText').textContent = currentI!=null
+      ? `Generiert gerade Szene #${currentI+1} — ${label}`
+      : 'Generiert gerade …';
+  } else {
+    bar.style.display = 'none';
+  }
+}
+function startBatchPoll(){
+  if(_batchPollTimer) return;
+  if(_watchTimer){ clearInterval(_watchTimer); _watchTimer = null; } // batch supersedes the lone-scene watcher
+  _setGenAllUI(true, null);
+  const poll = async () => {
+    const st = await ch_get('/api/generate_all_status').catch(() => null);
+    if(!st) return;
+    if(st.running){
+      _setGenAllUI(true, st.current_i);
+      $('prog').textContent = `${st.done} / ${st.total}`;
+      $('barFill').style.width = (st.total ? st.done/st.total*100 : 0) + '%';
+      await _refreshScenesFromPlan();
+    } else {
+      clearInterval(_batchPollTimer); _batchPollTimer = null;
+      _setGenAllUI(false);
+      await _refreshScenesFromPlan();
+      const doneCount = SCENES.filter(s=>s.file).length;
+      $('prog').textContent = `${doneCount} / ${SCENES.length}`;
+      $('barFill').style.width = (SCENES.length ? doneCount/SCENES.length*100 : 0) + '%';
+    }
+  };
+  poll(); // immediately, don't wait 3s for the first update
+  _batchPollTimer = setInterval(poll, 3000);
 }
 
 function backToVideoList(){
@@ -585,7 +785,9 @@ function applyMode(mode){
   $('modeHint').textContent = isVid
     ? 'Szenen direkt als Veo 3.1 Videos — kein Bild-Zwischenschritt'
     : 'Bilder generieren, optional per I2V animieren';
-  $('genAllBtn').style.display = isVid ? 'none' : '';
+  // Don't clobber the Stop-button state if a batch run is currently being polled —
+  // _setGenAllUI() already owns that toggle while a run is active.
+  if(!_batchPollTimer) $('genAllBtn').style.display = isVid ? 'none' : '';
   if(SCENES.length) renderScenes();
 }
 
@@ -817,7 +1019,9 @@ function renderScenes(source){
       `;
     c.appendChild(d);
   });
-  $('prog').textContent=`0 / ${SCENES.length}`;
+  const doneCount = SCENES.filter(s=>s.file).length;
+  $('prog').textContent=`${doneCount} / ${SCENES.length}`;
+  $('barFill').style.width=(SCENES.length ? doneCount/SCENES.length*100 : 0)+'%';
 }
 
 function setStatus(i,st){ const e=$('st'+i); if(e){e.textContent=st; e.className='st '+st;} }
@@ -839,12 +1043,21 @@ function _imgProgress(i, pct){
   </div>`;
 }
 
-async function genOne(i){
+async function genOne(i, pinnedChannel, pinnedVideo){
+  // Pin channel/video at call time so a run started via "Alle generieren" stays correct
+  // even if the user navigates elsewhere in the UI (e.g. back to the video list) while
+  // it's running — ACTIVE_CHANNEL/ACTIVE_VIDEO are live globals that can change mid-run.
+  const ch = pinnedChannel !== undefined ? pinnedChannel : ACTIVE_CHANNEL;
+  const vid = pinnedVideo !== undefined ? pinnedVideo : ACTIVE_VIDEO;
   setStatus(i,'läuft');
   _imgProgress(i, 0);
-  const r = await ch_api('/api/generate_one',{i, prompt:SCENES[i].prompt});
+  const r = await api('/api/generate_one','POST',{i, prompt:SCENES[i].prompt, channel:ch, video:vid});
   if(!r.job_id){ setStatus(i,'fehler'); return false; }
-  while(true){
+  // Client-side safety cap — MUST be longer than the server's own timeout (150s), or
+  // this can fire first and show a spurious "Timeout" right as the server was about to
+  // succeed. This is a last-resort net for a dead server, not the primary timeout.
+  const maxPolls = 130; // 130 * 2s = 260s, well past the server's 150s cap
+  for(let poll=0; poll<maxPolls; poll++){
     await new Promise(res=>setTimeout(res,2000));
     const s = await fetch(`/api/job_status?job_id=${r.job_id}`).then(r=>r.json()).catch(()=>null);
     if(!s) continue;
@@ -852,7 +1065,7 @@ async function genOne(i){
     if(s.status==='done'){
       setStatus(i,'fertig');
       SCENES[i].file=s.file; SCENES[i].source_url=s.source_url;
-      $('th'+i).innerHTML=`<img src="/generated/${s.file}?t=${s.ts}&channel=${ACTIVE_CHANNEL}&video=${ACTIVE_VIDEO}">`;
+      $('th'+i).innerHTML=`<img src="/generated/${s.file}?t=${s.ts}&channel=${ch}&video=${vid}">`;
       const dlBtn=$('dl'+i); if(dlBtn) dlBtn.disabled=false;
       $('vw'+i).innerHTML=`<div class="slot-empty" onclick="genVideo(${i})" style="cursor:pointer">
         <span class="slot-icon">🎬</span>
@@ -867,6 +1080,9 @@ async function genOne(i){
       return false;
     }
   }
+  setStatus(i,'fehler');
+  $('th'+i).innerHTML=`<div class="slot-empty"><span class="slot-label" style="color:var(--danger)">Timeout — keine Antwort vom Server</span></div>`;
+  return false;
 }
 
 async function genVideo(i){
@@ -1047,29 +1263,22 @@ async function genT2V(i){
   }
 }
 
-async function genAllVideos(){
-  const btn=$('genAllVidBtn'); btn.disabled=true;
-  const isVideo = CURRENT_MODE === 'video';
-  let scenes = isVideo ? SCENES : SCENES.filter(s=>s.file);
-  let done=0, total=scenes.length;
-  $('prog').textContent=`Videos: 0 / ${total}`;
-  for(const s of scenes){
-    await (isVideo ? genT2V(s.i) : genVideo(s.i));
-    done++; $('prog').textContent=`Videos: ${done} / ${total}`;
-    $('barFill').style.width=(done/total*100)+'%';
-  }
-  btn.disabled=false; $('barFill').style.width='100%';
+// "Alle Bilder generieren" is now a server-side job (see _batch_generate_worker in
+// dashboard.py) — clicking this just tells the server to start, then we poll for
+// progress. This is what makes it survive page reloads and tab closes, and what makes
+// a second click/tab safe (the server refuses to start a second run for the same video).
+async function genAll(){
+  const r = await ch_api('/api/generate_all_start', {});
+  if(!r.ok){ alert('Fehler: '+(r.error||'unbekannt')); return; }
+  startBatchPoll();
 }
 
-async function genAll(){
-  const btn=$('genAllBtn'); btn.disabled=true;
-  let done=0;
-  for(const s of SCENES){
-    await genOne(s.i);
-    done++; $('prog').textContent=`${done} / ${SCENES.length}`;
-    $('barFill').style.width=(done/SCENES.length*100)+'%';
-  }
-  btn.disabled=false;
+async function stopGenAll(){
+  // Instant feedback — the actual stop takes effect after the in-flight scene finishes
+  // (up to ~150s), and the 3s poll interval alone made this feel unresponsive.
+  const btn = $('stopAllBtn');
+  btn.disabled = true; btn.textContent = '⏳ Stoppt nach aktueller Szene …';
+  await ch_api('/api/generate_all_stop', {});
 }
 
 // ---- Character sheets (channel-scoped) ----

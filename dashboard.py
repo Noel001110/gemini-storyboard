@@ -18,12 +18,55 @@ CHANNELS_FILE = os.path.join(CHANNELS_DIR, "channels.json")
 # {job_id: {status:"running"|"done"|"error", progress:0-100, file, source_url, error}}
 JOBS: dict = {}
 
+# Guards against duplicate generation for the same scene — e.g. two browser tabs both
+# running "Alle Bilder generieren", or a double-click before the button disables.
+# {(cid, vid, scene_i): job_id} — only present while that scene's job is still running.
+ACTIVE_SCENE_JOBS: dict = {}
+_ACTIVE_SCENE_JOBS_LOCK = threading.Lock()
+
+# GLOBAL cap on concurrent KIE image generations, regardless of source. The batch loop
+# ("Alle Bilder generieren") is already fully sequential on its own, but individual
+# "Bild generieren" clicks on different scenes were never restricted — rapid-clicking
+# several of those (e.g. many scenes at once, as actually happened live) submits that
+# many KIE tasks simultaneously with nothing else in the system to stop it. This
+# semaphore is acquired right before every KIE image submission (batch or individual)
+# and released once that job fully finishes, so no more than MAX_CONCURRENT_IMAGE_GENS
+# are ever in flight at once no matter how many requests come in or from where.
+MAX_CONCURRENT_IMAGE_GENS = 2
+IMAGE_GEN_SEMAPHORE = threading.Semaphore(MAX_CONCURRENT_IMAGE_GENS)
+
+# "Alle Bilder generieren" runs server-side now, not driven by the browser tab — it
+# survives page reloads and tab closes, and multiple browser sessions just observe the
+# same run instead of each starting their own (which was the actual root cause of the
+# repeated duplicate-generation bugs: the old client-driven loop died on every reload,
+# and a second click/tab created a second independent loop with its own stale scene list).
+# {(cid, vid): {"running": bool, "stop_requested": bool, "done": int, "total": int,
+#               "current_i": int|None, "error": str|None}}
+BATCH_JOBS: dict = {}
+_BATCH_JOBS_LOCK = threading.Lock()
+
 # ── Per-channel path helpers (channel = brand/style, holds N videos) ──────────
 def ch_dir(cid):        return os.path.join(CHANNELS_DIR, cid)
 def ch_master(cid):     return os.path.join(ch_dir(cid), "master_prompt.txt")
 def ch_vid_master(cid): return os.path.join(ch_dir(cid), "video_master_prompt.txt")
 def ch_sheets(cid):     return os.path.join(ch_dir(cid), "charsheets")
 def ch_videos_file(cid):return os.path.join(ch_dir(cid), "videos.json")
+def ch_image_model_file(cid): return os.path.join(ch_dir(cid), "image_model.txt")
+
+def get_channel_image_model(cid: str) -> str:
+    try:
+        m = open(ch_image_model_file(cid)).read().strip()
+        return m if m in VALID_IMAGE_MODELS else "nano-banana-2"
+    except: return "nano-banana-2"
+
+def set_channel_image_model(cid: str, model: str):
+    if model not in VALID_IMAGE_MODELS: model = "nano-banana-2"
+    open(ch_image_model_file(cid), "w").write(model)
+
+def get_channel_char_ref(cid: str) -> str:
+    p = os.path.join(ch_dir(cid), "char_ref_url.txt")
+    try:    return open(p).read().strip()
+    except: return ""
 
 # ── Per-video path helpers (one video = one script/plan/generated set) ────────
 def v_dir(cid, vid):     return os.path.join(ch_dir(cid), "videos", vid)
@@ -31,6 +74,14 @@ def v_out(cid, vid):     return os.path.join(v_dir(cid, vid), "generated")
 def v_plan(cid, vid):    return os.path.join(v_out(cid, vid), "plan.json")
 def v_uploads(cid, vid): return os.path.join(v_dir(cid, vid), "uploads")
 def v_audio(cid, vid):   return os.path.join(v_uploads(cid, vid), "audio_meta.json")
+def v_meta(cid, vid):    return os.path.join(v_dir(cid, vid), "meta.json")  # titles, thumbnail prompt
+
+def load_v_meta(cid, vid):
+    try:    return json.load(open(v_meta(cid, vid)))
+    except: return {"titles": [], "selected_title": "", "thumbnail_prompt": ""}
+
+def save_v_meta(cid, vid, meta):
+    json.dump(meta, open(v_meta(cid, vid), "w"), ensure_ascii=False, indent=1)
 
 def ensure_channel(cid):
     os.makedirs(ch_dir(cid), exist_ok=True)
@@ -234,7 +285,8 @@ def post_gemini_native(messages, json_mode=False, temp=0.7, model="gemini-3-5-fl
         if role == "user": system_txt = ""
         contents.append({"role": role, "parts": [{"text": text}]})
 
-    gen_cfg = {"temperature": temp, "thinkingConfig": {"thinkingLevel": thinking_level}}
+    gen_cfg = {"temperature": temp, "thinkingConfig": {"thinkingLevel": thinking_level},
+               "maxOutputTokens": 8192}
     if json_mode:
         gen_cfg["responseMimeType"] = "application/json"
     body = {"stream": False, "contents": contents, "generationConfig": gen_cfg}
@@ -247,10 +299,31 @@ def post_gemini_native(messages, json_mode=False, temp=0.7, model="gemini-3-5-fl
         "Accept": "application/json, text/plain, */*",
     }
     url = GEMINI_NATIVE_URL.format(model=model)
-    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=hdrs)
-    with urllib.request.urlopen(req, timeout=240) as r:
-        resp = json.load(r)
-    return resp["candidates"][0]["content"]["parts"][0]["text"]
+    data = json.dumps(body).encode()
+
+    def _do_call():
+        req = urllib.request.Request(url, data=data, headers=hdrs)
+        with urllib.request.urlopen(req, timeout=240) as r:
+            resp = json.load(r)
+        candidates = resp.get("candidates")
+        if not candidates:
+            block_reason = (resp.get("promptFeedback") or {}).get("blockReason")
+            raise RuntimeError(f"Gemini: keine candidates in Antwort "
+                                f"(blockReason={block_reason}, keys={list(resp.keys())})")
+        cand = candidates[0]
+        finish = cand.get("finishReason")
+        parts = (cand.get("content") or {}).get("parts") or []
+        if not parts:
+            raise RuntimeError(f"Gemini: keine parts im Kandidaten (finishReason={finish})")
+        if finish and finish not in ("STOP", "MAX_TOKENS"):
+            raise RuntimeError(f"Gemini: finishReason={finish} (Safety/Recitation-Filter?)")
+        return parts[0]["text"]
+
+    try:
+        return _do_call()
+    except (RuntimeError, urllib.error.URLError, TimeoutError) as e:
+        print(f"  [Gemini3.5] Fehler, ein Retry: {e}", flush=True)
+        return _do_call()
 
 # ---------- Master-Prompt ----------
 def read_master(cid="default"):
@@ -302,6 +375,144 @@ def generate_script(raw_input: str, lang: str) -> str:
         {"role": "user", "content": user_msg},
     ]
     return post_kie_text(msgs, temp=0.8)
+
+
+# ---------- Title generator (viral/clickbait, research-backed formulas) ----------
+# Formulas per 2026 CTR research: curiosity gap + loss-aversion/FOMO + a concrete
+# number or fact + an emotional hook, 55-60 chars so it doesn't truncate on mobile.
+# "Exaggerate the tension, not the outcome" — titles must stay factually accurate to
+# the script, no fabricated claims.
+
+TITLE_SYSTEM = """\
+You are a YouTube title strategist. You write titles using proven high-CTR formulas,
+but you NEVER misrepresent what the video actually contains — you exaggerate the
+TENSION and stakes already present in the script, never invent a claim the script
+doesn't support. Misleading clickbait is not acceptable; a strong honest hook is.
+
+FORMULAS TO DRAW FROM (mix, don't just pick one every time):
+- Curiosity gap: hint at a shocking fact/connection without revealing it
+- Number-based: "[Number] [Things] That [Concrete Result]"
+- Loss-aversion / FOMO: what the viewer doesn't know yet, what they're missing
+- Personal-authority: "[credible framing]. Here's what [it] means for you."
+
+RULES:
+- 55-60 characters total (titles longer than this get truncated on mobile — this is
+  a hard constraint, not a suggestion)
+- Every claim in the title must be directly supported by the script content given
+- No emoji, no ALL CAPS spam, no exclamation-mark stacking
+- Return options in the exact language the script is written in
+"""
+
+def generate_titles(full_script: str, n: int = 5) -> list:
+    """Generate N candidate clickbait-but-honest titles from the full script."""
+    user_msg = (
+        f"Generate {n} distinct YouTube title options for this script, using the "
+        f"formulas above. Return ONLY a JSON array of {n} strings, nothing else.\n\n"
+        f"SCRIPT:\n{full_script.strip()[:6000]}"
+    )
+    try:
+        txt = post_gemini_native([
+            {"role": "system", "content": TITLE_SYSTEM},
+            {"role": "user", "content": user_msg},
+        ], json_mode=True, temp=0.9)
+        arr = json.loads(txt)
+        if isinstance(arr, dict):
+            for v in arr.values():
+                if isinstance(v, list): arr = v; break
+        if isinstance(arr, list):
+            return [str(t).strip() for t in arr][:n]
+    except Exception as e:
+        print(f"  [Title] Fehler: {e}", flush=True)
+    return []
+
+
+# ---------- Thumbnail generator ----------
+# Research-backed rules (2026 CTR studies): one dominant subject, one message, one
+# second to understand. Strong contrast (dark bg + light subject, or reverse).
+# Expressive/exaggerated emotion — thumbnails with visible expression see 20-30%
+# higher CTR. Max 3-5 words of on-image text (under 4 words = ~30% higher CTR than
+# text-heavy designs). 2-3 colors max. 1280x720 (16:9), sharp focus, rule of thirds.
+
+THUMBNAIL_PROMPT_SYSTEM = """\
+You write a single image-generation prompt for a YouTube THUMBNAIL — this is a
+fundamentally different job than a storyboard scene. A thumbnail must work as a tiny,
+high-contrast image glanced at for under a second in a crowded feed. Apply these
+non-negotiable rules:
+
+1. ONE dominant subject only — the main character or the single most concrete symbol
+   of the video's hook. No busy multi-element scenes.
+2. STRONG CONTRAST — either a light subject on a dark background or a dark subject on
+   a light background. Never a low-contrast, evenly-lit scene.
+3. EXAGGERATED, READABLE EMOTION on the subject if it's a character — shock, alarm,
+   intense focus, fear, urgency. Subtle/neutral expressions do not work for thumbnails.
+4. RULE OF THIRDS — subject off-center, clear headroom, nothing important near the edges.
+5. NO more than one small supporting prop/symbol tied directly to the video's hook.
+6. Do not describe on-image text here — text is composited separately.
+7. Keep the established character/art style exactly as given in STYLE CONTEXT, but push
+   the POSE, EXPRESSION, and LIGHTING to thumbnail-appropriate extremes — a thumbnail
+   is the most exaggerated, highest-contrast frame of the whole video, not a typical one.
+
+Output ONE dense paragraph, 50-70 words. Start with the subject and its expression.
+"""
+
+def make_thumbnail_prompt(full_script: str, master_style: str) -> str:
+    """Builds the single most attention-grabbing image prompt for this video's thumbnail,
+    grounded in the actual hook/subject of the script (not a generic dramatic pose)."""
+    user_msg = (
+        f"STYLE CONTEXT (character/art style — follow exactly, push expression/lighting "
+        f"to thumbnail extremes):\n{master_style.strip()}\n\n"
+        f"FULL SCRIPT — identify the single most shocking/central hook and depict that:\n"
+        f"{full_script.strip()[:4000]}\n\n"
+        f"Write the thumbnail image prompt now."
+    )
+    try:
+        return post_gemini_native([
+            {"role": "system", "content": THUMBNAIL_PROMPT_SYSTEM},
+            {"role": "user", "content": user_msg},
+        ], temp=0.7).strip()
+    except Exception as e:
+        print(f"  [Thumbnail] Prompt-Fehler: {e}", flush=True)
+        return "A single figure in a moment of shocked realization, strong dramatic lighting, high contrast."
+
+
+def gen_thumbnail_image(prompt: str, master_style: str, out_path: str,
+                         model: str = "nano-banana-2", ref_urls: list = None) -> dict:
+    """Submits + polls + downloads a 16:9 thumbnail image. Reuses the same KIE image
+    pipeline as scene generation, just with thumbnail-specific dimensions/prompt."""
+    full_prompt = prompt.strip() + "\n\n" + master_style.strip()
+    try:
+        task_id = _kie_submit_image(full_prompt, model=model, ref_urls=ref_urls)
+    except RuntimeError as e:
+        return {"ok": False, "error": str(e)}
+
+    print(f"  [Thumbnail] Task {task_id} läuft …", flush=True)
+    poll_url  = f"{KIE_API}/recordInfo?taskId={task_id}"
+    poll_hdrs = {"Authorization": f"Bearer {kie_key()}"}
+    for poll_i in range(50):
+        time.sleep(3)
+        try:
+            with urllib.request.urlopen(urllib.request.Request(poll_url, headers=poll_hdrs), timeout=15) as r2:
+                info = json.load(r2).get("data", {})
+        except Exception as e:
+            print(f"  [Thumbnail] Poll-Fehler: {e}", flush=True); continue
+        state = info.get("state", "")
+        if state != "waiting" or poll_i % 5 == 0:
+            print(f"  [Thumbnail] {state}", flush=True)
+        if state == "success":
+            try:    urls = json.loads(info.get("resultJson", "{}")).get("resultUrls", [])
+            except: urls = []
+            if not urls: return {"ok": False, "error": "KIE: kein Bild in resultUrls"}
+            try:
+                dl_req = urllib.request.Request(urls[0],
+                    headers={"Referer": "https://kie.ai/", "User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(dl_req, timeout=60) as img_r:
+                    open(out_path, "wb").write(img_r.read())
+            except Exception as e:
+                return {"ok": False, "error": f"Download fehlgeschlagen: {e}"}
+            return {"ok": True, "file": os.path.basename(out_path), "source_url": urls[0]}
+        if state == "fail":
+            return {"ok": False, "error": f"KIE fehlgeschlagen: {info.get('failMsg','unbekannt')}"}
+    return {"ok": False, "error": "KIE Timeout (>150s)"}
 
 # ---------- Skript -> Beats (inhaltlich, nach Zeit/Wort) ----------
 def clean_script(s):
@@ -384,7 +595,11 @@ def analyze_script(beats):
             print(f"Analyse-Fehler (Versuch {attempt}):", e)
     return {}
 
-IMAGE_PROMPT_CHUNK_SIZE = 9    # scenes per LLM call — same reasoning as video: avoid context degradation
+IMAGE_PROMPT_CHUNK_SIZE = 20   # scenes per LLM call. Bigger chunk = fewer calls = the analysis
+# JSON + few-shot examples + style context (repeated in full on EVERY chunk call) get sent
+# far fewer times — that repeated overhead, not raw call count, is the real cost driver.
+# 20 is a middle ground: cuts repeated-context cost ~55% vs. the earlier value of 9, while
+# thinkingLevel=high keeps later-in-chunk quality from degrading like it did on 2.5-flash.
 IMAGE_PROMPT_MIN_LEN    = 220  # chars — stills need less than video (no camera-move description) but still concrete
 
 _IMAGE_PROMPT_FEWSHOT = """\
@@ -519,17 +734,29 @@ def visual_prompts(scenes, analysis=None):
     analysis_ctx = json.dumps(analysis, ensure_ascii=False, indent=1) if analysis else "{}"
     anon_words = _anonymized_words(analysis)
 
+    def _fetch_image_chunk(chunk, chunk_offset):
+        """Try the chunk; on failure (incl. truncated/malformed JSON on large chunks),
+        split in half and retry each half instead of giving up the whole chunk to the
+        generic fallback — a truncation only costs half the chunk, not all of it."""
+        try:
+            return _image_prompt_chunk(chunk, chunk_offset, total, analysis_ctx)
+        except Exception as e:
+            if len(chunk) <= 1:
+                print(f"  [Plan] Bild-Chunk-Fehler (Szene {chunk_offset}): {e} — Fallback", flush=True)
+                return [{"image_prompt": f"Scene illustrating: {chunk[0][:80]}. Simple, clear composition.",
+                         "concrete_entity": ""}]
+            mid = len(chunk) // 2
+            print(f"  [Plan] Bild-Chunk-Fehler: {e} — teile Chunk und wiederhole …", flush=True)
+            left  = _fetch_image_chunk(chunk[:mid], chunk_offset)
+            right = _fetch_image_chunk(chunk[mid:], chunk_offset + mid)
+            return left + right
+
     prompts: list[str] = []
     chunks = [beats[i:i+IMAGE_PROMPT_CHUNK_SIZE] for i in range(0, total, IMAGE_PROMPT_CHUNK_SIZE)]
     offset = 0
     for ci, chunk in enumerate(chunks):
         print(f"  [Plan] Bild-Chunk {ci+1}/{len(chunks)} ({len(chunk)} Szenen) …", flush=True)
-        try:
-            entries = _image_prompt_chunk(chunk, offset, total, analysis_ctx)
-        except Exception as e:
-            print(f"  [Plan] Bild-Chunk-Fehler: {e} — Fallback für diesen Chunk", flush=True)
-            entries = [{"image_prompt": f"Scene illustrating: {t[:80]}. Simple, clear composition.",
-                        "concrete_entity": ""} for t in chunk]
+        entries = _fetch_image_chunk(chunk, offset)
 
         for j, entry in enumerate(entries):
             beat_i = offset + j
@@ -549,7 +776,9 @@ def story_phase(i: int, total: int) -> str:
         "RESOLUTION"
     )
 
-VIDEO_PROMPT_CHUNK_SIZE = 9   # scenes per LLM call — keeps analysis focus from degrading over long batches
+VIDEO_PROMPT_CHUNK_SIZE = 20  # scenes per LLM call — see IMAGE_PROMPT_CHUNK_SIZE comment:
+# the repeated analysis/few-shot/style context per chunk call is the real cost driver, not
+# call count. Larger chunks cut that repetition significantly.
 VIDEO_PROMPT_MIN_LEN    = 280  # chars — forces setting/light/camera to be spelled out, not just a mood word
 
 _VIDEO_PROMPT_FEWSHOT = """\
@@ -683,10 +912,15 @@ def _video_prompt_single_retry(beat_text: str, beat_i: int, total: int,
                              "Character center frame, deliberate gesture matching the scene energy. Camera slow zoom-in.",
         }
 
-def video_prompts_batch(scenes: list, vid_master: str, has_char_ref: bool = False) -> list:
+def video_prompts_batch(scenes: list, vid_master: str, has_char_ref: bool = False,
+                         analysis: dict = None) -> list:
     """Generate all T2V video prompts, chunked (not all-in-one) to avoid context
     degradation over long scripts, with forced intermediate reasoning fields and a
     validation+retry pass for entries that come back too short/generic.
+
+    Pass an already-computed `analysis` (from analyze_script()) to avoid re-running
+    the full-script analysis a second time when the image pipeline already did it
+    for the same scenes — analyze_script() is a real LLM call, not free.
 
     Returns list of prompt strings, one per scene, same order as scenes.
     """
@@ -695,10 +929,30 @@ def video_prompts_batch(scenes: list, vid_master: str, has_char_ref: bool = Fals
     if total == 0:
         return []
 
-    print(f"  [VidPrompt] Analysiere {total} Szenen …", flush=True)
-    analysis = analyze_script(beats)
+    if analysis is None:
+        print(f"  [VidPrompt] Analysiere {total} Szenen …", flush=True)
+        analysis = analyze_script(beats)
     analysis_ctx = json.dumps(analysis, ensure_ascii=False, indent=1) if analysis else "{}"
     anon_words = _anonymized_words(analysis)
+
+    def _fetch_video_chunk(chunk, chunk_offset, prev):
+        """Same split-retry strategy as the image pipeline — a truncated/malformed JSON
+        response on a big chunk only costs half the chunk, not the whole thing."""
+        try:
+            return _video_prompt_chunk(chunk, chunk_offset, total, analysis_ctx, vid_master,
+                                        prev, has_char_ref)
+        except Exception as e:
+            if len(chunk) <= 1:
+                print(f"  [VidPrompt] Chunk-Fehler (Szene {chunk_offset}): {e} — Fallback", flush=True)
+                return [{"video_prompt": f"Scene illustrating: {chunk[0][:80]}. "
+                         "Character center frame, deliberate gesture matching the scene energy. Camera slow zoom-in.",
+                         "concrete_entity": ""}]
+            mid = len(chunk) // 2
+            print(f"  [VidPrompt] Chunk-Fehler: {e} — teile Chunk und wiederhole …", flush=True)
+            left  = _fetch_video_chunk(chunk[:mid], chunk_offset, prev)
+            left_prompts = [str(entry.get("video_prompt") or "") for entry in left]
+            right = _fetch_video_chunk(chunk[mid:], chunk_offset + mid, prev + left_prompts)
+            return left + right
 
     prompts: list[str] = []
     prev_prompts: list[str] = []
@@ -706,14 +960,7 @@ def video_prompts_batch(scenes: list, vid_master: str, has_char_ref: bool = Fals
     offset = 0
     for ci, chunk in enumerate(chunks):
         print(f"  [VidPrompt] Chunk {ci+1}/{len(chunks)} ({len(chunk)} Szenen) …", flush=True)
-        try:
-            entries = _video_prompt_chunk(chunk, offset, total, analysis_ctx, vid_master,
-                                           prev_prompts, has_char_ref)
-        except Exception as e:
-            print(f"  [VidPrompt] Chunk-Fehler: {e} — Fallback für diesen Chunk", flush=True)
-            entries = [{"video_prompt": f"Scene illustrating: {t[:80]}. "
-                        "Character center frame, deliberate gesture matching the scene energy. Camera slow zoom-in.",
-                        "concrete_entity": ""} for t in chunk]
+        entries = _fetch_video_chunk(chunk, offset, prev_prompts)
 
         for j, entry in enumerate(entries):
             beat_i = offset + j
@@ -808,13 +1055,29 @@ def _build_video_prompt(scene_prompt: str, vid_master: str) -> str:
     return scene_prompt.strip() + "\n\nVISUAL STYLE (apply exactly):\n" + vid_master.strip()
 
 
-def _kie_submit_image(full_prompt: str) -> str:
-    """Submit image task to KIE, return task_id."""
+VALID_IMAGE_MODELS = ("nano-banana-2", "nano-banana-2-lite")
+
+def _kie_submit_image(full_prompt: str, model: str = "nano-banana-2", ref_urls: list = None) -> str:
+    """Submit image task to KIE, return task_id.
+
+    ref_urls: reference image URL(s) for visual consistency. IMPORTANT — the correct
+    field per KIE's actual docs is "image_input" for nano-banana-2 (up to 14 images) and
+    "image_urls" for nano-banana-2-lite (up to 10). Using the wrong field name silently
+    does nothing — KIE accepts the request (200 OK) but the reference has zero effect on
+    the output, which is exactly the bug this fixes (verified empirically: submitting
+    "image_urls" against nano-banana-2 produced a result with no resemblance at all to
+    the reference image)."""
+    if model not in VALID_IMAGE_MODELS:
+        model = "nano-banana-2"
     hdrs = {"Authorization": f"Bearer {kie_key()}", "Content-Type": "application/json"}
-    body = {"model": KIE_MODEL, "input": {
+    input_body = {
         "prompt": full_prompt, "aspect_ratio": "16:9",
         "resolution": "2K", "output_format": "jpg",
-    }}
+    }
+    if ref_urls:
+        ref_field = "image_input" if model == "nano-banana-2" else "image_urls"
+        input_body[ref_field] = ref_urls[:14 if model == "nano-banana-2" else 10]
+    body = {"model": model, "input": input_body}
     req = urllib.request.Request(f"{KIE_API}/createTask", data=json.dumps(body).encode(), headers=hdrs)
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
@@ -826,12 +1089,43 @@ def _kie_submit_image(full_prompt: str) -> str:
     return resp["data"]["taskId"]
 
 
-def _image_job_worker(job_id: str, task_id: str, out_path: str, plan_path: str, scene_i: int):
-    """Background thread: polls KIE task, downloads result, updates plan."""
+IMAGE_JOB_MAX_POLLS = 50  # 50 * 3s = 150s. 90s (30 polls) turned out too aggressive in
+# practice — live runs showed several legitimate generations still succeeding well past
+# 90s, causing unnecessary timeouts that then had to be retried (wasting a credit each
+# time). 150s is a middle ground between the original 4-minute cap (way too long to block
+# a batch) and 90s (too short, false-positive timeouts on normal but slower generations).
+
+def _image_job_worker(job_id: str, task_id: str, out_path: str, plan_path: str, scene_i: int,
+                       scene_key: tuple = None):
+    """Background thread: polls KIE task, downloads result, updates plan. Only reached
+    via /api/generate_one, which already acquired IMAGE_GEN_SEMAPHORE before submitting —
+    release it here once this scene's generation is fully done, one way or another."""
+    try:
+        _image_job_worker_inner(job_id, task_id, out_path, plan_path, scene_i)
+    finally:
+        IMAGE_GEN_SEMAPHORE.release()
+        if scene_key is not None:
+            with _ACTIVE_SCENE_JOBS_LOCK:
+                if ACTIVE_SCENE_JOBS.get(scene_key) == job_id:
+                    del ACTIVE_SCENE_JOBS[scene_key]
+
+def _mark_scene_error(plan_path: str, scene_i: int):
+    """Persist a failed/timed-out generation into plan.json too, not just the in-memory
+    JOBS dict — otherwise a scene a browser reloaded away from stays stuck showing
+    'läuft' forever, since nothing on reload can tell it actually failed."""
+    try:
+        plan = json.load(open(plan_path))
+        for s in plan["scenes"]:
+            if s["i"] == scene_i and s.get("status") == "läuft":
+                s["status"] = "fehler"
+        json.dump(plan, open(plan_path, "w"), ensure_ascii=False, indent=1)
+    except: pass
+
+def _image_job_worker_inner(job_id: str, task_id: str, out_path: str, plan_path: str, scene_i: int):
     poll_url  = f"{KIE_API}/recordInfo?taskId={task_id}"
     poll_hdrs = {"Authorization": f"Bearer {kie_key()}"}
     print(f"  [KIE] Job {job_id} / task {task_id} läuft …", flush=True)
-    for _ in range(80):
+    for poll_i in range(IMAGE_JOB_MAX_POLLS):
         time.sleep(3)
         try:
             with urllib.request.urlopen(urllib.request.Request(poll_url, headers=poll_hdrs), timeout=15) as r:
@@ -841,15 +1135,26 @@ def _image_job_worker(job_id: str, task_id: str, out_path: str, plan_path: str, 
         state    = info.get("state", "")
         progress = int(info.get("progress", 0))
         JOBS[job_id]["progress"] = progress
-        print(f"  [KIE] {job_id} {state} {progress}%", flush=True)
+        # Only log every 5th poll while still waiting, to avoid flooding the log —
+        # state changes (success/fail) always print below regardless.
+        if state != "waiting" or poll_i % 5 == 0:
+            print(f"  [KIE] {job_id} {state} {progress}%", flush=True)
         if state == "success":
             try:    urls = json.loads(info.get("resultJson", "{}")).get("resultUrls", [])
             except: urls = []
             if not urls:
                 JOBS[job_id] = {"status": "error", "progress": 0, "error": "Kein Bild in resultUrls"}
+                _mark_scene_error(plan_path, scene_i)
                 return
-            with urllib.request.urlopen(urls[0], timeout=60) as img_r:
-                open(out_path, "wb").write(img_r.read())
+            try:
+                dl_req = urllib.request.Request(urls[0],
+                    headers={"Referer": "https://kie.ai/", "User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(dl_req, timeout=60) as img_r:
+                    open(out_path, "wb").write(img_r.read())
+            except Exception as e:
+                JOBS[job_id] = {"status": "error", "progress": 0, "error": f"Bild-Download fehlgeschlagen: {e}"}
+                _mark_scene_error(plan_path, scene_i)
+                return
             fn = os.path.basename(out_path)
             JOBS[job_id] = {"status": "done", "progress": 100,
                             "file": fn, "source_url": urls[0], "ts": int(time.time()), "error": None}
@@ -865,8 +1170,114 @@ def _image_job_worker(job_id: str, task_id: str, out_path: str, plan_path: str, 
         if state == "fail":
             JOBS[job_id] = {"status": "error", "progress": 0,
                             "error": f"KIE fehlgeschlagen: {info.get('failMsg','unbekannt')}"}
+            _mark_scene_error(plan_path, scene_i)
             return
-    JOBS[job_id] = {"status": "error", "progress": 0, "error": "KIE Timeout (>4 min)"}
+    print(f"  [KIE] {job_id} Timeout nach {IMAGE_JOB_MAX_POLLS*3}s — gebe auf", flush=True)
+    JOBS[job_id] = {"status": "error", "progress": 0, "error": f"KIE Timeout (>{IMAGE_JOB_MAX_POLLS*3}s)"}
+    _mark_scene_error(plan_path, scene_i)
+
+
+def _batch_generate_worker(cid: str, vid: str):
+    """Runs 'Alle Bilder generieren' entirely server-side — survives page reloads and
+    tab closes. Sequential by design (matches the earlier rate-limit-safety requirement):
+    each scene is fully submitted, polled, and downloaded before the next one starts."""
+    key = (cid, vid)
+    plan_path = v_plan(cid, vid)
+    try:
+        plan = json.load(open(plan_path))
+    except Exception as e:
+        with _BATCH_JOBS_LOCK:
+            BATCH_JOBS[key] = {"running": False, "stop_requested": False, "done": 0,
+                                "total": 0, "current_i": None, "error": f"Plan lesen: {e}"}
+        return
+
+    scenes = plan["scenes"]
+    total = len(scenes)
+    todo = [s for s in scenes if not s.get("file")]
+    with _BATCH_JOBS_LOCK:
+        BATCH_JOBS[key] = {"running": True, "stop_requested": False,
+                            "done": total - len(todo), "total": total,
+                            "current_i": None, "error": None}
+    print(f"  [BatchGen] {cid}/{vid}: {len(todo)} von {total} Szenen offen", flush=True)
+
+    master = read_master(cid)
+    char_refs = load_char_refs(cid)
+    image_model = get_channel_image_model(cid)
+    char_ref_url = get_channel_char_ref(cid)
+
+    for scene in todo:
+        with _BATCH_JOBS_LOCK:
+            if BATCH_JOBS[key]["stop_requested"]:
+                print(f"  [BatchGen] {cid}/{vid}: gestoppt", flush=True)
+                BATCH_JOBS[key]["running"] = False
+                return
+            BATCH_JOBS[key]["current_i"] = scene["i"]
+
+        i = scene["i"]
+        # Re-read the plan fresh in case a manual single-scene click already filled this
+        # scene in while the batch was working on earlier ones.
+        try:
+            fresh_plan = json.load(open(plan_path))
+            fresh_scene = next((s for s in fresh_plan["scenes"] if s["i"] == i), None)
+            if fresh_scene and fresh_scene.get("file"):
+                with _BATCH_JOBS_LOCK:
+                    BATCH_JOBS[key]["done"] += 1
+                continue
+        except Exception:
+            pass
+
+        scene_key = (cid, vid, i)
+        fn = f"{i:03d}.jpg"
+        out_path = os.path.join(v_out(cid, vid), fn)
+
+        with _ACTIVE_SCENE_JOBS_LOCK:
+            existing_job_id = ACTIVE_SCENE_JOBS.get(scene_key)
+            already_running = bool(existing_job_id and JOBS.get(existing_job_id, {}).get("status") == "running")
+            if not already_running:
+                full_prompt = _build_image_prompt(scene.get("prompt", ""), master, char_refs)
+
+        if already_running:
+            # A manual click is already generating this exact scene — poll for it to
+            # finish instead of submitting a second KIE task for the same scene.
+            while JOBS.get(existing_job_id, {}).get("status") == "running":
+                time.sleep(2)
+        else:
+            # Shares the same global cap as individual clicks (see IMAGE_GEN_SEMAPHORE) —
+            # the batch is already sequential on its own, but this makes sure a burst of
+            # manual clicks elsewhere can't add unlimited extra KIE submissions on top.
+            IMAGE_GEN_SEMAPHORE.acquire()
+            try:
+                task_id = _kie_submit_image(full_prompt, model=image_model,
+                                             ref_urls=[char_ref_url] if char_ref_url else None)
+            except Exception as e:
+                IMAGE_GEN_SEMAPHORE.release()
+                print(f"  [BatchGen] Szene {i} Submit-Fehler: {e}", flush=True)
+                _mark_scene_error(plan_path, i)
+                with _BATCH_JOBS_LOCK:
+                    BATCH_JOBS[key]["done"] += 1
+                continue
+            job_id = f"{cid}_{vid}_{i}_{int(time.time())}"
+            JOBS[job_id] = {"status": "running", "progress": 0, "file": None,
+                            "source_url": None, "ts": None, "error": None}
+            with _ACTIVE_SCENE_JOBS_LOCK:
+                ACTIVE_SCENE_JOBS[scene_key] = job_id
+            try:
+                # Blocks until this scene resolves — fully sequential, one KIE task in
+                # flight at a time, matching the original rate-limit-safety requirement.
+                _image_job_worker_inner(job_id, task_id, out_path, plan_path, i)
+            finally:
+                IMAGE_GEN_SEMAPHORE.release()
+                with _ACTIVE_SCENE_JOBS_LOCK:
+                    if ACTIVE_SCENE_JOBS.get(scene_key) == job_id:
+                        del ACTIVE_SCENE_JOBS[scene_key]
+
+        with _BATCH_JOBS_LOCK:
+            BATCH_JOBS[key]["done"] += 1
+
+    with _BATCH_JOBS_LOCK:
+        BATCH_JOBS[key]["running"] = False
+        BATCH_JOBS[key]["current_i"] = None
+    print(f"  [BatchGen] {cid}/{vid}: fertig", flush=True)
 
 
 def _veo_job_worker(job_id: str, task_id: str, scene: dict,
@@ -960,8 +1371,13 @@ def gen_image(scene_prompt, master, out_path, char_refs=None):
             try:    urls = json.loads(info.get("resultJson", "{}")).get("resultUrls", [])
             except: urls = []
             if not urls: return {"ok": False, "error": "KIE: kein Bild in resultUrls"}
-            with urllib.request.urlopen(urls[0], timeout=60) as img_r:
-                open(out_path, "wb").write(img_r.read())
+            try:
+                dl_req = urllib.request.Request(urls[0],
+                    headers={"Referer": "https://kie.ai/", "User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(dl_req, timeout=60) as img_r:
+                    open(out_path, "wb").write(img_r.read())
+            except Exception as e:
+                return {"ok": False, "error": f"Bild-Download fehlgeschlagen: {e}"}
             return {"ok": True, "file": os.path.basename(out_path), "ts": int(time.time()), "source_url": urls[0]}
         if state == "fail":
             return {"ok": False, "error": f"KIE fehlgeschlagen: {info.get('failMsg','unbekannt')}"}
@@ -1397,10 +1813,20 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/job_status":
             job_id = qs.get("job_id", [""])[0]
             return self._send(200, JOBS.get(job_id, {"status": "unknown"}))
+        if p == "/api/generate_all_status":
+            with _BATCH_JOBS_LOCK:
+                state = BATCH_JOBS.get((cid, vid))
+            return self._send(200, state or {"running": False})
+        if p == "/api/video_meta":
+            meta = load_v_meta(cid, vid)
+            meta["has_thumbnail"] = os.path.exists(os.path.join(v_out(cid, vid), "thumbnail.jpg"))
+            return self._send(200, meta)
         if p == "/api/transcribe_status":
             return self._send(200, dict(TX_STATUS))
         if p == "/api/master":
             return self._send(200, {"master": read_master(cid)})
+        if p == "/api/image_model":
+            return self._send(200, {"model": get_channel_image_model(cid), "options": list(VALID_IMAGE_MODELS)})
         if p == "/api/plan":
             try:    return self._send(200, json.load(open(v_plan(cid, vid))))
             except: return self._send(200, {"scenes": []})
@@ -1506,6 +1932,9 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/master":
             write_master(cid, d.get("master", ""))
             return self._send(200, {"ok": True})
+        if p == "/api/image_model":
+            set_channel_image_model(cid, d.get("model", "nano-banana-2"))
+            return self._send(200, {"ok": True})
 
         # ── Script generator (global, no channel needed) ──────────────────────
         if p == "/api/generate_script":
@@ -1519,6 +1948,68 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 import traceback; traceback.print_exc()
                 return self._send(500, {"error": str(e)})
+
+        # ── Title generator ──────────────────────────────────────────────────
+        if p == "/api/generate_titles":
+            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
+            try:
+                plan = json.load(open(v_plan(cid, vid)))
+                full_script = " ".join(s.get("text", "") for s in plan["scenes"])
+            except Exception as e:
+                return self._send(500, {"error": f"Plan lesen: {e}"})
+            if not full_script.strip():
+                return self._send(400, {"error": "Kein Skript vorhanden"})
+            print(f"  [Title] Generiere Titel-Optionen …", flush=True)
+            titles = generate_titles(full_script, n=5)
+            if not titles:
+                return self._send(500, {"error": "Titel-Generierung fehlgeschlagen"})
+            meta = load_v_meta(cid, vid)
+            meta["titles"] = titles
+            save_v_meta(cid, vid, meta)
+            return self._send(200, {"ok": True, "titles": titles})
+
+        if p == "/api/select_title":
+            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
+            meta = load_v_meta(cid, vid)
+            meta["selected_title"] = d.get("title", "").strip()
+            save_v_meta(cid, vid, meta)
+            return self._send(200, {"ok": True})
+
+        # ── Thumbnail generator ───────────────────────────────────────────────
+        if p == "/api/generate_thumbnail":
+            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
+            try:
+                plan = json.load(open(v_plan(cid, vid)))
+                full_script = " ".join(s.get("text", "") for s in plan["scenes"])
+            except Exception as e:
+                return self._send(500, {"error": f"Plan lesen: {e}"})
+            if not full_script.strip():
+                return self._send(400, {"error": "Kein Skript vorhanden"})
+            mode = get_video_mode(cid, vid)
+            try:
+                master_style = (open(ch_vid_master(cid)).read().strip() if mode == "video"
+                                 else read_master(cid)) or VIDEO_MASTER_DEFAULT
+            except: master_style = VIDEO_MASTER_DEFAULT
+            print(f"  [Thumbnail] Generiere Prompt …", flush=True)
+            prompt = make_thumbnail_prompt(full_script, master_style)
+            print(f"  [Thumbnail] Prompt: {prompt[:120]} …", flush=True)
+            IMAGE_GEN_SEMAPHORE.acquire()
+            print(f"  [Thumbnail] Semaphore erhalten, submitte an KIE …", flush=True)
+            char_ref_url = get_channel_char_ref(cid)
+            try:
+                res = gen_thumbnail_image(prompt, master_style, os.path.join(v_out(cid, vid), "thumbnail.jpg"),
+                                           model=get_channel_image_model(cid),
+                                           ref_urls=[char_ref_url] if char_ref_url else None)
+            finally:
+                IMAGE_GEN_SEMAPHORE.release()
+            if not res["ok"]:
+                print(f"  [Thumbnail] Fehler: {res['error']}", flush=True)
+                return self._send(500, {"error": res["error"]})
+            print(f"  [Thumbnail] Fertig → {res['file']}", flush=True)
+            meta = load_v_meta(cid, vid)
+            meta["thumbnail_prompt"] = prompt
+            save_v_meta(cid, vid, meta)
+            return self._send(200, {"ok": True, "file": res["file"], "prompt": prompt, "ts": int(time.time())})
 
         # ── Scene plan ────────────────────────────────────────────────────────
         if p == "/api/plan":
@@ -1541,13 +2032,11 @@ class H(BaseHTTPRequestHandler):
             for s, pr in zip(scenes, prompts):
                 s["prompt"] = pr; s["file"] = None
                 s["status"] = "geplant"; s["t"] = fmt_t(s["start"])
-            # Always generate video prompts so both modes are ready
-            try: vid_master = open(ch_vid_master(cid)).read().strip()
-            except: vid_master = VIDEO_MASTER_DEFAULT
-            has_ref = os.path.exists(os.path.join(ch_dir(cid), "char_ref_url.txt"))
-            vid_prompts = video_prompts_batch(scenes, vid_master, has_char_ref=has_ref)
-            for s, vp in zip(scenes, vid_prompts):
-                s["video_prompt"] = vp
+                # video_prompt stays empty — only generated on demand per scene (see
+                # /api/generate_t2v, /api/preview_t2v_prompt) so switching to video mode
+                # or generating a handful of scenes doesn't cost a full-script Gemini pass
+                # nobody asked for. Core workflow is images first, I2V afterward.
+                s["video_prompt"] = ""
                 s["phase"] = story_phase(s["i"], len(scenes))
             out = {"scenes": scenes, "wpm": wpm, "sec": sec, "characters": analysis.get("characters", [])}
             json.dump(out, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
@@ -1586,6 +2075,7 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True, "prompt": prompt})
 
         if p == "/api/generate_t2v":
+            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
             i = int(d["i"])
             try:
                 plan = json.load(open(v_plan(cid, vid)))
@@ -1733,13 +2223,9 @@ class H(BaseHTTPRequestHandler):
             tx(4, "Schreibe Bild-Prompts …")
             prompts = visual_prompts(scenes, analysis)
             for s, pr in zip(scenes, prompts): s["prompt"] = pr
-            tx(4, f"Schreibe Video-Prompts für {len(scenes)} Szenen …")
-            try: vid_master = open(ch_vid_master(cid)).read().strip()
-            except: vid_master = VIDEO_MASTER_DEFAULT
-            has_ref = os.path.exists(os.path.join(ch_dir(cid), "char_ref_url.txt"))
-            vid_prompts = video_prompts_batch(scenes, vid_master, has_char_ref=has_ref)
-            for s, vp in zip(scenes, vid_prompts):
-                s["video_prompt"] = vp
+            # video_prompt stays empty — only generated on demand per scene, see /api/plan comment
+            for s in scenes:
+                s["video_prompt"] = ""
                 s["phase"] = story_phase(s["i"], len(scenes))
             tx(4, f"Fertig — {len(scenes)} Szenen bereit ✓")
             TX_STATUS["running"] = False
@@ -1781,18 +2267,63 @@ class H(BaseHTTPRequestHandler):
                 return self._send(500, {"error": str(e)})
 
         # ── Generate one image (async) ────────────────────────────────────────
+        # ── "Alle Bilder generieren" — runs server-side, survives reloads ──────
+        if p == "/api/generate_all_start":
+            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
+            key = (cid, vid)
+            with _BATCH_JOBS_LOCK:
+                if BATCH_JOBS.get(key, {}).get("running"):
+                    return self._send(200, {"ok": True, "already_running": True})
+                # Set running=True HERE, atomically with the check above, before the
+                # worker thread even exists — not inside the thread itself. Setting it
+                # later left a window where two rapid start calls (e.g. a user
+                # double-clicking, or stop-then-immediately-start) could both see
+                # "not running" and each spin up their own worker, causing multiple
+                # concurrent generation loops hammering KIE in parallel.
+                BATCH_JOBS[key] = {"running": True, "stop_requested": False, "done": 0,
+                                    "total": 0, "current_i": None, "error": None}
+            threading.Thread(target=_batch_generate_worker, args=(cid, vid), daemon=True).start()
+            return self._send(200, {"ok": True, "already_running": False})
+
+        if p == "/api/generate_all_stop":
+            key = (cid, vid)
+            with _BATCH_JOBS_LOCK:
+                if key in BATCH_JOBS:
+                    BATCH_JOBS[key]["stop_requested"] = True
+            return self._send(200, {"ok": True})
+
         if p == "/api/generate_one":
+            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
             i = int(d["i"]); prompt = d.get("prompt", "")
+            scene_key = (cid, vid, i)
+            with _ACTIVE_SCENE_JOBS_LOCK:
+                existing_job_id = ACTIVE_SCENE_JOBS.get(scene_key)
+                if existing_job_id and JOBS.get(existing_job_id, {}).get("status") == "running":
+                    # Already generating this exact scene (double-click, second tab, or
+                    # "Alle generieren" running twice) — hand back the SAME job instead
+                    # of paying for and starting a second KIE task.
+                    print(f"  [KIE] Szene {i} bereits in Arbeit ({existing_job_id}) — dupliziere nicht", flush=True)
+                    return self._send(200, {"ok": True, "job_id": existing_job_id, "deduped": True})
             fn = f"{i:03d}.jpg"
             out_path = os.path.join(v_out(cid, vid), fn)
             full_prompt = _build_image_prompt(prompt, read_master(cid), load_char_refs(cid))
+            # Global concurrency cap — blocks here if MAX_CONCURRENT_IMAGE_GENS are already
+            # in flight from ANY source (batch or other individual clicks), instead of
+            # firing this KIE submission immediately alongside all the others. Released by
+            # _image_job_worker once this scene's generation fully finishes.
+            IMAGE_GEN_SEMAPHORE.acquire()
+            char_ref_url = get_channel_char_ref(cid)
             try:
-                task_id = _kie_submit_image(full_prompt)
+                task_id = _kie_submit_image(full_prompt, model=get_channel_image_model(cid),
+                                             ref_urls=[char_ref_url] if char_ref_url else None)
             except Exception as e:
+                IMAGE_GEN_SEMAPHORE.release()
                 return self._send(500, {"error": str(e)})
             job_id = f"{cid}_{vid}_{i}_{int(time.time())}"
             JOBS[job_id] = {"status": "running", "progress": 0, "file": None,
                             "source_url": None, "ts": None, "error": None}
+            with _ACTIVE_SCENE_JOBS_LOCK:
+                ACTIVE_SCENE_JOBS[scene_key] = job_id
             # Mark scene as running in plan
             try:
                 plan = json.load(open(v_plan(cid, vid)))
@@ -1803,13 +2334,14 @@ class H(BaseHTTPRequestHandler):
             except: pass
             threading.Thread(
                 target=_image_job_worker,
-                args=(job_id, task_id, out_path, v_plan(cid, vid), i),
+                args=(job_id, task_id, out_path, v_plan(cid, vid), i, scene_key),
                 daemon=True
             ).start()
             return self._send(200, {"ok": True, "job_id": job_id})
 
         # ── Generate video from image ─────────────────────────────────────────
         if p == "/api/generate_video":
+            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
             i = int(d["i"])
             # Match video duration to scene length (clamped to KIE's 6-30s range)
             scene_dur = float(d.get("scene_dur", d.get("duration", 6)))
