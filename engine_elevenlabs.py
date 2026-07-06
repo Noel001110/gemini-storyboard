@@ -26,14 +26,16 @@ import threading
 
 # Wildcard-import in dashboard.py braucht eine explizite `__all__`-Liste, weil
 # underscore-prefixed Namen (z.B. _enrich_for_tts) bei `import *` NICHT
-# standardmäßig übernommen werden. Diese Liste ist die Single Source of Truth
-# für "was wird via engine_elevenlabs zugänglich". Reihenfolge ist wichtig:
-# zuerst die explizite Liste definieren, dann die auto-discovery anhängen.
-_EXPLICIT_PUBLIC = [
+# standardmäßig übernommen werden. KOMPLETT explizit — keine dir()-
+# Comprehension. Reordnen im Modul darf KEINE stille Änderung am
+# Wildcard-Export zur Folge haben (das war der User-Feedback-Befund):
+# wenn jemand nachträglich eine Funktion hinzufügt und vergisst sie
+# in die Liste einzutragen, bricht der Import stillschweigend.
+__all__ = [
     # Konstanten
     "ELEVENLABS_API", "ELEVENLABS_DEFAULT_MODEL", "ELEVENLABS_KEY_FILE",
-    "ELEVENLABS_VOICE_SETTINGS_DEFAULT",
-    "EL_BACKOFF_SEC",
+    "ELEVENLABS_VOICE_SETTINGS_DEFAULT", "EL_BACKOFF_SEC",
+    # Phase-Engine Constants (Phasen B-G)
     "PHASE_SET", "PHASE_TO_ACT", "PHASE_PROMPT_ADDITIONS",
     "PHASE_COLOR_FILTER", "PHASE_VOLUME", "PHASE_ACCENT",
     # Voice-Settings-Persistenz
@@ -41,12 +43,9 @@ _EXPLICIT_PUBLIC = [
     "load_voice_settings", "save_voice_settings",
     # API-Call + Orchestration
     "elevenlabs_generate", "_elevenlabs_persist_and_schedule",
-    # TTS-Preprocessing
+    # TTS-Preprocessing (Phase I)
     "_enrich_for_tts", "TTS_PAUSE_BEFORE_CLIMAX", "TTS_PAUSE_AFTER_PHASE_BREAK",
-]
-__all__ = _EXPLICIT_PUBLIC + [k for k in dir() if k.startswith("_") and not k.startswith("__") and k not in _EXPLICIT_PUBLIC]
-# Bind private helper into global so the comprehension can find it later when used.
-_ = None  # noop to keep syntax clean (the comp above already ran)
+]  # end __all__ — fully explicit, no auto-discovery via dir()
 
 # Konstanten
 ELEVENLABS_API           = "https://api.elevenlabs.io/v1"

@@ -2350,11 +2350,17 @@ def _place_sfx(narration_path: str, sfx_events: list, out_path: str) -> None:
 
 def _phase_modulate_music(music_path: str, scenes: list, out_path: str) -> None:
     """Phase G: pre-modulate music volume per scene's phase BEFORE sidechaincompress.
-    The expression is piecewise: each scene contributes
-    `between(t,start,end)*volume`, summed across scenes — for non-overlapping scenes
-    this gives a smooth staircase envelope. Falls back to a plain copy if no scene
-    has a phase (legacy plans) or if ffmpeg returns non-zero (malformed expression).
-    """
+
+    Expression per scene: `(if(gte(t,ST),1,0))*(if(lt(t,EN),VOL,0))` — this uses
+    **inclusive-start, exclusive-end** semantics, which avoids the staircase peak
+    at scene boundaries that `between(t,a,b)*vol` introduces (ffmpeg's `between`
+    is inclusive at BOTH ends, so adjacent scenes' overlap at one frame causes a
+    1-frame volume spike = sum of both volumes at the boundary). For non-overlapping
+    adjacent scenes this gives a clean staircase: scene A plays at vol_A, then at
+    exactly t=A_end the expression drops A and starts B at vol_B.
+
+    Falls back to a plain copy if no scene has a phase (legacy plans) or ffmpeg
+    returns non-zero (malformed expression)."""
     parts = []
     for s in scenes:
         ph = s.get("phase", "")
@@ -2363,7 +2369,9 @@ def _phase_modulate_music(music_path: str, scenes: list, out_path: str) -> None:
         vol = PHASE_VOLUME[ph]
         st = s.get("start_aligned") or s.get("start", 0.0)
         en = st + max(0.1, s.get("dur", 5.0))
-        parts.append(f"between(t,{st:.3f},{en:.3f})*{vol:.2f}")
+        # Exclusive-end inclusive-start interval: 1 only when st <= t < en.
+        # ffmpeg syntax: gte(a,b)=1 if a>=b, lt(a,b)=1 if a<b. AND-multiplied.
+        parts.append(f"(if(gte(t,{st:.3f}),1,0))*(if(lt(t,{en:.3f}),{vol:.2f},0))")
     if not parts:
         shutil.copy(music_path, out_path)
         return
@@ -3402,13 +3410,15 @@ def _transcribe_generate_worker(cid: str, vid: str, sec: float) -> dict:
     for s in scenes:
         s["video_prompt"] = ""
     _assign_phases(scenes, analysis, len(scenes))
-    # Phase H: derive `speaker` per scene. Current implementation defaults every scene to
-    # 'narrator' (the channel's default voice). Multi-speaker scripts (where a distinct
-    # character speaks per scene) ARE detected — analyze_script returns `characters`,
-    # and a future enhancement will use it to assign per-scene speakers — but the actual
-    # per-speaker ElevenLabs-call pipeline (split + concat audio segments) is a follow-up;
-    # for now, mixed-speaker scripts log a warning + fall back to the channel default
-    # voice, surfacing the gap without breaking the build.
+    # Phase H: derive `speaker` per scene. ⚠ SCAFFOLD ONLY ⚠ — was zur Verfügung steht:
+    #   - s["speaker"] default "narrator" (Datenmodell ist da, in plan.json persistiert)
+    #   - Detection + Log-Warnung wenn mehrere Speaker erkannt
+    #   - Phase-H.2 (pro-Speaker ElevenLabs-Call + ffmpeg-concat) ist NICHT gebaut
+    # Konkret: alle Szenen werden aktuell mit dem CHANNEL-DEFAULT-VOICE generiert, egal
+    # was s["speaker"] sagt. Das Datenmodell erlaubt User-Manual-Edit in plan.json,
+    # aber die Pipeline ignoriert es.
+    # Wer das Feature „Multi-Speaker" öffentlich bewirbt, bewirbt etwas das nicht da ist.
+    # Phase H bleibt als „Scaffold pass-through deaktiviert" dokumentiert bis H.2 kommt.
     SPEAKER_DEFAULT = "narrator"
     speaker_set = set()
     for s in scenes:

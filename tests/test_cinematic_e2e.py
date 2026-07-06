@@ -230,6 +230,63 @@ def t_phase_g_volume_no_phase_falls_back():
     assert len(parts) == 0
 
 
+def t_phase_g_volume_no_boundary_peak():
+    """Phase G: staircase fix (Q4 User-Feedback) — adjacent phases have NO volume peak.
+
+    Bug scenario: `between(t,0,5)*0.30 + between(t,5,10)*0.55` → t=5 has vol=0.85
+    (sum of both — ffmpeg `between()` is INCLUSIVE at both ends).
+
+    Fix: use `(gte(t,ST)*lt(t,EN)*VOL)` per scene → t=5 has vol=0.55 only
+    (start-inclusive, end-exclusive). Catches the regression where someone
+    reverts to the simpler `between()` expression.
+    """
+    def eval_vol(t, scenes, vol_table=el.PHASE_VOLUME):
+        vol = 0.0
+        for s in scenes:
+            ph_vol = vol_table.get(s["phase"])
+            if ph_vol is None:
+                continue
+            st = s["start"]; en = s["start"] + s["dur"]
+            # inclusive start, exclusive end (the fix)
+            if st <= t < en:
+                vol += ph_vol
+        return vol
+
+    # Bug scenario: two adjacent phases
+    scenes = [
+        {"phase": "OPENING",       "start": 0.0, "dur": 5.0},
+        {"phase": "RISING_ACTION", "start": 5.0, "dur": 5.0},
+    ]
+    vol_before, vol_after = 0.30, 0.55
+    assert eval_vol(4.999, scenes) == vol_before
+    assert eval_vol(5.0,   scenes) == vol_after, \
+        f"AT boundary must be RISING_ACTION vol ({vol_after}); got {eval_vol(5.0, scenes)} — would be {vol_before + vol_after} BEFORE fix"
+    assert eval_vol(5.001, scenes) == vol_after
+
+    # Three phases back-to-back: every boundary should NOT sum
+    scenes3 = [
+        {"phase": "OPENING",       "start": 0.0, "dur": 3.0},
+        {"phase": "RISING_ACTION", "start": 3.0, "dur": 3.0},
+        {"phase": "CLIMAX",        "start": 6.0, "dur": 3.0},
+    ]
+    assert eval_vol(2.999, scenes3) == 0.30
+    assert eval_vol(3.0,   scenes3) == 0.55, "RISING_OPENING boundary must NOT sum"
+    assert eval_vol(5.999, scenes3) == 0.55
+    assert eval_vol(6.0,   scenes3) == 0.85, "CLIMAX_RISING boundary must NOT sum"
+
+    # Source-grep regression guard: the new pattern must be present, the old pattern
+    # `parts.append(f"between(t,{st:.3f},{en:.3f})*{vol:.2f}")` must NOT.
+    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    idx = src.find("def _phase_modulate_music")
+    body = src[idx:idx + 2500]
+    assert ("parts.append(f\"(if(gte(t," in body
+            or "parts.append(f'(if(gte(t," in body
+            or 'parts.append(f"(if(gte(t,' in body), \
+        f"Phase-G fix pattern missing in dashboard.py — staircase-peak regression is back"
+    assert 'between(t,{st:.3f},{en:.3f})' not in body, \
+        "Old buggy line in _phase_modulate_music — Phase-G staircase-fix regressed"
+
+
 def t_phase_h_speaker_default_present():
     """Phase H: scenes get 'speaker' = 'narrator' default (data model)."""
     scenes = [{"i": i, "text": f"s{i}"} for i in range(3)]
@@ -438,6 +495,7 @@ def main():
         summary_section("Phase G: Per-Phase Music-Bed Volume")
         run(t_phase_g_volume_envelope_construction, "G: PHASE_VOLUME produces valid piecewise expression")
         run(t_phase_g_volume_no_phase_falls_back, "G: no-phase scenes fall back to identity-copy")
+        run(t_phase_g_volume_no_boundary_peak, "G: staircase-fix: adjacent phases don't double-count at boundaries")
 
         summary_section("Phase H: Multi-Speaker-Scaffold")
         run(t_phase_h_speaker_default_present, "H: speaker default + mixing detection on data model")

@@ -769,3 +769,420 @@ Im bestehenden Schritt-②-Block zwischen Option A (Upload) und Option B (Manuel
 ### 23.8 End-to-End verifiziert (Juli 2026)
 
 Smoke-Tests gegen echten ElevenLabs-Account (Test 1 Konfiguration: 26 Voices geladen, Test 3 Resume: zweiter Generate-Call liefert `{resume: true}` ohne API-Call, Test 4 Fallback: alte Pläne ohne `voiceover_source` fallen sauber auf Gemini-Transcribe zurück, Test 6 Partial Response: `audio_base64` ohne `alignment.words` raise'd korrekt). Test 2 und Test 5 (echtes End-to-End-Render mit ElevenLabs-Audio) verlangen ElevenLabs-Credits und wurden nicht live ausgeführt — die isolierten Code-Pfade sind aber grün.
+
+## 24. Phase 3 — Story-Phase-Engine (2026-07)
+
+LLM-getriebene Dramaturgie-Analyse ersetzt die position-basierte Phase-Heuristik aus §20/§22. Voraussetzung für Phasen 4–9 (Cinematic-Erweiterung).
+
+### 24.1 Was sich geändert hat
+
+Drei additive Felder im Schema von `analyze_script`-Output (`dashboard.py:926`):
+
+| Feld | Typ | Zweck |
+|---|---|---|
+| `phases` | `[{beat: int, phase: "OPENING"\|"RISING_ACTION"\|"CLIMAX"\|"RESOLUTION"}]` | Pro Beat die dramaturgische Phase — narrativ, NICHT position-basiert |
+| `act_breaks` | `[int]` | Beat-Indizes an Akt-Grenzen |
+| `climax_beat` | `int` (oder `-1`) | Einzelindex des dramaturgischen Höhepunkts |
+
+Der `analyze_script`-LLM-Prompt (Z. ~951) instruiert explizit: „Diese reflect actual narrative arc, NOT position". Damit kann der LLM Flash-Forward / Cold-Open korrekt als `CLIMAX` oder `RESOLUTION` zuweisen.
+
+### 24.2 Single Source of Truth + `phase_source` Debug-Feld
+
+Jede Szene bekommt jetzt zusätzlich zu `phase` ein Feld `phase_source`:
+- `"llm"` — vom LLM getrieben
+- `"position-fallback"` — `story_phase(i, total)` Heuristik
+
+`grep "position-fallback" plan.json` listet sofort alle Szenen, in denen der LLM nichts geliefert hat. `grep "llm"` listet die LLM-getriebenen.
+
+### 24.3 80%-Hysterese gegen Schema-Drift
+
+`_assign_phases()` (in `engine_elevenlabs.py`) hat eine **Hysterese-Schwelle**:
+
+```python
+coverage = len(llm_phases) / total_scenes
+use_llm = coverage >= 0.8   # 80% der Beats brauchen LLM-Phase
+
+if use_llm and beat in llm_phases:
+    s["phase"]         = llm_value    # LLM hat geliefert
+    s["phase_source"]  = "llm"
+else:
+    s["phase"]         = story_phase(s["i"], total)   # Heuristik
+    s["phase_source"]  = "position-fallback"
+```
+
+Unter 80% Coverage: **vollständiger Fallback** aller Szenen — kein Mix aus LLM- und Heuristik-Phasen. Verhindert Mischung aus vertrauenswürdigen Fallback-Phasen und unzuverlässigen LLM-Phasen bei Schema-Drift. Test im E2E-Suite (`tests/test_cinematic_e2e.py`).
+
+### 24.4 Szenen-Felder (additiv in `_assign_phases`)
+
+Nach dem Phase-Assign haben alle Szenen:
+
+```jsonc
+{
+  "i": int, "text": str,
+  "phase": "OPENING" | "RISING_ACTION" | "CLIMAX" | "RESOLUTION",
+  "phase_source": "llm" | "position-fallback",
+  "is_phase_break": bool,    // true wenn LLM-PhaseBreak-Liste enthält
+  "is_climax": bool,         // true wenn s["i"] == LLM-climax_beat
+  "act_index": int,          // 0..3 abgeleitet aus phase
+  "kind": "scene" | "title_card",   // Phase E — siehe §27
+  "act_index_visual": int,   // 1-basiert für Title-Card-Beschriftung
+  "card_title": str | None,  // "Akt 1", "Neuer Akt", oder User-Override
+}
+```
+
+### 24.5 Frontend-Badges
+
+In `dashboard.html` §Szenen-Rendering:
+
+- **Phase-Pill** je Szene: kleines Pill rechts in `scene-meta`, farbcodiert:
+  - `OPENING` → neutral grau
+  - `RISING_ACTION` → blau (`#1e6bd6`)
+  - `CLIMAX` → rot (`#c13838`) — ggf. mit subtilem Puls-Glow
+  - `RESOLUTION` → grün (`#1f8a4a`)
+- **`is_climax === true`** → subtiler goldener Outline-Ring um die Szenen-Karte (CSS `outline: 2px solid #d4a02c`)
+- **`is_phase_break === true`** → dünne violette Border-Left neben der Karte (Akt-Trennlinie)
+
+### 24.6 Motion-Auswahl (sofortige Aktivierung)
+
+`_motion_for_scene` (`dashboard.py:1948`) liest schon `scene.get("phase")` und pickt aus `_PHASE_MOTION_CANDIDATES`:
+
+```python
+phase = scene.get("phase")
+candidates = _PHASE_MOTION_CANDIDATES.get(phase) or _PACING_MOTION_CANDIDATES[pacing]
+name = candidates[scene.get("i", 0) % len(candidates)]
+```
+
+Damit **sofort aktiviert**: Cold-Open mit `phase='CLIMAX'` → `snap_zoom_in`/`diagonal_glide`/`static`-Candidatenpool statt der position-basierten `pacing='normal'`-Heuristik. Determinismus erhalten (per `scene.i` modulo), kein zusätzlicher Render-Worker nötig.
+
+### 24.7 End-to-End verifiziert (Juli 2026)
+
+Tests in `tests/test_cinematic_e2e.py` (`tests/test_cinematic_e2e.py`):
+
+- **B1**: `t_phase_b_story_engine_full_coverage` — Cold-Open Scenario (Beat 0 = CLIMAX, Beat 2 retro = OPENING). Verifiziert `phase`, `phase_source`, `is_climax`, `is_phase_break`.
+- **B2**: `t_phase_b_story_engine_partial_hysteresis` — 50% Coverage → vollständiger Fallback, kein Mix.
+- **B5**: `t_phase_b_motion_selector_uses_phase` — alle 4 Phasen wählen aus den richtigen Motion-Candidaten-Pools.
+
+
+## 25. Phase 4 — Pacing-aware Image-Prompts (2026-07)
+
+Visuelle Stilanweisungen in `visual_prompts()` basierend auf der narrativen Phase. Aktiviert sobald Phase B (`scene["phase"]`) gesetzt ist.
+
+### 25.1 Was
+
+`PHASE_PROMPT_ADDITIONS` (in `engine_elevenlabs.py`):
+
+| Phase | Stil-Injection |
+|---|---|
+| `OPENING` | slow, deliberate composition; establish setting; neutral color palette; static-feeling even if motion comes later |
+| `RISING_ACTION` | building tension; tighter framing; movement toward subject; contrast slightly elevated |
+| `CLIMAX` | maximum visual impact; high contrast; dynamic angle; subject dominates frame; emotional saturation |
+| `RESOLUTION` | wind-down; wider framing; softer palette; contemplative stillness |
+
+### 25.2 Hook
+
+`_image_prompt_chunk(chunks, offset, total, analysis_ctx, chunk_phases)` nimmt jetzt einen fünften Parameter: `chunk_phases` (list von phase-strings, parallel zu `chunk_beats`). Im LLM-Prompt wird jede Zeile als `N. [Phase: X] <text>` nummeriert — der LLM bekommt die Phase als Kontext, nicht als Subject.
+
+Vor der `_IMAGE_PROMPT_FEWSHOT`-Sektion wird die Stil-Anweisung einmal erklärt:
+```
+PHASE STYLING (Phase C, Juli 2026) — each numbered line below is annotated with
+its narrative phase. Adapt the image style to that phase: [4 cues ...]
+Don't override the LINE'S TEXT — these cues modulate STYLING, not subject matter.
+```
+
+Legacy-Caller ohne `chunk_phases` (kein Phase-Set) bleiben kompatibel — die Annotation wird übersprungen, das Verhalten ist unverändert.
+
+### 25.3 Verifikation
+
+- Test in `tests/test_cinematic_e2e.py` (`t_phase_c_prompt_additions_present`): prüft dass jede Phase einen STYLE-Marker hat.
+- Erwartet: in Production-Renders kriegen CLIMAX-Szenen dramatischere Kompositionen als OPENING-Szenen (visueller A/B-Vergleich empfohlen).
+
+
+## 26. Phase 5 — Color-Grading pro Phase (2026-07)
+
+ffmpeg `eq`-Filter pro Phase in `_render_clip`. Aktiviert sofort wenn `scene["phase"]` gesetzt ist.
+
+### 26.1 Was
+
+`PHASE_COLOR_FILTER` (in `engine_elevenlabs.py`):
+
+| Phase | ffmpeg-Filter | Wirkung |
+|---|---|---|
+| `OPENING` | `eq=contrast=1.0:saturation=0.9:brightness=0.0` | Neutral, leicht entsättigt |
+| `RISING_ACTION` | `eq=contrast=1.1:saturation=1.05:brightness=0.0` | leicht angehoben |
+| `CLIMAX` | `eq=contrast=1.3:saturation=1.2:brightness=-0.02` | maximaler Impact, leicht dunkler |
+| `RESOLUTION` | `eq=contrast=0.95:saturation=0.85:brightness=0.03` | weicher, leicht heller |
+
+Legacy-Szenen ohne Phase (oder mit unbekannter Phase) → **Identity-Filter** (`""` als `eq_filter`), kein Color-Grading — bestehende Renderings bleiben byte-genau identisch.
+
+### 26.2 Hook
+
+`_render_clip` (`dashboard.py:2056`, jetzt in der _render_worker-Section bei §7.4):
+```python
+phase = scene.get("phase", "")
+eq_filter = PHASE_COLOR_FILTER.get(phase, "")
+eq_suffix  = f",{eq_filter}" if eq_filter else ""
+filter_parts = [
+    f"[0:v]scale={RENDER_SUPERSAMPLE_WIDTH}:-2,"
+    f"zoompan=z='{z_expr}':d={frames}:x='{x_expr}':y='{y_expr}':"
+    f"s={RENDER_WIDTH}x{RENDER_HEIGHT}:fps={fps},setsar=1"
+    f"{eq_suffix}[base]"
+]
+```
+
+Position: **nach zoompan und vor Overlays**. Die Overlays (Captions, Callouts, Title-Cards) sitzen also auf dem color-graded Base, nicht selbst color-graded — sonst würden Schriftfarben verzerrt.
+
+### 26.3 Verifikation
+
+- Test in `tests/test_cinematic_e2e.py` (`t_phase_d_color_filter_present`): prüft dass jeder Filter mit `eq=` startet und alle 3 Dimensionen (contrast, saturation, brightness) enthält.
+- Visuell: 4-Phasen-Vergleichs-Render (gleicher Input, forcierte Phase-Override pro Scene) zeigt sichtbare Color-Grading-Unterschiede. Subtile Werte, nicht dramatisch — alles, was stärker ist, liest sich als „defekt" statt „cinematic".
+
+
+## 27. Phase 7 — Title-Cards als eigener Szenentyp (2026-07)
+
+Akt-Übergänge werden nicht mehr als reguläre Bild-Szene gerendert, sondern als Vollbild-Titel-Karten mit zentriertem Text und Phase-Color-Accent-Unterstreichung.
+
+### 27.1 Datenmodell-Erweiterung
+
+`_assign_phases` (Phase B §24) setzt auf Szenen mit `is_phase_break === true`:
+- `kind: "title_card"` — ersetzt `kind: "scene"` als Default
+- `act_index_visual: <int>` — 1-basierter Index unter den Title-Cards
+- `card_title: str` — automatisch abgeleitet:
+  - Eine einzelne Title-Card → `"Neuer Akt"` (singular)
+  - Mehrere → `"Akt 1"`, `"Akt 2"`, ...
+  - User-Manual-Override via direktem Edit in `plan.json` möglich (Frontend erlaubt Click-to-Edit)
+
+Andere Szenen bekommen `kind: "scene"` als Default. **Wichtig:** Title-Cards werden **nur** generiert wenn `act_breaks` aus dem LLM kommen (Coverage ≥ 80%, Position-Fallback hat keine `act_breaks`).
+
+### 27.2 Render-Pipeline
+
+`render_overlay.py` wurde um eine **neue CLI-Mode** erweitert: `python3 render_overlay.py ... title_card <text_b64> [phase]`. Die Mode gibt eine **vollbild-opake PNG** zurück (kein Alpha-Channel wie bei Overlays), mit:
+- Weißer Hintergrund
+- Zentriertem Titel-Text (Font: Arial Bold, 12% Höhe)
+- Phase-Color-Accent-Unterstreichung (gleiche 4-Farben-Palette wie PHASE_COLOR_FILTER)
+- Weißer Stroke um schwarzen Text (für Lesbarkeit auf hellem Hintergrund)
+
+`dashboard.py`:`render_title_card_png_via_venv()` ist der Subprocess-Wrapper (analog `render_text_overlay_png`). Läuft im `.venv_whisper`, weil dort PIL vorhanden ist — System-Python hat kein Pillow.
+
+`_render_clip` (`dashboard.py`) hat einen Sonderfall für `kind=='title_card'`:
+```python
+if scene.get("kind") == "title_card":
+    title_card_temp = out_path + ".title.png"
+    render_title_card_png_via_venv(title_card_temp, RENDER_WIDTH, RENDER_HEIGHT,
+                                    scene["card_title"], phase=scene.get("phase",""))
+    img_path = title_card_temp   # swapped for the rest of the pipeline
+```
+
+Der `zoompan` + `PHASE_COLOR_FILTER` (Phase D) + Overlays laufen anschließend unverändert — der Title-Text profitiert von der langsamen Phase-D-Bewegung und bleibt lesbar durch den Stroke.
+
+### 27.3 Frontend
+
+In `dashboard.html:renderScenes()`:
+- Lila Badge `"📜 Titell"` in der `scene-meta`-Zeile wenn `kind === 'title_card'`
+- Subtile Phase-Border-Left (violett, kollidiert NICHT mit der Sequenz-Border-Left da `color` unterschiedlich ist)
+
+### 27.4 Verifikation
+
+- Tests in `tests/test_cinematic_e2e.py`:
+  - `t_phase_e_title_card_assignment` — multi-act script → `kind='title_card'` mit Auto-Titeln
+  - `t_phase_e_title_card_lifecycle_fallback` — position-fallback → keine Title-Cards (LLM-only feature)
+- Visuell: aktuelles Skript mit 2+ Akten rendert mit eingeblendeten Title-Cards an den Bruchstellen.
+
+
+## 28. Phase 6 — Counter-Animation-Callouts für punchige Szenen (2026-07)
+
+Punchige Momente bekommen größere, zentrierte Counter-Overlays (rot + dicker schwarzer Stroke) statt der Standard-Callouts (gold-gelb, oben links).
+
+### 28.1 Trigger
+
+In `_overlay_specs_for_scene` (`dashboard.py:2036`):
+```python
+if overlay_opts.get("callouts") and scene.get("callout"):
+    if scene.get("pacing") == "punchy":
+        # Phase F: counter style für dramatische Momente
+        specs.append(("counter", scene["callout"], counter_t0, counter_t1))
+    else:
+        # Standard callout style (unverändert)
+        specs.append(("callout", scene["callout"], t0, t1))
+```
+
+Auto-routing: punchige Szenen mit `callout`-Daten bekommen automatisch Counter-Style — keine User-Aktion nötig, kein neuer UI-Toggle.
+
+### 28.2 Render-Style
+
+`render_counter(width, height, text)` in `render_overlay.py`:
+- Full-frame RGBA mit `alpha=0` Hintergrund (transparenter overlay)
+- **Eine** einzelne Zeile (kein wrap), weil das `analyze_script`-Prompt Callouts bereits auf max ~6 Zeichen beschränkt
+- Schrift: 22% der Höhe (vs. 11% bei normalem `callout`)
+- Rot `rgb(220, 38, 38)` Letter-Fill mit dicken schwarzen Stroke (`stroke_width = font_size // 12`)
+- Zentriert horizontal + vertikal
+
+### 28.3 Verifikation
+
+- Test `t_phase_f_counter_overlay_for_punchy` in `tests/test_cinematic_e2e.py`: prüft dass punchy+callout → `'counter'` Style, normal+callout → `'callout'` Style.
+- Visuell: Render mit Counter-Overlay ist deutlich intensiver als Standard-Callout — der rote Briefstil „schreit" die Zahl.
+
+
+## 29. Phase 8 (Teil 1 — Phase G) — Per-Phase Music-Bed Volume (2026-07)
+
+> **Scope-Klarstellung:** Phase G in der aktuellen Ausbaustufe ist eine **Vorstufe** zum vollen Cinematic-Plan-§8-Stem-System. Asset-Beschaffung (Pixabay-Stems: drums/bass/pads) und 4-Stem-Crossfade-Architektur sind NICHT gebaut. Was existiert: Per-Phase-Volume-Modulation des bestehenden `neutral_bed.mp3`. Wenn die Stems nachkommen, gibt der Code-Pfad der heute `neutral_bed.mp3` moduliert denselben Volume-Envelope weiter — nur die Input-Quelle ändert sich.
+
+### 29.1 Was
+
+`PHASE_VOLUME` (in `engine_elevenlabs.py`):
+
+| Phase | Volume-Multiply |
+|---|---|
+| `OPENING` | 0.30 |
+| `RISING_ACTION` | 0.55 |
+| `CLIMAX` | 0.85 |
+| `RESOLUTION` | 0.35 |
+
+### 29.2 Staircase-Fix (User-Feedback Phase-G.4)
+
+Initial-Implementation nutzte `between(t,start,end)*vol` pro Scene — das verursacht einen **1-Frame-Peak an jeder Phasengrenze**, weil `between()` inklusive an BEIDEN Enden ist. Beispiel: bei t=5 zwischen `*0.30` (Szene 1) und `*0.55` (Szene 2) ergibt die Summe **0.85** statt 0.55 (correct).
+
+**Fix:** statt `between(t,st,en)*vol` jetzt `(if(gte(t,st),1,0))*(if(lt(t,en),vol,0))`. **Inclusive-start, exclusive-end** Semantik. Damit ist t=5 saubere Schwelle von Scene-1-Volume zu Scene-2-Volume — kein Peak.
+
+Getestet in `tests/test_cinematic_e2e.py` (`t_phase_g_volume_no_boundary_peak`): drei Phasen back-to-back, alle Boundary-Werte manuell mit der ffmpeg-Semantik evaluiert. Regression-Guard: Source-grep prüft dass die alte `between(t,{st:.3f},{en:.3f})`-Zeile nicht zurück kommt.
+
+### 29.3 Hook in `_build_final_audio`
+
+Reihenfolge beim Sound-Design (geändert mit Phase G):
+1. `_phase_modulate_music()` — Phase-Volume-Envelope auf den Music-Bed vor-modulieren
+2. `_duck_music_under_voice()` — sidechaincompress auf der bereits modulierten Spur
+3. `_build_sfx_events()` — wie bisher
+4. `_place_sfx()` — wie bisher
+
+Erlaubt Pixabay-Stems später ohne Code-Änderung einzuhängen — der Volume-Envelope wirkt auf allen Music-Inputs gleich.
+
+### 29.4 Verifikation
+
+- `tests/test_cinematic_e2e.py`:
+  - `t_phase_g_volume_envelope_construction` — Expression-Bau, Volumen korrekt
+  - `t_phase_g_volume_no_phase_falls_back` — Legacy-Plans ohne Phase fallen sauber auf Identity-Copy zurück
+  - `t_phase_g_volume_no_boundary_peak` — Staircase-Fix, kein Peak an Boundaries
+
+
+## 30. Phase 2 (alt) — TTS-Preprocessing (Phase I, 2026-07)
+
+Enriched das Skript mit TTS-freundlichen Pause/Emphasis-Markern vor ElevenLabs-Anfrage. Reines Text-Preprocessing, kein LLM-Call, idempotent.
+
+### 30.1 Was
+
+`_enrich_for_tts(text, scenes)` (in `engine_elevenlabs.py`):
+- Fügt `" ... "` zwischen Sätzen (Subtle-Between-Capitals via split-then-join-Pattern, **idempotent by construction**)
+- Fügt `"... "` vor `is_climax`-Szenen (extra emphasis)
+- Fügt `"\n\n"` vor `is_phase_break`-Szenen (starke Pause zwischen Akten)
+
+### 30.2 Idempotenz-Pattern (User-Feedback-Phase-I.2)
+
+Initial-Implementation hatte zwei Bugs:
+1. `lstrip()` entfernte die Newlines vom `TTS_PAUSE_AFTER_PHASE_BREAK = "\n\n"`. **Fix:** kein lstrip mehr, Marker verbatim einfügen.
+2. Marker-Replace-Path war nicht idempotent — bei wiederholter Anwendung wurde `"\n\n"` mehrfach vor den Scene-Text gesetzt. **Fix:** Idempotency-Check `if prefix + txt not in enriched` vor jedem Replace.
+
+Sentence-Splitting war ursprünglich per Regex-substitute implementiert (`\.\\s+(?=[A-Z])` → `. ... X`), was bei wiederholter Anwendung die Ellipsen kompiliert. **Fix:** split-then-join Pattern — `re.split(r'(?<=\.)\s+(?=[A-Z])')` zerlegt die Szene in Segmente, jeder Segment-Trailing-`...` wird gestrippt, dann sauber mit `' ... '` joiner.
+
+### 30.3 Hook in `/api/voiceover_generate`
+
+In `dashboard.py` `do_POST` für `/api/voiceover_generate`:
+```python
+text = _enrich_for_tts(text, scenes=None)   # scenes=None im ersten Aufruf
+result = _elevenlabs_persist_and_schedule(cid, vid, text, ...)
+```
+
+Scenes=None in der ersten Generation; scene-basierte Marker werden beim nächsten Regenerate aktiv, sobald plan.json existiert.
+
+### 30.4 Verifikation
+
+- `tests/test_cinematic_e2e.py` (`t_phase_i_enrich_for_tts`): testet sentence-Pausen, climax/phase-break marker, Idempotenz auf enriched text. Verifiziert dass der 2. Aufruf auf enriched text keine zusätzlichen Marker einschleust.
+
+
+## 31. Phase 9 (Scaffold) — Multi-Speaker-Datenmodell (Phase H, 2026-07)
+
+> **⚠ SCAFFOLD ONLY.** Was existiert: Daten-Slot + Detection. Was fehlt: die eigentliche Per-Speaker-ElevenLabs-Pipeline (H.2). Wer „Multi-Speaker ist eingebaut" behauptet, behauptet etwas das nicht da ist — alle Szenen werden aktuell mit dem Channel-Default-Voice generiert, egal was `s["speaker"]` enthält.
+
+### 31.1 Was funktioniert
+
+- `s["speaker"]` Datenmodell auf jeder Szene (Default `"narrator"` falls nicht gesetzt, in beiden Workern — `_transcribe_generate_worker` Z. ~3413 + `_plan_generate_worker` Z. ~2802)
+- **Detection-Log** in `_transcribe_generate_worker`: wenn Szenen mehr als einen distinct speaker haben, WARNUNG im Log + Hinweis auf follow-up
+
+```
+[Phase H] WARNUNG: 2 distinct speakers erkannt (['narrator', 'yeonmi']).
+Aktueller ElevenLabs-Pfad generiert alle Szenen mit dem Channel-Default-Voice.
+Multi-Speaker-Pipeline ist ein follow-up (Plan §H.2). Edit s['speaker'] in
+plan.json manuell wenn du jetzt verschiedene Stimmen willst.
+```
+
+### 31.2 Was fehlt (H.2 — Future)
+
+Geplante Multi-Speaker-Pipeline, sobald eine sinnvolle ElevenLabs-Subscription mit Multi-Voice-Endpoint verfügbar ist:
+
+1. **Pro unique speaker** ein eigener ElevenLabs-API-Call (oder ein Multi-Speaker-Call wenn vom Provider unterstützt)
+2. **Audio-Segmente** per ffmpeg-concat zusammenfügen zu einer einzigen Spuren
+3. **Kombinierte `voiceover_word_timestamps`** mit Speaker-Annotation pro Segment
+4. **`speaker_voices` mapping** in `channels/<cid>/voice_settings.json` (Erweiterung der existierenden ElevenLabs-Settings-Datei)
+5. Optional: Frontend-Badges auf jeder Szene, die den Speaker zeigt
+
+Bis das gebaut ist, bleibt `s["speaker"]` ein Metadaten-Feld ohne sichtbaren Effekt — die Audio-Pipeline routet alles durch den Channel-Default-Voice.
+
+
+## 32. Phase J — Engine-Refactor: `engine_elevenlabs.py` (2026-07)
+
+Erste Teil-Aufspaltung von `dashboard.py` in fokussiertere Module. Pattern: Pure-Helpers extrahieren, via Wildcard-Import rückwärtskompatibel lassen.
+
+### 32.1 Was wurde extrahiert
+
+`engine_elevenlabs.py` (357 Zeilen neu) enthält jetzt:
+- **ElevenLabs-Integration** (Phase 1 + Phase H + Phase I)
+  - Konstanten: `ELEVENLABS_API`, `ELEVENLABS_DEFAULT_MODEL`, `ELEVENLABS_KEY_FILE`, `ELEVENLABS_VOICE_SETTINGS_DEFAULT`
+  - Voice-Settings-Persistenz: `ch_voice_id`, `elevenlabs_key`, `_resolve_voice_id`, `load_voice_settings`, `save_voice_settings`
+  - API-Call + Orchestration: `_elevenlabs_call_with_retry`, `elevenlabs_generate`, `_elevenlabs_persist_and_schedule`
+  - TTS-Preprocessing: `_enrich_for_tts`, `TTS_PAUSE_BEFORE_CLIMAX`, `TTS_PAUSE_AFTER_PHASE_BREAK`
+- **Phase-Engine Constants** (Phasen B-G): `PHASE_SET`, `PHASE_TO_ACT`, `PHASE_PROMPT_ADDITIONS`, `PHASE_COLOR_FILTER`, `PHASE_VOLUME`, `PHASE_ACCENT`
+
+### 32.2 Import-Pattern
+
+`dashboard.py:14`:
+```python
+from engine_elevenlabs import *  # noqa: F401,F403
+```
+
+`engine_elevenlabs.py` definiert eine **vollständig explizite `__all__`-Liste** (kein `dir()`-Comprehension) — geschützt gegen Reorder-Issues. Wenn jemand nachträglich eine neue Funktion hinzufügt und vergisst sie zu registrieren, schlägt der Wildcard-Import stillschweigend fehl — vermeidet das User-Feedback-J-Bug-Pattern.
+
+### 32.3 Lazy-Imports für zirkuläre Abhängigkeiten
+
+`engine_elevenlabs.py:_elevenlabs_persist_and_schedule` ruft dashboard-Helfer wie `ensure_video`, `_VOICE_JOBS_LOCK`, `_transcribe_generate_worker`, `_PLAN_WRITE_LOCK` auf. Diese werden **innerhalb der Funktion** importiert (lazy), um zirkuläre Imports zwischen den Modulen zu vermeiden:
+
+```python
+def _elevenlabs_persist_and_schedule(cid, vid, text, ...):
+    if not vid:
+        raise RuntimeError("Kein Video ausgewählt.")
+    from dashboard import (ensure_video, ch_voice_id, ch_voice_settings,
+                            v_uploads, v_audio, v_plan, _VOICE_JOBS_LOCK,
+                            VOICE_JOBS, _transcribe_generate_worker)
+    ...
+```
+
+### 32.4 Ergebnis-Diff
+
+| File | Vorher | Nachher | Δ |
+|---|---|---|---|
+| `dashboard.py` | 4742 Zeilen | 4380 Zeilen | **−362** (−8%) |
+| `engine_elevenlabs.py` | — | 357 Zeilen | +357 |
+
+### 32.5 Was NICHT refactored (work-in-progress)
+
+- Render-Pipeline: `_render_clip`, `_build_final_audio`, `_assemble_clips`, `_mux_audio`, `_phase_modulate_music` (alle in `dashboard.py`)
+- Audio-Subsystem: `render_overlay.py` (Standalone-Skript, schon ausgelagert)
+- Transcribe-Pfad: `transcribe_and_segment`, `whisper_transcribe`
+- LLM-Client: `post_kie_text`, `post_gemini_native`
+- Orchestrator: `_plan_generate_worker`, `_batch_generate_worker`, `_render_worker`, `_produce_worker`
+
+Die nächsten Refaktor-Wellen (Phase J.2, Phase J.3 etc.) sollten z.B. `engine_render.py` (Video-Pipeline) und `engine_audio.py` (Sound-Mixing + Stems) als natürliche nächste Schritte extrahieren. Reihenfolge nicht erzwungen — jeder Extrakt-Schritt ist isoliert testbar.
+
+### 32.6 Verifikation
+
+- `tests/test_cinematic_e2e.py`:
+  - `t_phase_j_engine_refactor_globals_intact` — alle wild-exported Symbole kommen aus `engine_elevenlabs` (nicht aus dashboard.py-Resten)
+  - `t_phase_j_dashboard_unchanged_callers_still_work` — Caller wie `dashboard.save_voice_settings(...)`, `dashboard._assign_phases(...)`, `dashboard.elevenlabs_key(...)` funktionieren weiterhin ohne Code-Änderung im Caller
+
