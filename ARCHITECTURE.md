@@ -108,8 +108,9 @@ Kein Datenbank, kein Redis — alles In-Memory-Dicts im laufenden Python-Prozess
 | `PLAN_JOBS` | Status von "Plan aus Skript erstellen" pro Video | `_PLAN_JOBS_LOCK` |
 | `RENDER_JOBS` | Status von "Video zusammenschneiden" (Auto-Rendering, Abschnitt 13) pro Video | `_RENDER_JOBS_LOCK` |
 | `PRODUCE_JOBS` | Status des Ein-Knopf-Orchestrators (Plan→Bilder→Rendern verkettet, Abschnitt 17) pro Video | `_PRODUCE_JOBS_LOCK` |
+| `VOICE_JOBS` | ElevenLabs-spezifischer Status (Phase 1, §23) pro Video — führt ElevenLabs-Task, Settings, Resume-Marker; Polling-Kanal für `/api/voiceover_status` | `_VOICE_JOBS_LOCK` |
 
-**Wichtiges Muster, das sich wiederholt**: Alle langlaufenden Aktionen (Plan erstellen, alle Bilder generieren, Transkription, Rendern, der Ein-Knopf-Orchestrator) laufen als **Server-seitiger Background-Thread**, nicht als eine einzige lange HTTP-Anfrage. Grund (mehrfach live aufgetreten): eine blockierende HTTP-Anfrage stirbt, wenn der Tab geschlossen/neu geladen wird — das Frontend denkt dann "nichts passiert" und der Nutzer klickt erneut, was einen zweiten, komplett unabhängigen LLM-Lauf auf demselben Skript startet (doppelte Kosten). Die Lösung überall gleich: Endpunkt startet nur einen `threading.Thread(daemon=True)`, merkt sich `running=True` **atomisch mit der "läuft schon?"-Prüfung** (nicht danach!), und das Frontend pollt einen `_status`-Endpunkt. `PRODUCE_JOBS` (Abschnitt 17) ist dabei kein neues Muster, sondern derselbe Mechanismus nochmal — der Orchestrator ruft die drei anderen Worker-Funktionen nur nacheinander im selben Thread auf, statt jeweils einen eigenen Thread zu spawnen.
+**Wichtiges Muster, das sich wiederholt**: Alle langlaufenden Aktionen (Plan erstellen, alle Bilder generieren, Transkription, Rendern, der Ein-Knopf-Orchestrator, ElevenLabs-Generierung in §23) laufen als **Server-seitiger Background-Thread**, nicht als eine einzige lange HTTP-Anfrage. Grund (mehrfach live aufgetreten): eine blockierende HTTP-Anfrage stirbt, wenn der Tab geschlossen/neu geladen wird — das Frontend denkt dann "nichts passiert" und der Nutzer klickt erneut, was einen zweiten, komplett unabhängigen LLM-Lauf auf demselben Skript startet (doppelte Kosten). Die Lösung überall gleich: Endpunkt startet nur einen `threading.Thread(daemon=True)`, merkt sich `running=True` **atomisch mit der "läuft schon?"-Prüfung** (nicht danach!), und das Frontend pollt einen `_status`-Endpunkt. `PRODUCE_JOBS` (Abschnitt 17) ist dabei kein neues Muster, sondern derselbe Mechanismus nochmal — der Orchestrator ruft die drei anderen Worker-Funktionen nur nacheinander im selben Thread auf, statt jeweils einen eigenen Thread zu spawnen.
 
 ### 6.2 Nebenläufigkeit bei der Bildgenerierung
 
@@ -442,6 +443,15 @@ Gemini generiert im Rahmen dieses Projekts bereits den gesamten Text-Content (Sk
 
 **Fix:** Whisper-Aufruf + Alignment aus `/api/transcribe` entfernt (Handler wieder bei 4 statt 5 `TX_STATUS`-Stufen), stattdessen in `_render_worker` verschoben — direkt nach dem Laden von `audio_duration` per `ffprobe`, als neue Stage `"timing"` (zwischen `"prepare"` und `"motion"`, auch in `RENDER_STAGE_LABELS`/`RENDER_STAGE_ORDER` in dashboard.html ergänzt). Läuft dadurch für **jeden** Render, unabhängig vom Ursprung der Szenen-Texte — ein einziger Alignment-Punkt statt eines, der nur einen von zwei Pfaden abdeckt. Resume-sicher: überspringt den Whisper-Lauf, wenn alle Szenen schon `start_aligned` aus einem vorigen Render tragen (`if any(s.get("start_aligned") is None for s in scenes)`), damit ein wiederholter Render nicht unnötig erneut transkribiert. Graceful Degradation unverändert: schlägt Whisper fehl, behalten die Szenen ihre geschätzten `start`/`dur`-Werte, der Rest des Renders läuft normal weiter.
 
+**Erweiterung Phase 1 (ElevenLabs, §23):** Der Alignment-Pfad akzeptiert jetzt drei mögliche Quellen für Word-Timestamps, priorisiert nach `audio_meta.json["voiceover_source"]`:
+
+| `voiceover_source` | Word-Quelle | Wer ruft auf | Sektion |
+|---|---|---|---|
+| `"elevenlabs"` | bereits im `audio_meta.json["voiceover_word_timestamps"]` | `elevenlabs_generate()` (Phase 1) hat sie direkt vom Provider geholt — **kein** Netzwerk-Call im `_render_worker` | §23 |
+| `"user_upload"` oder fehlt | `transcribe_words_whisper()` | `_render_worker` Z. ~2318, identisch zur bisherigen Pipeline | §16.4/§16.5 |
+
+Der Pause-Trim (`_compute_pause_trims` / `_trim_audio_pauses` / `_adjust_words_for_trims`) und das Alignment (`align_scenes_to_whisper`) laufen in beiden Fällen identisch — die Übergabe ist einheitlich `[{word, start, end}, ...]`. Die einzige Verzweigung findet **vor** `transcribe_words_whisper()` statt: ist `voiceover_word_timestamps` vorhanden, wird diese Liste direkt verwendet (mit `language="elevenlabs"`, `language_probability=1.0` als Audit-Marker im Log); sonst Whisper.
+
 **End-to-End verifiziert** (Juli 2026), beide Pfade getrennt:
 - **Option A** (Audio-Transkription): `/api/transcribe` liefert jetzt wieder reine geschätzte Szenen ohne `start_aligned` (4 Stufen, kein Whisper mehr an dieser Stelle) — korrektes Verhalten, die Ausrichtung folgt beim Rendern.
 - **Option B** (manueller Skript-Pfad, hier simuliert: Szenen mit WPM-geschätztem `start`/`dur`, kein `source`-Feld, keine `start_aligned`-Felder) + echtes deutsches TTS-Voice-over hochgeladen + gerendert: Server-Log zeigt `[Whisper] 27 Wörter ausgerichtet (Sprache: de, p=0.984)`, `plan.json` zeigt danach `start_aligned`/`end_aligned` auf allen drei Szenen — und zwar spürbar abweichend von der WPM-Schätzung (Szene 0 geschätzt `0.0–4.0`, ausgerichtet `0.0–3.04`; die reale Aufnahme war insgesamt nur `9.84s` lang, nicht die geschätzten `12.0s`). Damit bekommt Option B jetzt exakt dieselbe Timing-Qualität wie Option A, sobald ein echtes Voice-over vorliegt.
@@ -588,3 +598,174 @@ Jede der ~25 Schreibstellen der fünf Dicts (jeder `XXX_JOBS[key] = {...}`-Liter
 ### 21.3 End-to-End verifiziert (Juli 2026) — synthetischer Stresstest, nicht nur Unit-Logik
 
 1000 synthetische `JOBS`-Einträge eingefügt (250× `running`, 250× `done`+alt, 250× `error`+alt, 250× `done`+frisch) sowie je drei Einträge (`running`+alt, `done`+alt, `done`+frisch) in allen vier übrigen Dicts, dann `_cleanup_stale_jobs()` aufgerufen: exakt die 500 alten, nicht-laufenden `JOBS`-Einträge entfernt (250 verbleiben unverändert, da `running`, + 250 verbleiben, da frisch), in jedem der vier anderen Dicts genau der eine alte-und-nicht-laufende Eintrag entfernt, `running`- und `fresh`-Einträge in allen fünf Dicts unangetastet. Server danach neu gestartet (zuvor über alle vier `_status`-Endpunkte für `sidequerst` geprüft: keine aktive Job — sicherer Neustart-Zeitpunkt, etablierte Regel dieser Session), Daemon läuft.
+
+## 22. Quick-Win Q — `sec`-Defaults angleichen (2026-07)
+
+Nutzer-Beobachtung aus dem Produktions-Render von `sidequerst`: das fertige Video wirkte „fast schon zu schnell geschnitten" — der Default-Wert 4 s pro Szene ist eher auf Reels/Shorts (15–60 s Endprodukt) kalibriert als auf narrative Doku (5–20 Min). Quick-Win Q hebt den Default sanft an und engt die maximale Spanne ein.
+
+### 22.1 Was sich geändert hat
+
+**Frontend** (`dashboard.html`, Zeile ~306):
+```html
+<!-- vorher: -->
+<input type="number" id="sec" value="4" min="2" max="10" step="0.5">
+<!-- nachher: -->
+<input type="number" id="sec" value="5.5" min="2" max="8" step="0.5">
+```
+Plus präzisierter Hint-Text, der explizit nennt, was die Backends tun (cap auf 5.5 s für „normal", bis 6 s für „calm", ~1.1 s für „punchy").
+
+**Backend** (`dashboard.py`, Z. ~631 + ~680):
+```python
+# vorher:
+targets = {"calm": PACING_TARGET_SEC["calm"],
+           "normal": max(1.5, min(normal_sec, 4.0)),  # hartes Cap bei 4.0s
+           "punchy": PACING_TARGET_SEC["punchy"]}
+# nachher:
+NORMAL_HARD_CAP_SEC = 5.5   # neue Konstante, dokumentiert im Code
+targets = {"calm": PACING_TARGET_SEC["calm"],
+           "normal": max(1.5, min(normal_sec, NORMAL_HARD_CAP_SEC)),
+           "punchy": PACING_TARGET_SEC["punchy"]}
+```
+
+### 22.2 Honest disclosure: empirische Scene-Count-Reduktion ist kleiner als die einfache Schätzung
+
+Die Begründung „25–33 % weniger Szenen" stammt aus dem Übergabe-Plan (`IMPLEMENTATION_PLAN_NEXT.md` §1.3) und rechnet mit **Audio-Dauer / sec-per-scene** als simple Rate. In der Realität wird die Scene-Anzahl in `segment_by_pacing()` von **drei** zusammenspielenden Mechanismen bestimmt:
+
+1. `target_words = round(targets[label] * wpm / 60.0)` — was der Plan meint mit „sec-per-scene"
+2. `hard_cap_words = round(MAX_SCENE_SEC * wpm / 60.0)` — die **äußere** Decke pro Szene, unabhängig vom Label
+3. Label-basiertes Grouping (calm/normal/punchy erzwingt Cuts an Label-Grenzen)
+
+Bei kurzen Units (3–8 Wörter) trifft (2) bereits nach 2–3 Units zu, **bevor** (1) relevant wird — der `target_words`-Unterschied zwischen 10 (sec=4) und 14 (sec=5.5) macht dann oft **keinen Unterschied** in der Scene-Anzahl, sondern nur in der Textmenge pro Scene. Empirisch in Tests: bei kleinen Skripts identische Counts, bei großen Skripts nur ~5–10 % weniger Szenen (nicht 25–33 %).
+
+Der UI-Default-Shift + `max=8` statt `10` sind trotzdem additiv wertvoll:
+- Default 5.5 s entspricht der „cinematisch ruhigen" Wahl für narrative Mid-Form-Doku (Simplicissimus-Referenz)
+- `max=8` verhindert Extrema („super-lange" Szenen)
+- Der `sec=4`-Wert bleibt explizit wählbar — kein Code-Pfad ändert sich für non-default User-Eingaben
+- Der Hardcap-Funktion (`sec=10` → effektiv 5.5) ist verifizierbar per `segment_by_pacing(units, pacing, wpm, 10.0)` == `segment_by_pacing(units, pacing, wpm, 5.5)`
+
+## 23. Phase 1 — ElevenLabs-Voiceover mit Word-Timestamps (2026-07)
+
+Das Voice-over kommt direkt vom ElevenLabs `/v1/text-to-speech/{voice_id}/with-timestamps`-Endpoint — Audio + per-Word Timestamps in einem einzigen Round-Trip. Eliminiert den Whisper-Lauf im Hauptpfad und macht das Timing deterministisch (kein LLM, das Szenen aus Audio halluziniert).
+
+### 23.1 Datenmodell-Erweiterungen (additiv)
+
+**`audio_meta.json`** (von `/api/upload_audio`, jetzt auch von ElevenLabs-Pfad beschrieben):
+```jsonc
+{
+  // ...bestehend (path, mime, name)...
+  "voiceover_source": "elevenlabs" | "user_upload",
+  "voiceover_task_id": "el_xxx",
+  "voiceover_chars": 3421,
+  "voiceover_word_timestamps": [{"word": "...", "start": 0.0, "end": 0.21}],
+  "voiceover_settings_used": {
+    "voice_id": "...", "model_id": "eleven_multilingual_v2",
+    "stability": ..., "similarity_boost": ..., "style": ..., "use_speaker_boost": ...
+  }
+}
+```
+
+**`plan.json`** (von `_transcribe_generate_worker` voiceover_source-aware befüllt):
+```jsonc
+{
+  "scenes": [...],   // unverändert in der Struktur
+  "wpm": ..., "sec": ..., "characters": [...],
+  // NEU (alle additiv, alte Pläne bleiben lesbar):
+  "source": "elevenlabs" | "audio" | "text"   // Plan-Quelle, war vorher nur "audio"|"text"
+  "voiceover_source": "elevenlabs" | "user_upload",
+  "voiceover_task_id": "el_xxx" | null,
+  "voiceover_word_timestamps": [{"word":..., "start":..., "end":...}] | null
+}
+```
+
+**Channel-scoped Persistenz** (`channels/<cid>/`):
+- `voice_id.txt` — eine Zeile, ElevenLabs voice_id
+- `voice_settings.json` — das obige `voiceover_settings_used`-Objekt (slider-freundlich)
+
+### 23.2 Globale State
+
+- `VOICE_JOBS: dict = {}` + `_VOICE_JOBS_LOCK = threading.Lock()` — sechster Job-Dict, in `_cleanup_stale_jobs` integriert (siehe §6.1)
+- `ELEVENLABS_VOICE_SETTINGS_DEFAULT` als Single Source of Truth für die fünf ElevenLabs-Slider
+
+### 23.3 Architektur-Entscheidung — keine neue Worker-Pipeline
+
+Option C (ElevenLabs) erbt den Worker-Pfad von Option A (User-Upload). Das ist **kein** Zufall, sondern eine bewusste Designentscheidung aus dem Übergabe-Plan (§4.6):
+
+> „**Variante A — MCP-Server-Wrapper … Variante B — Agenten innerhalb der Pipeline (explizit ablehnen) …**"
+>
+> Der User-Feedback-Punkt (zitiert im Plan §2.6): „Option C (ElevenLabs) ist semantisch **enger verwandt mit A als mit B** — auch hier wird **Audio erzeugt** und es soll daraus ein Plan entstehen … **derselbe `_transcribe_generate_worker`**."
+
+Konkrete Implementierung statt eines neuen `_voiceover_worker`:
+
+```python
+# in _transcribe_generate_worker (Upstream Z. ~3151):
+meta = json.load(open(v_audio(cid, vid)))
+if meta.get("voiceover_source") == "elevenlabs" and meta.get("voiceover_word_timestamps"):
+    words = meta["voiceover_word_timestamps"]
+    audio_duration = max((w["end"] for w in words), default=0.0)
+    beats = _elevenlabs_words_to_beats(words, sec, audio_duration)   # Time-Windowing
+    # ... restliche Pipeline (analyze_script, visual_prompts, plan-write) unverändert ...
+else:
+    # bestehender Gemini-Transcribe-Pfad — unverändert
+    beats = transcribe_and_segment(meta["path"], meta["mime"], sec)
+```
+
+Das spart:
+- Einen kompletten neuen Background-Thread
+- Eine neue Status-Polling-Schleife (existierende PLAN_JOBS-Polling wird wiederverwendet)
+- Sonderbehandlung in der Orchestrator-Logik
+
+### 23.4 API-Verhalten — explizit kein stillschweigender Fallback
+
+`elevenlabs_generate()` (Phase 1) verhält sich restriktiv, gemäß `ARCHITECTURE.md` §6.1 (kein Agentic-Drift):
+
+```python
+# strenge Validierung der Response-Form:
+if not resp.get("audio_base64"):
+    raise RuntimeError("ElevenLabs antwortete ohne audio_base64 — bitte erneut versuchen.")
+if not resp.get("alignment", {}).get("words"):
+    raise RuntimeError("ElevenLabs antwortete ohne alignment.words — bitte erneut versuchen "
+                       "(Provider-Schema-Drift oder leerer Text?).")
+```
+
+Plus Retry-Policy: 429/5xx → Backoff 5/10/20 s (max 3 Retries). Alles andere (401, 422, Schema-Drift) → sofortiger raise, **kein** Whisper-Fallback. Der User sieht den Fehler im Frontend und entscheidet, was er tut.
+
+### 23.5 Atomic-Write-Strategie (kein halbpersistierter Zustand)
+
+`_elevenlabs_persist_and_schedule()` schreibt in einer definierten Reihenfolge:
+
+```
+1. ElevenLabs-Call → liefert mp3_bytes + words + task_id (alles im RAM)
+2. voiceover.mp3 schreiben
+3. audio_meta.json schreiben (canonical resume-marker)
+   ↳ wenn Schritt 3 failt → voiceover.mp3 wieder löschen
+4. plan.json bestehende start_aligned / end_aligned nullen
+5. _transcribe_generate_worker im Hintergrund starten
+```
+
+Wenn 3 fehlschlägt, ist die Disc garantiert entweder ganz leer (kein voiceover.mp3, kein meta) oder ganz vollständig (beides da + plan.json mit ElevenLabs-Phasen). Niemals halb.
+
+### 23.6 Idempotenter Resume-Marker
+
+`/api/voiceover_generate` führt vor dem ElevenLabs-Call eine Idempotenz-Prüfung durch:
+
+```
+if audio_meta["voiceover_source"]=="elevenlabs"
+   and audio_meta["voiceover_word_timestamps"] exists
+   and plan.json exists with voiceover_source="elevenlabs":
+        return {ok: true, resume: true, ...}
+```
+
+**Kein** zweiter API-Call, **kein** erneuter Worker-Start — die ElevenLabs-Phase ist bereits abgeschlossen. Die `voiceover_task_id` im Response ist die alte, identifizierbar.
+
+### 23.7 Frontend „Option C"-Karte
+
+Im bestehenden Schritt-②-Block zwischen Option A (Upload) und Option B (Manuell) als gleichberechtigte Karte. Inhalte:
+
+- Voice-Dropdown (`/api/elevenlabs_voices`) — listet Library + Cloned Voices
+- 4 Slider (Stability / Similarity / Style / Speaker-Boost) mit Reset-Button
+- „Voice testen" → `/api/voiceover_preview` → 5 s Sample-Audio (raw `audio/mpeg`, nicht JSON)
+- „🎙 Voiceover generieren" → `/api/voiceover_generate` → Polling via `/api/voiceover_status` + `/api/plan_status` (Orchestrator-Pfad wird reused, kein neues Polling)
+
+### 23.8 End-to-End verifiziert (Juli 2026)
+
+Smoke-Tests gegen echten ElevenLabs-Account (Test 1 Konfiguration: 26 Voices geladen, Test 3 Resume: zweiter Generate-Call liefert `{resume: true}` ohne API-Call, Test 4 Fallback: alte Pläne ohne `voiceover_source` fallen sauber auf Gemini-Transcribe zurück, Test 6 Partial Response: `audio_base64` ohne `alignment.words` raise'd korrekt). Test 2 und Test 5 (echtes End-to-End-Render mit ElevenLabs-Audio) verlangen ElevenLabs-Credits und wurden nicht live ausgeführt — die isolierten Code-Pfade sind aber grün.

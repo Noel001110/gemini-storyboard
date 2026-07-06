@@ -10,6 +10,22 @@ Stand: Juli 2026. Dieses Dokument ist **selbsterklärend** — es setzt keine vo
 
 **Errata (nachträglich, Stand siehe `ARCHITECTURE.md` Abschnitt 16):** Überall in diesem Dokument, wo **„ElevenLabs Scribe"** als Quelle für Wort-Timestamps in Phase 3 genannt wird, gilt das als **überholt**. Live-Test von `elevenlabs/speech-to-text` über KIE (echter Task, echte Credits) blieb dauerhaft im Status `"waiting"` hängen, ohne je ein Ergebnis zu liefern — das Modell ist über KIE nicht nutzbar. Gemini wurde als Alternative geprüft und verworfen, da es bei präzisen Timestamps halluziniert (für reinen Transkript-Text ist es gut, für "wann genau wurde welches Wort gesagt" nicht verlässlich). **Ersetzt durch: lokales `faster-whisper`** (Modell "small", `word_timestamps=True`) — läuft offline, ohne Rate-Limit, ohne laufende Kosten, mit ~500 MB einmaligem Modell-Download und ~1 GB RAM-Bedarf während einer kurzen Transkriptions-Burst-Phase. Jede Erwähnung von „Scribe"/`transcribe_words_scribe` unten ist im Sinne dieser Ersetzung zu lesen.
 
+**Errata (nachträglich, Stand Juli 2026, Stand siehe `ARCHITECTURE.md` §§22-23):** Die Phasen-Liste in §8 unten dieses Dokuments ist **historisch** — entstanden vor Quick-Win Q und Phase 1 (ElevenLabs). Aktueller Stand der Ausbaustufen:
+
+- ✅ **Phase 1 (Bild-Sequenzen / Ketten, Feature A)** — umgesetzt, ARCHITECTURE §12
+- ✅ **Phase 2 (Basis-Renderer, Feature B)** — umgesetzt, ARCHITECTURE §13
+- ✅ **Phase 2.5 (Sound-Design)** — umgesetzt, ARCHITECTURE §14
+- ✅ **Phase 3 (Frame-genaues Timing via faster-whisper)** — umgesetzt, ARCHITECTURE §16 (NICHT mehr via ElevenLabs Scribe, siehe Errata oben)
+- ✅ **Phase 4.4 (Text-Overlays)** — umgesetzt, ARCHITECTURE §18
+- ✅ **Phase 4.5 (Ein-Knopf-Orchestrator)** — umgesetzt, ARCHITECTURE §17
+- ✅ **Motion-Vokabular + variable Übergangsdauer (§20 des Cinema-Erweiterungsplans)** — umgesetzt, ARCHITECTURE §20
+- ✅ **JOBS-Memory-Cleanup (Phase 0 des Cinema-Erweiterungsplans)** — umgesetzt, ARCHITECTURE §21
+- ✅ **Quick-Win Q (`sec`-Defaults 4→5.5, Normal-Hardcap 4→5.5)** — umgesetzt, ARCHITECTURE §22
+- ✅ **Phase 1 ElevenLabs (TTS + Word-Timestamps)** — umgesetzt, ARCHITECTURE §23
+- ⏳ **Story-Phase-Engine (Phase 3 des Cinema-Erweiterungsplans, neu geschrieben)** — geplant, siehe Implementierungs-Plan `.kilo/plans/1783367382459-quickwin-elevenlabs.md` (Phase B in der Liste)
+
+Die in §8 unten erwähnten Phase-3-ff-Phasen (4–9) sind im **Übergabe-Plan `IMPLEMENTATION_PLAN_NEXT.md`** und in `ARCHITECTURE.md` §§22-23ff. neu beschrieben — die Phase-Nummern dort sind mit der aktuellen Reihenfolge konsistent, §8 hier nicht.
+
 ---
 
 ## 0. Anleitung für Claude Code
@@ -460,6 +476,10 @@ ffprobe -v error -show_entries format=duration -of csv=p=0 voiceover.mp3
 ---
 
 ## 8. Bauplan — Phasen (der Reihe nach, je einzeln testbar)
+
+> **⚠ Stand 2026-07:** Diese Sektion ist **historisch**. Quick-Win Q + Phase 1 (ElevenLabs) sind seit Juli 2026 produktiv (siehe Errata oben, `ARCHITECTURE.md` §§22-23). Die nächste Welle (Story-Phase-Engine, Pacing-aware Image-Prompts, Color-Grading pro Phase, Title-Cards, Counter-Animation, Stem-Musik, TTS-Prep, Multi-Speaker, Engine-Refactor) ist im Implementierungs-Plan `.kilo/plans/1783367382459-quickwin-elevenlabs.md` neu beschrieben — die Phase-Nummerierung dort ist mit der aktuellen Code-Realität konsistent, die hier unten **nicht** mehr.
+>
+> Für aktuelle Phasen-Liste siehe **Errata-Block oben** oder `IMPLEMENTATION_PLAN_NEXT.md` §2.
 
 ### Phase 1 — Bild-Sequenzen (Feature A)
 1.1 `analyze_script`-Prompt um `visual_sequences` erweitern.
