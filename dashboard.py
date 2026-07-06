@@ -1252,6 +1252,20 @@ PHASE_COLOR_FILTER = {
     "RESOLUTION":    "eq=contrast=0.95:saturation=0.85:brightness=0.03",
 }
 
+# Phase G: per-phase music-bed volume. OPENING / RESOLUTION get a quieter bed (the
+# narration carries the moment), CLIMAX gets the loudest (cinematic swell). These
+# values are multiplies on the music input BEFORE sidechaincompress ducks under the
+# voice — sidechaincompress then takes what each phase gave it. With only the single
+# neutral_bed.mp3 asset currently available, the per-phase effect is audible but not
+# dramatic; it'll become meaningful once Pixabay stems (drums/bass/pads) get added
+# later — drop them in, the volume envelope stays the same.
+PHASE_VOLUME = {
+    "OPENING":       0.30,
+    "RISING_ACTION": 0.55,
+    "CLIMAX":        0.85,
+    "RESOLUTION":    0.35,
+}
+
 def _assign_phases(scenes: list, analysis: dict, total: int) -> None:
     """Phase 3: assign each scene a STORY-PHASE, preferring LLM data when available.
 
@@ -2411,23 +2425,63 @@ def _place_sfx(narration_path: str, sfx_events: list, out_path: str) -> None:
         raise RuntimeError(f"ffmpeg SFX-Platzierung fehlgeschlagen: {result.stderr.decode(errors='replace')[-300:]}")
 
 
+def _phase_modulate_music(music_path: str, scenes: list, out_path: str) -> None:
+    """Phase G: pre-modulate music volume per scene's phase BEFORE sidechaincompress.
+    The expression is piecewise: each scene contributes
+    `between(t,start,end)*volume`, summed across scenes — for non-overlapping scenes
+    this gives a smooth staircase envelope. Falls back to a plain copy if no scene
+    has a phase (legacy plans) or if ffmpeg returns non-zero (malformed expression).
+    """
+    parts = []
+    for s in scenes:
+        ph = s.get("phase", "")
+        if ph not in PHASE_VOLUME:
+            continue
+        vol = PHASE_VOLUME[ph]
+        st = s.get("start_aligned") or s.get("start", 0.0)
+        en = st + max(0.1, s.get("dur", 5.0))
+        parts.append(f"between(t,{st:.3f},{en:.3f})*{vol:.2f}")
+    if not parts:
+        shutil.copy(music_path, out_path)
+        return
+    expr = "+".join(parts)
+    cmd = ["ffmpeg", "-y", "-i", music_path, "-af", f"volume='{expr}'", out_path]
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=120, text=True)
+        if result.returncode != 0:
+            print(f"  [Audio] phase-modulate failed ({result.stderr[-200:]}) — fallback ohne Modulation", flush=True)
+            shutil.copy(music_path, out_path)
+    except Exception as e:
+        print(f"  [Audio] phase-modulate exception ({e}) — fallback ohne Modulation", flush=True)
+        shutil.copy(music_path, out_path)
+
+
 def _build_final_audio(voice_path: str, scenes: list, render_dir: str) -> str:
     """Builds the final audio track for muxing: voiceover + ducked music bed + rule-
     based SFX, loudnorm-normalized. Falls back to the raw voiceover unchanged if the
     music bed asset is missing (e.g. a fresh checkout before real assets are added) —
     same resilience pattern as everywhere else in this codebase: missing optional data
-    degrades gracefully instead of failing the whole render."""
+    degrades gracefully instead of failing the whole render.
+
+    Phase G: between loading the music bed and sidechaincompressing it, runs a per-
+    phase volume envelope (PHASE_VOLUME table on the music input). Currently only
+    assets/music/neutral_bed.mp3 exists — the per-phase effect is audible but
+    subtle. When Pixabay stem-assets (drums/bass/pads) are dropped in later, the
+    same envelope applies and dramatic differentiation kicks in for free."""
     if not os.path.exists(MUSIC_BED_FILE):
         print("  [Render] Kein Musikbett gefunden (assets/music/neutral_bed.mp3) — "
               "rendere ohne Sound-Design, nur Voiceover.", flush=True)
         return voice_path
     try:
+        # Phase G: phase-modulate the music bed before ducking
+        phase_modulated_path = os.path.join(render_dir, "_phase_modulated.mp3")
+        _phase_modulate_music(MUSIC_BED_FILE, scenes, phase_modulated_path)
         ducked_path = os.path.join(render_dir, "_ducked.mp3")
-        _duck_music_under_voice(voice_path, MUSIC_BED_FILE, ducked_path)
+        _duck_music_under_voice(voice_path, phase_modulated_path, ducked_path)
         sfx_events = _build_sfx_events(scenes)
         final_audio_path = os.path.join(render_dir, "_final_audio.mp3")
         _place_sfx(ducked_path, sfx_events, final_audio_path)
-        print(f"  [Render] Sound-Design: Musikbett gedückt + {len(sfx_events)} SFX-Ereignisse platziert", flush=True)
+        print(f"  [Render] Sound-Design: Phase-G-modulierter Musikbett gedückt + {len(sfx_events)} SFX-Ereignisse platziert", flush=True)
         return final_audio_path
     except Exception as e:
         print(f"  [Render] Sound-Design fehlgeschlagen ({e}) — falle zurück auf reines Voiceover.", flush=True)
