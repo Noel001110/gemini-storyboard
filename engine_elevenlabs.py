@@ -247,15 +247,34 @@ def _enrich_for_tts(text: str, scenes: list = None) -> str:
       - '\n\n' before is_phase_break scenes (act-change pause)
     Returns the enriched text. If `scenes` is None, only sentence-level
     enrichment runs (the relative-scene lookup is optional).
+
+    Abbreviations: detected and skipped via pre-pass sentinel. Without this, common
+    abbreviations like 'Dr. Müller', 'USA. Wir', 'z.B. diese', 'Mio. Dollar' would
+    trigger the sentence-break heuristic on their internal period, producing extra
+    ' ... ' pauses and breaking TTS audio ('Doktor ... Müller' instead of 'Doktor Müller').
     """
     enriched = text.strip()
     if not enriched:
         return enriched
-    # Split on sentence boundaries (". X" with X capital). Strip trailing
-    # ellipsis fragments from each part so the ' ... ' join produces at most
-    # ONE separator between any two sentences — idempotent on repeated calls.
-    parts = re.split(r"(?<=\.)\s+(?=[A-ZÄÖÜ])", enriched)
-    cleaned = [re.sub(r"\s*\.\s*\.\s*\.\s*$", "", p) for p in parts]
+    # Abbreviations: pre-pass with sentinel so the split-then-join doesn't see them.
+    # Heuristic: short (1-3 letter) word, NOT prefixed by another letter (word-boundary),
+    # followed by '. <capital>' = typical abbreviation. Negative lookbehind '(?<![letter])'
+    # is fixed-width → safe in Python re. Sentinel is a Unicode non-printing char
+    # (U+200E LEFT-TO-RIGHT MARK) that survives re.split and re.replace rounds without
+    # being mis-recognized as word boundary or whitespace.
+    SENTINEL = "‎"
+    enriched = re.sub(
+        r"(?<![A-Za-zÀ-ÿ])([A-Za-zÀ-ÿ]{1,3})\.(\s+)(?=[A-ZÀ-ÿ])",
+        lambda m: m.group(1) + SENTINEL + m.group(2),
+        enriched,
+    )
+    # Now split safely — abbreviations are masked out, real sentence boundaries
+    # still match. Strip trailing ellipsis fragments from each part so the ' ... '
+    # join produces at most ONE separator between any two sentences — idempotent on
+    # repeated calls.
+    parts = re.split(r"(?<=\.)\s+(?=[A-ZÀ-Ü])", enriched)
+    cleaned = [re.sub(r"\s*\.\s*\.\s*\.\s*$", "", p).replace(SENTINEL, ".")
+                for p in parts]
     enriched = " ... ".join(cleaned)
     if scenes:
         for s in scenes:

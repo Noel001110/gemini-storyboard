@@ -1152,6 +1152,14 @@ def story_phase(i: int, total: int) -> str:
 PHASE_COVERAGE_THRESHOLD = 0.8  # <80% LLM coverage → full fallback (no mixing)
 
 def _phase_prompt_addition(phase: str) -> str:
+    """Inline lookup of phase-specific prompt cues. Kept as thin wrapper for clarity
+    at call sites — actual logic is `PHASE_PROMPT_ADDITIONS.get(phase, "")`.
+
+    Historical note: was originally intended as a function to inject phase-cues
+    into the image-prompt chunk, but `_image_prompt_chunk` already injects
+    `[Phase: X]` annotations inline. The use here is inside `_build_image_prompt`
+    — a HARD injection of the phase STYLE into the final KIE-bound prompt — making
+    Phase C a real constraint (vs. a soft hint that the LLM might forget)."""
     return PHASE_PROMPT_ADDITIONS.get(phase, "")
 
 # Phase G: per-phase music-bed volume. OPENING / RESOLUTION get a quieter bed (the
@@ -1301,7 +1309,12 @@ def gen_charsheet(cid, name, description):
 
 # ---------- Bildgenerierung via KIE.ai ----------
 
-def _build_image_prompt(scene_prompt, master, char_refs):
+def _build_image_prompt(scene_prompt, master, char_refs, phase=""):
+    """Compose the final image-generation prompt: scene text + character refs (if any)
+    + PHASE_PROMPT_ADDITIONS hard-injection (Phase C, Juli 2026) + master prompt.
+    The phase cue is hard-injected (not just hinted to the LLM) to make Phase C a
+    real constraint instead of an LLM-soft-compliance thing.
+    """
     char_hint = ""
     if char_refs:
         for cr in char_refs:
@@ -1309,7 +1322,12 @@ def _build_image_prompt(scene_prompt, master, char_refs):
             if desc:
                 char_hint += (f"\n\nCHARACTER DESIGN for '{name}': {desc}"
                               f"\nApply this exact design in whatever pose this scene requires.")
-    return scene_prompt + char_hint + "\n\n" + master
+    phase_hint = ""
+    if phase:
+        phase_cue = _phase_prompt_addition(phase)
+        if phase_cue:
+            phase_hint = f"\n\nSTYLE ({phase}): {phase_cue}"
+    return scene_prompt + char_hint + phase_hint + "\n\n" + master
 
 
 def _build_video_prompt(scene_prompt: str, vid_master: str) -> str:
@@ -1614,7 +1632,7 @@ def _batch_generate_worker(cid: str, vid: str):
                 use_char_ref = bool(char_ref_url) and entity.startswith("char_") and \
                     any(c.get("id") == entity for c in plan.get("characters", []))
                 refs = chain_refs + ([char_ref_url] if use_char_ref else [])
-                full_prompt = _build_image_prompt(scene.get("prompt", ""), master, char_refs)
+                full_prompt = _build_image_prompt(scene.get("prompt", ""), master, char_refs, phase=scene.get("phase", ""))
                 if scene.get("seq_id") is not None and scene.get("seq_pos", 0) >= 1:
                     # Positive constraints only — negated instructions ("do NOT redesign")
                     # are weighted weaker by instruction-following image models and can
@@ -1952,7 +1970,14 @@ def _motion_for_scene(scene: dict, prev_scene: dict) -> dict:
     motion as their sequence's previous scene, so several images belonging to one visual
     sequence read as one continuous camera move instead of independent shots each
     'breathing' on their own. Intensity scales with duration — a long scene gets a fuller
-    movement, a short one stays subtle."""
+    movement, a short one stays subtle.
+
+    Phase C-coupling (Phase-Engine 2026-07): at phase_source == "llm" with a
+    recognized phase, pull from _PHASE_MOTION_CANDIDATES (set by the LLM-driven
+    story-phase-engine). At phase_source == "position-fallback" or unknown phase
+    (legacy / non-LLM plan), fall back to pacing-based candidates — bei Fallback
+    kennen wir die echte Story nicht, da ist Pacing ehrlicher als eine position-basierte
+    Phase-Heuristik."""
     dur = scene.get("dur", 3.0)
     if dur < 1.2:
         return _build_motion("static", 1.0)
@@ -1963,7 +1988,10 @@ def _motion_for_scene(scene: dict, prev_scene: dict) -> dict:
     else:
         phase = scene.get("phase")
         pacing = scene.get("pacing") if scene.get("pacing") in _PACING_MOTION_CANDIDATES else "normal"
-        candidates = _PHASE_MOTION_CANDIDATES.get(phase) or _PACING_MOTION_CANDIDATES[pacing]
+        if phase and scene.get("phase_source") == "llm" and phase in _PHASE_MOTION_CANDIDATES:
+            candidates = _PHASE_MOTION_CANDIDATES[phase]
+        else:
+            candidates = _PACING_MOTION_CANDIDATES[pacing]
         name = candidates[scene.get("i", 0) % len(candidates)]
 
     intensity_scale = min(0.5 + dur * 0.12, 1.4)
@@ -2170,7 +2198,10 @@ def _render_selfcheck(final_path: str, expected_audio_duration: float) -> dict:
 
 # ---------- Übergänge (Phase 4) — Crossfade NUR an echten Sequenz-/Szenenwechseln, ----
 # alles andere bleibt harter Schnitt über den verlustfreien concat-Demuxer.
-TRANSITION_DURATION_SEC = 0.5  # Fallback/Default, siehe TRANSITION_LIBRARY für die pro-Familie-Dauer
+# TRANSITION_DURATION_SEC war ein toter Default-Fallback (Definition ohne
+# jegliche Referenz im Codebase) — die echten Dauern kommen aus
+# TRANSITION_LIBRARY[family]["duration"]. Entfernt 2026-07 (Phase-J-
+# Dead-Code-Scan, ARCHITECTURE §11).
 
 # Kuratierte Übergangs-Bibliothek: ffmpegs xfade-Filter bringt bereits 58 fertige
 # Übergangstypen mit (kein neues Paket, keine eigene Easing-Formel nötig für diesen
@@ -2199,9 +2230,33 @@ def _transition_for_scene(scene: dict, idx: int) -> tuple:
     VOR `scene`. Richtung (links/rechts) alterniert über den Szenenindex — dasselbe
     deterministische Muster wie die Zoom-Richtung in _motion_for_scene, damit ein
     erneuter Render (Resume nach Reload) exakt denselben Übergang produziert, kein
-    Zufalls-Rauschen. Gibt (transition_type, sfx_or_None, duration_sec) zurück."""
-    family = "fade" if scene.get("pacing") == "calm" else \
-             "wipe" if scene.get("pacing") == "punchy" else "smooth"
+    Zufalls-Rauschen. Gibt (transition_type, sfx_or_None, duration_sec) zurück.
+
+    Family-Pick-Lookup (Phase-B-konsistent, Phase-Engine 2026-07):
+    - Wenn scene.phase_source == "llm" und phase vorhanden: Phase hat Vorrang vor
+      Pacing — CLIMAX → wipe (dramatisch), OPENING / RESOLUTION → fade (langsam,
+      ruhig), RISING_ACTION → smooth (Standard).
+    - Wenn phase nicht LLM-gesetzt ist (position-fallback) ODER nicht vorhanden:
+      Fallback auf Pacing-Heuristik aus der Vor-Phase-B-Implementierung.
+    Damit bleibt die Optik von CLIMAX-Szenen dramatisch (wipe), auch wenn ihr
+    Pacing "normal" wäre, und OPENING-Szenen bekommen konsistent langsame fades
+    statt weicher smooths — konsistent mit der Motion-Auswahl in _motion_for_scene."""
+    phase = scene.get("phase", "")
+    phase_source = scene.get("phase_source", "")
+    pacing = scene.get("pacing", "normal")
+    if phase and phase_source == "llm":
+        # Phase-driven (LLM-set) — Phase hat Vorrang vor Pacing
+        if phase == "CLIMAX":
+            family = "wipe"
+        elif phase in ("OPENING", "RESOLUTION"):
+            family = "fade"
+        else:  # RISING_ACTION (no other phase currently possible)
+            family = "smooth"
+    else:
+        # Pacing-driven (legacy / position-fallback) — original Heuristik
+        family = "fade"  if pacing == "calm"  else \
+                 "wipe"  if pacing == "punchy" else \
+                 "smooth"
     lib = TRANSITION_LIBRARY[family]
     transition_type = lib["types"][scene.get("i", idx) % len(lib["types"])]
     return transition_type, lib["sfx"], lib["duration"]
@@ -4165,7 +4220,16 @@ class H(BaseHTTPRequestHandler):
                     return self._send(200, {"ok": True, "job_id": existing_job_id, "deduped": True})
             fn = f"{i:03d}.jpg"
             out_path = os.path.join(v_out(cid, vid), fn)
-            full_prompt = _build_image_prompt(prompt, read_master(cid), load_char_refs(cid))
+            # Phase C: read phase from plan.json so the image prompt gets the
+            # PHASE_PROMPT_ADDITIONS hard-injection when available. plan.json is the
+            # single source of truth for scene state.
+            try:
+                plan = json.load(open(v_plan(cid, vid)))
+                scene_for_phase = (plan.get("scenes") or [{}])[i] if i < len(plan.get("scenes", [])) else {}
+                scene_phase = scene_for_phase.get("phase", "")
+            except Exception:
+                scene_phase = ""
+            full_prompt = _build_image_prompt(prompt, read_master(cid), load_char_refs(cid), phase=scene_phase)
             # Global concurrency cap — blocks here if MAX_CONCURRENT_IMAGE_GENS are already
             # in flight from ANY source (batch or other individual clicks), instead of
             # firing this KIE submission immediately alongside all the others. Released by
