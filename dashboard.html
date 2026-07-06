@@ -1457,6 +1457,7 @@ function renderScenes(source){
         <span class="${tagClass}">${s.t}</span>
         <span class="tag">~${s.dur}s</span>
         ${hasSeq ? `<span class="tag" style="border-color:${seqColor};color:${seqColor}">⛓ Seq ${s.seq_id} · ${s.seq_pos+1}</span>` : ''}
+        ${s.kind === 'title_card' ? `<span class="tag" style="color:#6b3fa0;border-color:#6b3fa0;background:#f3eafa" title="Vollbild-Titelkarte (Phase E)">📜 Titell</span>` : ''}
         ${s.phase ? `<span class="phase-pill phase-pill-${s.phase}">${s.phase === 'RISING_ACTION' ? 'RISING' : s.phase}</span>` : ''}
         <span class="st ${s.status}" id="st${s.i}">${s.status}</span>
       </div>

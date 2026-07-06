@@ -1286,8 +1286,24 @@ def _assign_phases(scenes: list, analysis: dict, total: int) -> None:
             s["is_climax"] = False
             s["act_index"] = min(3, (s["i"] * 4 // max(1, total)))
             n_fb += 1
+    # Phase E: classify each scene as 'scene' (default) or 'title_card' (if it's an
+    # act-break). Title-cards are rendered as a separate PIL-generated still instead of
+    # going through _build_image_prompt + KIE — they're full-screen title text, not
+    # narrative imagery. The auto-derived card_title can be overridden by the user by
+    # writing to s["card_title"] in the frontend.
+    phase_break_sorted = sorted((s for s in scenes if s.get("is_phase_break")),
+                                 key=lambda x: x["i"])
+    for idx, s in enumerate(phase_break_sorted, start=1):
+        s["kind"] = "title_card"
+        s["act_index_visual"] = idx   # which act_break in chronological order (1-based)
+        if not s.get("card_title"):
+            s["card_title"] = f"Akt {idx}" if len(phase_break_sorted) > 1 else "Neuer Akt"
+    for s in scenes:
+        if "kind" not in s:
+            s["kind"] = "scene"
     print(f"  [Phase] {n_llm}/{total} LLM, {n_fb}/{total} fallback "
-          f"(coverage={coverage*100:.0f}%, hysteresis={'ON' if use_llm else 'OFF'})", flush=True)
+          f"(coverage={coverage*100:.0f}%, hysteresis={'ON' if use_llm else 'OFF'}), "
+          f"{len(phase_break_sorted)} title-card(s)", flush=True)
 
 VIDEO_PROMPT_MIN_LEN    = 280  # chars — forces setting/light/camera to be spelled out, not just a mood word
 
@@ -2043,9 +2059,27 @@ def _render_clip(img_path: str, scene: dict, out_path: str, fps: int = RENDER_FP
     overlays (captions/callouts/chapter titles, Phase 4.4) composited on top. Resume-safe:
     skips entirely if out_path already exists and is non-empty — same pattern as
     _batch_generate_worker's `todo = [s for s in scenes if not s.get("file")]`, so a
-    crashed/restarted render only redoes the clips actually missing, not everything."""
+    crashed/restarted render only redoes the clips actually missing, not everything.
+
+    Phase E: for scenes with kind=='title_card', the input image is generated on the
+    fly by _render_title_card_png() instead of being an LLM-generated narrative still.
+    The downstream pipeline (zoompan + color-grading + overlays) still runs unchanged —
+    the title-card PNG is simply what gets motion-graded instead of a KIE-generated scene.
+    """
     if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
         return
+    # Phase E: title-card shortcut — render the title-card PNG into a temp file via
+    # the .venv_whisper subprocess (where Pillow lives; the system Python doesn't
+    # have it), swap img_path for the rest of the pipeline, clean up afterward. The
+    # user's $card_title$ text is the focal point; everything else (zoompan, color-
+    # grading) still applies on top.
+    title_card_temp = None
+    if scene.get("kind") == "title_card":
+        title_card_temp = out_path + ".title.png"
+        render_title_card_png_via_venv(title_card_temp, RENDER_WIDTH, RENDER_HEIGHT,
+                                       scene.get("card_title") or "Neuer Akt",
+                                       phase=scene.get("phase", ""))
+        img_path = title_card_temp
     motion = _normalize_motion(scene.get("motion") or {"type": "static", "z_end": 1.02, "focus": [0.5, 0.5]})
     frames = max(1, scene.get("_frames") or round(scene.get("dur", 3.0) * fps))
     z0, z1 = motion["z0"], motion["z1"]
@@ -2124,6 +2158,9 @@ def _render_clip(img_path: str, scene: dict, out_path: str, fps: int = RENDER_FP
     finally:
         for p in overlay_pngs:
             try: os.remove(p)
+            except: pass
+        if title_card_temp and os.path.exists(title_card_temp):
+            try:    os.remove(title_card_temp)
             except: pass
 
 
@@ -3235,6 +3272,24 @@ def render_text_overlay_png(out_path: str, width: int, height: int, style: str, 
     result = subprocess.run(args, capture_output=True, text=True, timeout=90)
     if result.returncode != 0:
         raise RuntimeError(f"Overlay-Rendering fehlgeschlagen: {result.stderr[-500:]}")
+
+def render_title_card_png_via_venv(out_path: str, width: int, height: int,
+                                   text: str, phase: str = "") -> None:
+    """Phase E: full-frame OPAQUE title-card PNG. Reuses the same .venv_whisper that
+    loadet Pillow (für die Phase-4.4 Overlays) — System-Python kommt ohne Pillow.
+    Subprocess-Pattern identisch zu render_text_overlay_png oben (90s Timeout)."""
+    if not os.path.exists(WHISPER_VENV_PY):
+        raise RuntimeError(
+            "Helfer-venv fehlt (.venv_whisper/) — Pillow wird für title-card-Rendering benötigt. "
+            "Einmalig einrichten: python3 -m venv .venv_whisper && "
+            "./.venv_whisper/bin/pip install faster-whisper Pillow"
+        )
+    text_b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    args = [WHISPER_VENV_PY, OVERLAY_SCRIPT,
+            out_path, str(width), str(height), "title_card", text_b64, phase]
+    result = subprocess.run(args, capture_output=True, text=True, timeout=90)
+    if result.returncode != 0:
+        raise RuntimeError(f"Title-Card-Rendering fehlgeschlagen: {result.stderr[-500:]}")
 
 
 # ── ElevenLabs voiceover (Phase 1) ────────────────────────────────────────────
