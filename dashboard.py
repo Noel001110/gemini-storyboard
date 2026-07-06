@@ -628,6 +628,10 @@ def split_units(text):
 
 MAX_SCENE_SEC = 6.0          # hard cap — no scene may hold longer than this, regardless of pacing label
 PACING_TARGET_SEC = {"calm": 5.0, "punchy": 1.1}   # "normal" target comes from the user's own sec-per-image input
+NORMAL_HARD_CAP_SEC = 5.5     # Quick-Win Q (2026-07): cap the "normal" target at 5.5s.
+                               # Previous value was 4.0s — too tight for narrative mid-form docs
+                               # (~120 scenes per 8-min script). At sec_per_img=5.5 the same script
+                               # yields ~87 scenes, ~25-33% fewer cuts, still below MAX_SCENE_SEC.
 PACING_WARN_THRESHOLD = 0.30  # if >30% of units come back "punchy", the classifier likely over-fired on drama
                                # rather than found real reveals/cliffhangers — warn instead of silently
                                # exploding the scene (and KIE credit) count.
@@ -672,7 +676,7 @@ def segment_by_pacing(units: list, pacing: list, wpm: float, normal_sec: float,
     callout_by_i = {c.get("beat"): c.get("text") for c in (callouts or [])
                     if isinstance(c, dict) and c.get("text")}
     targets = {"calm": PACING_TARGET_SEC["calm"],
-               "normal": max(1.5, min(normal_sec, 4.0)),
+               "normal": max(1.5, min(normal_sec, NORMAL_HARD_CAP_SEC)),
                "punchy": PACING_TARGET_SEC["punchy"]}
     hard_cap_words = max(3, round(MAX_SCENE_SEC * wpm / 60.0))
 
