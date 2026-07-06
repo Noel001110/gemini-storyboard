@@ -97,6 +97,30 @@ def render_callout(width, height, text):
     return img
 
 
+def render_counter(width, height, text):
+    """Phase F: even bigger, centered single number for 'this is the stat' punchy moments.
+    No wrap (single-line numbers only — analysis enforces short callouts, max ~6 chars).
+    White text with thick black stroke + red letter-fill for high contrast — meant to
+    dominate the frame for ~1s (Phase-6 punchy cut)."""
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    # Even bigger font than callout — counter is THE focal moment
+    font_size = round(height * 0.22)
+    font = _font(font_size)
+    # Single-line render — callout is already constrained to ~6 chars by analyze_script prompt.
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+    cx = (width - text_w) / 2
+    cy = (height - text_h) / 2
+    # Red letter-fill with thicker black stroke — the red signals 'important number'.
+    draw.text((cx, cy), text, font=font,
+              fill=(220, 38, 38, 255),
+              stroke_width=max(4, font_size // 12),
+              stroke_fill=(0, 0, 0, 255))
+    return img
+
+
 def render_chapter(width, height, text):
     """Chapter-title card: centered, smaller than a callout, no box -- a brief scene-
     setting label rather than a shouted number. Shown at a sequence's first scene."""
@@ -113,7 +137,8 @@ def render_chapter(width, height, text):
     return img
 
 
-RENDERERS = {"caption": render_caption, "callout": render_callout, "chapter": render_chapter}
+RENDERERS = {"caption": render_caption, "callout": render_callout,
+              "chapter": render_chapter, "counter": render_counter}
 
 # Phase E title-card accent colors — same key fingerprint as PHASE_COLOR_FILTER in
 # dashboard.py so a "CLIMAX" scene's title-card underline matches the warm red the

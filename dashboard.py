@@ -2044,10 +2044,21 @@ def _overlay_specs_for_scene(scene: dict, clip_dur: float, overlay_opts: dict) -
     if overlay_opts.get("chapters") and scene.get("seq_pos") == 0 and scene.get("seq_reason"):
         specs.append(("chapter", scene["seq_reason"], 0.0, min(2.0, clip_dur)))
     if overlay_opts.get("callouts") and scene.get("callout"):
-        t0 = min(0.2, clip_dur * 0.1)
-        t1 = min(1.6, clip_dur - 0.05) if clip_dur > 0.3 else clip_dur
-        if t1 > t0:
-            specs.append(("callout", scene["callout"], t0, t1))
+        # Phase F: punchy + callout → switch to the dramatic "counter" style (big number,
+        # centered, red letter-fill) instead of the standard callout. The callout data
+        # (~6-char figure) is identical for both styles — only the visual treatment differs.
+        # Phase-F detects punchy via scene.pacing; legacy/non-pacing scenes keep using
+        # the standard callout.
+        if scene.get("pacing") == "punchy":
+            counter_t0 = min(0.1, clip_dur * 0.15)
+            counter_t1 = min(1.2, clip_dur - 0.05) if clip_dur > 0.3 else clip_dur
+            if counter_t1 > counter_t0:
+                specs.append(("counter", scene["callout"], counter_t0, counter_t1))
+        else:
+            t0 = min(0.2, clip_dur * 0.1)
+            t1 = min(1.6, clip_dur - 0.05) if clip_dur > 0.3 else clip_dur
+            if t1 > t0:
+                specs.append(("callout", scene["callout"], t0, t1))
     if overlay_opts.get("captions") and scene.get("text"):
         specs.append(("caption", scene["text"], 0.0, clip_dur))
     return specs
