@@ -8,7 +8,7 @@ Lokales Tool (läuft auf `localhost:8765`), das aus einem Sprecher-Skript automa
 
 ## 2. Tech-Stack — bewusst minimal
 
-- **Backend**: `dashboard.py`, ein einziges File, nur Python-Stdlib (`http.server.ThreadingHTTPServer`, kein Flask/FastAPI). ~2760 Zeilen.
+- **Backend**: `dashboard.py`, ein einziges File, nur Python-Stdlib (`http.server.ThreadingHTTPServer`, kein Flask/FastAPI). ~3745 Zeilen (Stand nach Aufräumen toter Pfade, Juli 2026 — wächst mit jeder Phase, Zeilenangabe hier bewusst nur eine grobe Orientierung, kein exakter Wert zum Nachhalten).
 - **Frontend**: `dashboard.html`, ein einziges File — Vanilla JS, kein Build-Step, kein Framework. Wird bei **jedem** Request frisch von der Platte gelesen (Zeile 2034: `open(... "dashboard.html").read()`), d.h. Frontend-Änderungen brauchen **keinen Server-Neustart**, Backend-Änderungen (`dashboard.py`) schon.
 - **Externe Dienste**: alles über **KIE.ai** als zentralen API-Broker — Bildgenerierung (nano-banana-2/-lite), Textgenerierung (Gemini 2.5 Flash + Gemini 3.5 Flash native), Video (Veo 3.1, Grok Imagine T2V/I2V).
 - **Datenhaltung**: keine Datenbank — alles als JSON-Dateien im Filesystem unter `channels/`.
@@ -63,39 +63,36 @@ channels/
 ```
 Skript (Text)
    │
-   ▼ split_units()                              [557]
+   ▼ split_units()                              [570]
 Atomare Sätze/Teilsätze
    │
-   ▼ analyze_script(units)                       [655]   ── EIN LLM-Call, liest das GANZE Skript
-Analyse: locations, characters, recurring_symbols,
-emotional_arc, callbacks, pacing (pro Einheit)
+   ▼ analyze_script(units)                       [771]   ── EIN LLM-Call, liest das GANZE Skript
+Analyse: locations, characters, recurring_symbols, emotional_arc,
+callbacks, pacing (pro Einheit), visual_sequences, callouts
    │
-   ▼ segment_by_pacing(units, pacing, wpm, sec)  [563]
-Szenen mit variabler Dauer (calm bis 6s, punchy <1.5s)
+   ▼ segment_by_pacing(units, pacing, wpm, sec, sequences, callouts) [591]
+Szenen mit variabler Dauer (calm bis 6s, punchy <1.5s), seq_id/seq_reason/callout durchgereicht
    │
-   ▼ visual_prompts(scenes, analysis)            [820]   ── Bild-Modus
-   │  ODER video_prompts_batch(...)              [1018]  ── Video-Modus (aktuell nicht im Haupt-Flow verdrahtet, s.u.)
+   ▼ visual_prompts(scenes, analysis)            [952]   ── einziger Prompt-Pfad, Bild-Modus wie Video-Modus
 Bild-Prompt pro Szene (chunked, validiert, retry)
    │
-   ▼ _build_image_prompt(prompt, master, char_refs) [1142]
+   ▼ _build_image_prompt(prompt, master, char_refs) [1080]
 Voller Prompt = Szenen-Text + Charakter-Beschreibungen + Master-Stil
    │
-   ▼ _kie_submit_image() → poll → download        [1187, 1267]
+   ▼ _kie_submit_image() → poll → download        [1125]
 Fertiges Bild in generated/NNN.jpg, plan.json aktualisiert
 ```
 
-Für Videos (T2V/Veo) ist der Pfad separat und **on-demand pro Szene**, nicht Teil der Plan-Erstellung — siehe Abschnitt 7.
+Für Videos (T2V/Veo) ist der Pfad separat und **on-demand pro Szene**, nicht Teil der Plan-Erstellung — siehe Abschnitt 7. (Eine früher parallel existierende, eigene Video-Prompt-Batch-Pipeline für den Video-Modus — `video_prompts_batch()`/`_video_prompt_chunk()` — war nie an einen HTTP-Endpunkt angeschlossen und wurde beim Aufräumen toter Pfade [Juli 2026] komplett entfernt, siehe Abschnitt 11.)
 
 ## 5. Die zwei Betriebsmodi (`mode`: `"image"` | `"video"`)
 
-Pro Video (`videos.json` → `mode`-Feld) einstellbar, im Frontend über den Segmented-Control oben im Editor (`setMode()`, dashboard.html:820).
+Pro Video (`videos.json` → `mode`-Feld) einstellbar, im Frontend über den Segmented-Control oben im Editor (`setMode()`, dashboard.html:930).
 
-- **Bild-Modus** (Standard): Skript → Szenen → **Bilder** (nano-banana-2). Optional pro Szene per I2V ("Animieren"-Button) zu einem kurzen Grok-Video animiert (`gen_video()`, dashboard.py:1925 — **nicht** Veo, sondern `grok-imagine/image-to-video`).
-- **Video-Modus** (T2V): Skript → Szenen → **direkt Videos**, kein Bild-Zwischenschritt. Zwei parallele Engines existieren im Code:
-  - **Veo 3.1** (`gen_veo`/`extend_veo`, dashboard.py:1809/1840) — das ist der tatsächlich verdrahtete Pfad (`/api/generate_t2v`, dashboard.py:2308), inkl. Chain-Extend (Abschnitt 7.2).
-  - **Grok T2V** (`gen_t2v`, dashboard.py:1758, Modell `grok-imagine/text-to-video`) — Funktion existiert, ist aber an keinem HTTP-Endpunkt angeschlossen (aktuell toter Code / Altlast aus einer früheren Iteration).
+- **Bild-Modus** (Standard): Skript → Szenen → **Bilder** (nano-banana-2). Optional pro Szene per I2V ("Animieren"-Button) zu einem kurzen Grok-Video animiert (`gen_video()`, dashboard.py:2649 — **nicht** Veo, sondern `grok-imagine/image-to-video`).
+- **Video-Modus** (T2V): Skript → Szenen → **direkt Videos**, kein Bild-Zwischenschritt, über **Veo 3.1** (`gen_veo`/`extend_veo`, dashboard.py:2533/2564, verdrahtet über `/api/generate_t2v`, dashboard.py:3251), inkl. Chain-Extend (Abschnitt 7.2). Ein früher zusätzlich vorhandener, nie verdrahteter zweiter Pfad über Grok T2V (`gen_t2v`, Modell `grok-imagine/text-to-video`) wurde beim Aufräumen toter Pfade (Juli 2026) entfernt, siehe Abschnitt 11.
 
-`renderScenes()` im Frontend (dashboard.html:1001) rendert je nach `CURRENT_MODE` komplett unterschiedliches HTML pro Szene (zwei Spalten Bild+Video im Bild-Modus vs. eine Video-Spalte + Prompt-Textarea im Video-Modus).
+`renderScenes()` im Frontend (dashboard.html:1131) rendert je nach `CURRENT_MODE` komplett unterschiedliches HTML pro Szene (zwei Spalten Bild+Video im Bild-Modus vs. eine Video-Spalte + Prompt-Textarea im Video-Modus).
 
 ## 6. Backend-Kernkonzepte
 
@@ -110,93 +107,113 @@ Kein Datenbank, kein Redis — alles In-Memory-Dicts im laufenden Python-Prozess
 | `BATCH_JOBS` | Status von "Alle Bilder generieren" pro Video | `_BATCH_JOBS_LOCK` |
 | `PLAN_JOBS` | Status von "Plan aus Skript erstellen" pro Video | `_PLAN_JOBS_LOCK` |
 | `RENDER_JOBS` | Status von "Video zusammenschneiden" (Auto-Rendering, Abschnitt 13) pro Video | `_RENDER_JOBS_LOCK` |
+| `PRODUCE_JOBS` | Status des Ein-Knopf-Orchestrators (Plan→Bilder→Rendern verkettet, Abschnitt 17) pro Video | `_PRODUCE_JOBS_LOCK` |
 
-**Wichtiges Muster, das sich wiederholt**: Alle drei "langlaufenden" Aktionen (Plan erstellen, alle Bilder generieren, Transkription) laufen als **Server-seitiger Background-Thread**, nicht als eine einzige lange HTTP-Anfrage. Grund (mehrfach live aufgetreten): eine blockierende HTTP-Anfrage stirbt, wenn der Tab geschlossen/neu geladen wird — das Frontend denkt dann "nichts passiert" und der Nutzer klickt erneut, was einen zweiten, komplett unabhängigen LLM-Lauf auf demselben Skript startet (doppelte Kosten). Die Lösung überall gleich: Endpunkt startet nur einen `threading.Thread(daemon=True)`, merkt sich `running=True` **atomisch mit der "läuft schon?"-Prüfung** (nicht danach!), und das Frontend pollt einen `_status`-Endpunkt.
+**Wichtiges Muster, das sich wiederholt**: Alle langlaufenden Aktionen (Plan erstellen, alle Bilder generieren, Transkription, Rendern, der Ein-Knopf-Orchestrator) laufen als **Server-seitiger Background-Thread**, nicht als eine einzige lange HTTP-Anfrage. Grund (mehrfach live aufgetreten): eine blockierende HTTP-Anfrage stirbt, wenn der Tab geschlossen/neu geladen wird — das Frontend denkt dann "nichts passiert" und der Nutzer klickt erneut, was einen zweiten, komplett unabhängigen LLM-Lauf auf demselben Skript startet (doppelte Kosten). Die Lösung überall gleich: Endpunkt startet nur einen `threading.Thread(daemon=True)`, merkt sich `running=True` **atomisch mit der "läuft schon?"-Prüfung** (nicht danach!), und das Frontend pollt einen `_status`-Endpunkt. `PRODUCE_JOBS` (Abschnitt 17) ist dabei kein neues Muster, sondern derselbe Mechanismus nochmal — der Orchestrator ruft die drei anderen Worker-Funktionen nur nacheinander im selben Thread auf, statt jeweils einen eigenen Thread zu spawnen.
 
 ### 6.2 Nebenläufigkeit bei der Bildgenerierung
 
-- `IMAGE_GEN_SEMAPHORE = threading.Semaphore(8)` (dashboard.py:43) — globales Limit, wie viele KIE-Bild-Tasks gleichzeitig laufen dürfen, unabhängig davon ob sie vom Batch-Worker oder einem einzelnen Klick kommen.
-- `_batch_generate_worker()` (dashboard.py:1324) nutzt `concurrent.futures.ThreadPoolExecutor(max_workers=8)`, um bis zu 8 Szenen parallel zu bearbeiten (`process_scene()`, verschachtelte Funktion ab Zeile 1359).
-- `_kie_rate_limit_wait()` (dashboard.py:1175) — zusätzlicher Schutz: max. 12 Submits pro 10 Sekunden prozessweit (KIEs echtes Limit: 20/10s), damit die 8 parallelen Worker nicht gleichzeitig eine Burst-Rate-Limit-Fehlermeldung auslösen. Bei "call frequency too high" wird automatisch mit Backoff wiederholt (`_kie_submit_image`, Zeile 1210 ff.), bei "insufficient credits" wird der **ganze Batch sofort gestoppt** (nicht jede Szene einzeln durchprobiert).
+- `IMAGE_GEN_SEMAPHORE = threading.Semaphore(8)` (dashboard.py:44, Kapazität aus `MAX_CONCURRENT_IMAGE_GENS`) — globales Limit, wie viele KIE-Bild-Tasks gleichzeitig laufen dürfen, unabhängig davon ob sie vom Batch-Worker oder einem einzelnen Klick kommen.
+- `_batch_generate_worker()` (dashboard.py:1311) nutzt `concurrent.futures.ThreadPoolExecutor(max_workers=8)`, um bis zu 8 Szenen parallel zu bearbeiten (`process_scene()`, verschachtelte Funktion darin).
+- `_kie_rate_limit_wait()` (dashboard.py:1113) — zusätzlicher Schutz: max. 12 Submits pro 10 Sekunden prozessweit (KIEs echtes Limit: 20/10s), damit die 8 parallelen Worker nicht gleichzeitig eine Burst-Rate-Limit-Fehlermeldung auslösen. Bei "call frequency too high" wird automatisch mit Backoff wiederholt (`_kie_submit_image`, dashboard.py:1161 ff.), bei "insufficient credits" wird der **ganze Batch sofort gestoppt** (nicht jede Szene einzeln durchprobiert).
 - `_PLAN_WRITE_LOCK` (dashboard.py:35) — schützt jedes Lesen-Ändern-Schreiben von `plan.json`. **Historischer Bug**: ohne diesen Lock konnten zwei Szenen, die fast gleichzeitig fertig wurden, sich gegenseitig überschreiben (Thread B liest eine Momentaufnahme, bevor Thread A geschrieben hat → Thread B's Schreibvorgang macht A's Update rückgängig). Das erklärte zufällig "verschwindende" fertige Bilder.
 
 ### 6.3 KIE.ai-Anbindung — drei verschiedene API-Formate
 
 | Funktion | Endpunkt | Zweck |
 |---|---|---|
-| `post_kie_text()` (270) | `/gemini-2.5-flash/v1/chat/completions` | OpenAI-kompatibel, für Transkription + Charakter-Bildanalyse |
-| `post_gemini_native()` (289) | `/gemini/v1/models/{model}:generateContent` | Natives Gemini-Format (contents/parts), nutzt `gemini-3-5-flash` mit `thinkingLevel: high` — verhindert "faules"/generisches Verhalten bei späteren Items in einem Batch. **Wird für fast alle Analyse-/Prompt-Generierungs-Calls genutzt** (analyze_script, Bild-/Video-Prompts, Titel, Thumbnail-Prompt, Skript-Generator). |
-| `_kie_submit_image()` (1187) | `/api/v1/jobs/createTask`, Modell `nano-banana-2`/`-lite` | Bildgenerierung |
-| `gen_veo()`/`extend_veo()` (1809/1840) | `/api/v1/veo/generate`, `/extend` | Veo 3.1 Videos |
-| `gen_video()` (1925) | `/api/v1/jobs/createTask`, Modell `grok-imagine/image-to-video` | Bild→Video-Animation im Bild-Modus |
+| `post_kie_text()` (298) | `/gemini-2.5-flash/v1/chat/completions` | OpenAI-kompatibel, für Transkription + Charakter-Bildanalyse |
+| `post_gemini_native()` (317) | `/gemini/v1/models/{model}:generateContent` | Natives Gemini-Format (contents/parts), nutzt `gemini-3-5-flash` mit `thinkingLevel: high` — verhindert "faules"/generisches Verhalten bei späteren Items in einem Batch. **Wird für fast alle Analyse-/Prompt-Generierungs-Calls genutzt** (analyze_script, Bild-/Video-Prompts, Titel, Thumbnail-Prompt, Skript-Generator). |
+| `_kie_submit_image()` (1125) | `/api/v1/jobs/createTask`, Modell `nano-banana-2`/`-lite` | Bildgenerierung |
+| `gen_veo()`/`extend_veo()` (2533/2564) | `/api/v1/veo/generate`, `/extend` | Veo 3.1 Videos |
+| `gen_video()` (2649) | `/api/v1/jobs/createTask`, Modell `grok-imagine/image-to-video` | Bild→Video-Animation im Bild-Modus |
 
-**Wichtiger, einmal live gefundener Bug**: `nano-banana-2` erwartet Referenzbilder im Feld `image_input`, `nano-banana-2-lite` im Feld `image_urls` — das falsche Feld wird von KIE stillschweigend akzeptiert (HTTP 200), hat aber **keinerlei Effekt**. Siehe `_kie_submit_image()` Zeile 1204.
+**Wichtiger, einmal live gefundener Bug**: `nano-banana-2` erwartet Referenzbilder im Feld `image_input`, `nano-banana-2-lite` im Feld `image_urls` — das falsche Feld wird von KIE stillschweigend akzeptiert (HTTP 200), hat aber **keinerlei Effekt**. Siehe `_kie_submit_image()`, dashboard.py:1143 (`ref_field = "image_input" if model == "nano-banana-2" else "image_urls"`).
 
 ## 7. Die Prompt-Pipeline im Detail (Kernstück)
 
 ### 7.1 Bild-Modus: Skript → fertiger Bild-Prompt
 
-**Schritt 1 — `split_units(text)`** (542): zerlegt in Sätze (Regex `[^.!?]+[.!?]?`), Sätze >22 Wörter werden zusätzlich an Kommas/Semikola gesplittet. Reiner Text-Preprocessing-Schritt, kein LLM.
+**Schritt 1 — `split_units(text)`** (570): zerlegt in Sätze (Regex `[^.!?]+[.!?]?`), Sätze >22 Wörter werden zusätzlich an Kommas/Semikola gesplittet. Reiner Text-Preprocessing-Schritt, kein LLM.
 
-**Schritt 2 — `analyze_script(units)`** (655): **Ein** LLM-Call (Gemini 3.5, `json_mode=True`) über das **gesamte** Skript. Liefert:
+**Schritt 2 — `analyze_script(units)`** (771): **Ein** LLM-Call (Gemini 3.5, `json_mode=True`) über das **gesamte** Skript. Liefert:
 - `locations`, `characters` (mit `visual_description` + `anonymize`-Flag für echte, identifizierbare Personen — die werden später nie beim Namen genannt/realistisch gezeigt, nur als Silhouette/Symbol),
 - `recurring_symbols` + `callbacks` (damit wiederkehrende visuelle Elemente konsistent bleiben),
 - `emotional_arc` (Opening/Midpoint/Resolution als je ein Wort),
-- `pacing` — **neu**, pro Einheit ein Label `calm`/`normal`/`punchy`, explizit im selben Call wie der `emotional_arc` bestimmt, damit das Pacing nicht unabhängig vom Spannungsbogen "driftet" (siehe Prompt-Text Zeile 680 ff. — die Einstufung soll die Position im Bogen berücksichtigen, nicht nur die Satzformulierung isoliert).
+- `pacing`, pro Einheit ein Label `calm`/`normal`/`punchy`, explizit im selben Call wie der `emotional_arc` bestimmt, damit das Pacing nicht unabhängig vom Spannungsbogen "driftet" (siehe Prompt-Text dashboard.py:805 — die Einstufung soll die Position im Bogen berücksichtigen, nicht nur die Satzformulierung isoliert),
+- `visual_sequences` (Feature A, Abschnitt 12) und `callouts` (Phase 4.4, Abschnitt 18.3) — beide additiv später hinzugekommen, gleicher Call, kein Mehraufwand.
 
-Dieses `analysis`-Dict wird **überall weitergereicht** — an die Segmentierung (`pacing`), an die Bild-Prompt-Chunks, an die Video-Prompt-Chunks, an die Anonymisierungs-Prüfung. Es wird pro Plan-Erstellung nur **einmal** berechnet (`visual_prompts()` überspringt einen zweiten `analyze_script()`-Call, wenn `analysis` schon übergeben wurde — Zeile 834).
+Dieses `analysis`-Dict wird **überall weitergereicht** — an die Segmentierung (`pacing`, `visual_sequences`, `callouts`), an die Bild-Prompt-Chunks, an die Anonymisierungs-Prüfung. Es wird pro Plan-Erstellung nur **einmal** berechnet (`visual_prompts()` überspringt einen zweiten `analyze_script()`-Call, wenn `analysis` schon übergeben wurde).
 
-**Schritt 3 — `segment_by_pacing(units, pacing, wpm, sec)`** (563): gruppiert die Einheiten zu Szenen. `calm` darf bis `MAX_SCENE_SEC=6.0s` halten, `punchy` wird auf ~1.1s komprimiert (bei langen Sätzen sogar in zwei Bilder gesplittet für den "Gut-Punch"-Effekt), `normal` folgt dem Nutzer-Wert (`sec`-Feld im Frontend). Harter Deckel bei 6s wird **immer** durchgesetzt, auch wenn eine einzelne Einheit für sich schon zu lang ist (Zeile 620 ff. — dieselbe Bug-Klasse wie einst bei der alten festen `segment()`, hier neu gefixt). Sicherheitsnetz: warnt im Log, wenn >30% als "punchy" eingestuft werden (`PACING_WARN_THRESHOLD`).
+**Schritt 3 — `segment_by_pacing(units, pacing, wpm, sec, sequences, callouts)`** (591): gruppiert die Einheiten zu Szenen. `calm` darf bis `MAX_SCENE_SEC=6.0s` halten, `punchy` wird auf ~1.1s komprimiert (bei langen Sätzen sogar in zwei Bilder gesplittet für den "Gut-Punch"-Effekt), `normal` folgt dem Nutzer-Wert (`sec`-Feld im Frontend). Harter Deckel bei 6s wird **immer** durchgesetzt, auch wenn eine einzelne Einheit für sich schon zu lang ist — dieselbe Bug-Klasse wie einst bei der alten festen `segment()`, hier neu gefixt. Sicherheitsnetz: warnt im Log, wenn >30% als "punchy" eingestuft werden (`PACING_WARN_THRESHOLD`). Trägt zusätzlich `seq_id`/`seq_reason` (Feature A/Kapitel-Titel) und `callout` durch Merge/Split hindurch — siehe Abschnitt 12 und 18.3 für die Details dieses Trackings.
 
-**Schritt 4 — `visual_prompts(scenes, analysis)`** (820): generiert den eigentlichen Bild-Prompt-Text pro Szene. Läuft **gechunkt** (`IMAGE_PROMPT_CHUNK_SIZE=20` Szenen pro LLM-Call — Grund: die Analyse+Few-Shot-Beispiele werden bei jedem Chunk-Call komplett mitgeschickt, größere Chunks = weniger Wiederholung = günstiger). Jeder Chunk-Call (`_image_prompt_chunk()`, 748) zwingt das Modell zu Zwischenfeldern, bevor der finale Prompt geschrieben wird:
+**Schritt 4 — `visual_prompts(scenes, analysis)`** (952): generiert den eigentlichen Bild-Prompt-Text pro Szene. Läuft **gechunkt** (`IMAGE_PROMPT_CHUNK_SIZE=20` Szenen pro LLM-Call — Grund: die Analyse+Few-Shot-Beispiele werden bei jedem Chunk-Call komplett mitgeschickt, größere Chunks = weniger Wiederholung = günstiger). Jeder Chunk-Call (`_image_prompt_chunk()`, 880) zwingt das Modell zu Zwischenfeldern, bevor der finale Prompt geschrieben wird:
 ```
 scene → core_statement → concrete_entity → callback_check → character_consistency → image_prompt
 ```
-Das verhindert vage, generische Prompts ("dark ominous scene") — das Modell muss zuerst explizit benennen, WAS die Zeile eigentlich behauptet und WELCHE konkrete Entität aus der Analyse gemeint ist, bevor es den Bildtext schreibt. `_validate_image_prompt_entry()` (736) prüft danach: mindestens `IMAGE_PROMPT_MIN_LEN=220` Zeichen, und die genannte `concrete_entity` muss tatsächlich im Prompt-Text vorkommen (außer bei anonymisierten Personen — dort wäre das ja gerade falsch). Bei Fehlschlag: `_image_prompt_single_retry()` (808), ein fokussierter Einzel-Call nur für diese eine Szene.
+Das verhindert vage, generische Prompts ("dark ominous scene") — das Modell muss zuerst explizit benennen, WAS die Zeile eigentlich behauptet und WELCHE konkrete Entität aus der Analyse gemeint ist, bevor es den Bildtext schreibt. `_validate_image_prompt_entry()` (868) prüft danach: mindestens `IMAGE_PROMPT_MIN_LEN=220` Zeichen, und die genannte `concrete_entity` muss tatsächlich im Prompt-Text vorkommen (außer bei anonymisierten Personen — dort wäre das ja gerade falsch). Bei Fehlschlag: `_image_prompt_single_retry()` (940), ein fokussierter Einzel-Call nur für diese eine Szene.
 
-**Fehlerresistenz beim Chunking**: `_fetch_image_chunk()` (840) — wenn ein Chunk-Call fehlschlägt (z.B. abgeschnittenes JSON bei großen Antworten), wird der Chunk **halbiert und beide Hälften einzeln neu versucht**, rekursiv, statt gleich zum generischen Fallback-Text zu greifen. Ein Timeout kostet so nur die halbe Chunk-Größe, nicht den ganzen Chunk.
+**Fehlerresistenz beim Chunking**: `_fetch_image_chunk()` (976, verschachtelt in `visual_prompts()`) — wenn ein Chunk-Call fehlschlägt (z.B. abgeschnittenes JSON bei großen Antworten), wird der Chunk **halbiert und beide Hälften einzeln neu versucht**, rekursiv, statt gleich zum generischen Fallback-Text zu greifen. Ein Timeout kostet so nur die halbe Chunk-Größe, nicht den ganzen Chunk.
 
-**Schritt 5 — `_build_image_prompt(scene_prompt, master, char_refs)`** (1142): baut den **finalen** an KIE gesendeten Text zusammen: `Szenen-Prompt + Charakter-Design-Hinweise (aus charsheets/) + Master-Prompt (Stil/Farben/Linienführung)`. Der Master-Prompt wird hier **wörtlich angehängt**, nicht nur dem LLM als Kontext gegeben — die Stil-Durchsetzung passiert also durch reine String-Konkatenation direkt vor dem Absenden, nicht durch "Vertrauen" ins Sprachmodell.
+**Schritt 5 — `_build_image_prompt(scene_prompt, master, char_refs)`** (1080): baut den **finalen** an KIE gesendeten Text zusammen: `Szenen-Prompt + Charakter-Design-Hinweise (aus charsheets/) + Master-Prompt (Stil/Farben/Linienführung)`. Der Master-Prompt wird hier **wörtlich angehängt**, nicht nur dem LLM als Kontext gegeben — die Stil-Durchsetzung passiert also durch reine String-Konkatenation direkt vor dem Absenden, nicht durch "Vertrauen" ins Sprachmodell.
 
 ### 7.2 Video-Modus: T2V über Veo 3.1
 
-Anders als Bilder wird der Video-Prompt **nicht** beim Plan-Erstellen fertig generiert, sondern **on-demand pro Szene**, wenn der Nutzer auf "Generieren" klickt (`/api/generate_t2v`, dashboard.py:2308 → `make_t2v_prompt()`, 1695). Grund vermutlich: Video-Generierung ist teuer/langsam, man will nicht 170 Video-Prompts vorab bezahlen, wenn nur ein paar Szenen wirklich als Video gebraucht werden.
+Anders als Bilder wird der Video-Prompt **nicht** beim Plan-Erstellen fertig generiert, sondern **on-demand pro Szene**, wenn der Nutzer auf "Generieren" klickt (`/api/generate_t2v`, dashboard.py:3251 → `make_t2v_prompt()`, 2469). Grund vermutlich: Video-Generierung ist teuer/langsam, man will nicht 170 Video-Prompts vorab bezahlen, wenn nur ein paar Szenen wirklich als Video gebraucht werden.
 
-`make_t2v_prompt()` bekommt: den Szenentext, die Story-Phase (`OPENING`/`RISING ACTION`/`CLIMAX`/`RESOLUTION`, berechnet aus der Position im Skript — `story_phase()`, 874), die letzten 2 vorherigen Video-Prompts (für visuelle Kontinuität), und das **volle Skript** als Kontext (damit z.B. Eigennamen korrekt erkannt werden). Ergebnis muss ≥`VIDEO_PROMPT_MIN_LEN=280` Zeichen sein und vier Dinge explizit benennen: Hauptmotiv, Setting, Licht-Stimmung, Kamera-Winkel.
+`make_t2v_prompt()` bekommt: den Szenentext, die Story-Phase (`OPENING`/`RISING ACTION`/`CLIMAX`/`RESOLUTION`, berechnet aus der Position im Skript — `story_phase()`, 1013), die letzten 2 vorherigen Video-Prompts (für visuelle Kontinuität), und das **volle Skript** als Kontext (damit z.B. Eigennamen korrekt erkannt werden). Ergebnis muss ≥`VIDEO_PROMPT_MIN_LEN=280` Zeichen sein und vier Dinge explizit benennen: Hauptmotiv, Setting, Licht-Stimmung, Kamera-Winkel.
 
-**Chain-Extend** (dashboard.py:2344 ff.): Wenn die vorherige Szene in derselben Story-Phase ist UND ihre Extend-Kette noch nicht zu lang ist (`MAX_CHAIN_LENGTH=4`), wird `extend_veo()` (1840) statt `gen_veo()` genutzt — das **setzt das letzte Frame des vorherigen Videos fort**, echte Bild-zu-Bild-Kontinuität statt nur gleicher Stil. Sonst wird ein frischer Anker-Shot via `REFERENCE_2_VIDEO` (mit dem Channel-Charakter-Referenzbild) oder `TEXT_2_VIDEO` generiert.
-
-Es gibt eine **eigene, unabhängige** Video-Prompt-Chunk-Pipeline (`video_prompts_batch()`/`_video_prompt_chunk()`, 1018/918) mit fast identischer Struktur wie die Bild-Pipeline (Story-Phase → `shot_framing` als Zwischenfeld statt `character_consistency`), die aber **an keinem aktuell erreichbaren Endpunkt hängt** — vermutlich eine frühere Iteration, bevor auf das On-Demand-pro-Szene-Muster umgestellt wurde. Nicht verwirren lassen: `make_t2v_prompt()` ist der tatsächlich genutzte Pfad.
+**Chain-Extend** (dashboard.py:3290 ff.): Wenn die vorherige Szene in derselben Story-Phase ist UND ihre Extend-Kette noch nicht zu lang ist (`MAX_CHAIN_LENGTH=4`, Zeile 2531), wird `extend_veo()` (2564) statt `gen_veo()` (2533) genutzt — das **setzt das letzte Frame des vorherigen Videos fort**, echte Bild-zu-Bild-Kontinuität statt nur gleicher Stil. Sonst wird ein frischer Anker-Shot via `REFERENCE_2_VIDEO` (mit dem Channel-Charakter-Referenzbild) oder `TEXT_2_VIDEO` generiert.
 
 ### 7.3 Skript-, Titel- und Thumbnail-Generierung
 
 Drei weitere, unabhängige LLM-Aufrufe, die nichts mit der Szenen-Pipeline zu tun haben:
 
-- **`generate_script()`** (379) — "Simplicissimus-Stil" Dokumentar-Skript aus Rohmaterial (Transkript/Notizen). System-Prompt `SCRIPT_SYSTEM` (357) definiert ein festes 6-Schritte-Schema (Hook → Build-up → Escalation → Broader Pattern → Human Cost → Closing) und Stilregeln (kurze/lange Satzwechsel, 150 WPM, 8-14 Kapitel).
-- **`generate_titles()`** (425) — 5 Titel-Optionen nach CTR-Formeln (`TITLE_SYSTEM`, 405): Curiosity Gap, Zahlen-basiert, Loss-Aversion, 55-60 Zeichen, keine erfundenen Behauptungen.
-- **`make_thumbnail_prompt()`** (477) — EIN Bild-Prompt fürs Thumbnail, andere Regeln als Storyboard-Szenen (`THUMBNAIL_PROMPT_SYSTEM`, 455): ein dominantes Motiv, starker Kontrast, übertriebener Ausdruck, Rule of Thirds — bewusst "am extremsten gestylte Frame des ganzen Videos, nicht ein typischer Frame".
+- **`generate_script()`** (407) — "Simplicissimus-Stil" Dokumentar-Skript aus Rohmaterial (Transkript/Notizen). System-Prompt `SCRIPT_SYSTEM` (385) definiert ein festes 6-Schritte-Schema (Hook → Build-up → Escalation → Broader Pattern → Human Cost → Closing) und Stilregeln (kurze/lange Satzwechsel, 150 WPM, 8-14 Kapitel).
+- **`generate_titles()`** (453) — 5 Titel-Optionen nach CTR-Formeln (`TITLE_SYSTEM`, 433): Curiosity Gap, Zahlen-basiert, Loss-Aversion, 55-60 Zeichen, keine erfundenen Behauptungen.
+- **`make_thumbnail_prompt()`** (505) — EIN Bild-Prompt fürs Thumbnail, andere Regeln als Storyboard-Szenen (`THUMBNAIL_PROMPT_SYSTEM`, 483): ein dominantes Motiv, starker Kontrast, übertriebener Ausdruck, Rule of Thirds — bewusst "am extremsten gestylte Frame des ganzen Videos, nicht ein typischer Frame".
 
 ### 7.4 Charakter-Referenzen — zwei unterschiedliche Konzepte, nicht verwechseln
 
-1. **`char_ref_url.txt`** (kanal-weit, `get_channel_char_ref()`, 71) — EIN Bild, das für Veo `REFERENCE_2_VIDEO` und als `image_input`/`image_urls` bei jeder Bildgenerierung mitgeschickt wird, um das Charakterdesign visuell zu verankern. Wird über `/api/gen_char_ref` (2701) aus dem Master-Prompt generiert oder manuell hochgeladen.
-2. **`charsheets/<name>.json`** (`load_char_refs()`, 1087) — benannte Charaktere mit **Text**-Designbeschreibung (`visual_description`), die in `_build_image_prompt()` als zusätzlicher Text-Hinweis eingefügt werden ("CHARACTER DESIGN for 'Max': ..."). Kein Bild-Input an KIE, nur Text-Kontext.
+1. **`char_ref_url.txt`** (kanal-weit, `get_channel_char_ref()`, 79) — EIN Bild, das für Veo `REFERENCE_2_VIDEO` und als `image_input`/`image_urls` bei jeder Bildgenerierung mitgeschickt wird, um das Charakterdesign visuell zu verankern. Wird über `/api/gen_char_ref` (dashboard.py:3684) aus dem Master-Prompt generiert oder manuell hochgeladen.
+2. **`charsheets/<name>.json`** (`load_char_refs()`, 1025) — benannte Charaktere mit **Text**-Designbeschreibung (`visual_description`), die in `_build_image_prompt()` als zusätzlicher Text-Hinweis eingefügt werden ("CHARACTER DESIGN for 'Max': ..."). Kein Bild-Input an KIE, nur Text-Kontext.
 
 Beide werden unabhängig voneinander genutzt und können auch beide gleichzeitig aktiv sein.
 
 ## 8. Bild-Modell-Auswahl (nano-banana-2 vs. -lite)
 
-Pro **Video**, nicht pro Kanal (`get_video_image_model()`/`set_video_image_model()`, dashboard.py:91/98 — gespeichert in `meta.json` desselben Videos, das auch Titel/Thumbnail hält). UI-Dropdown sitzt in der Toolbar über der Szenenliste im Editor (dashboard.html:391 ff.), lädt/speichert bei `openVideo()` bzw. `saveImageModel()`.
+Pro **Video**, nicht pro Kanal (`get_video_image_model()`/`set_video_image_model()`, dashboard.py:103/110 — gespeichert in `meta.json` desselben Videos, das auch Titel/Thumbnail und die Text-Overlay-Toggles hält, Abschnitt 18.5). UI-Dropdown sitzt in der Toolbar über der Szenenliste im Editor, lädt/speichert bei `openVideo()` bzw. `saveImageModel()`.
 
 ## 9. Frontend-Architektur (`dashboard.html`)
 
 ### 9.1 Zwei Haupt-Views
 
 - **`#view-videolist`** — drei Tabs: 🎬 Videos (Grid aller Videos im Kanal), 🎨 Stil-Einstellungen (Master-Prompts, Charakter-Referenzen — kanalweit), ✍️ Skript-Generator.
-- **`#view-editor`** — der eigentliche Storyboard-Editor für EIN Video: Modus-Toggle, Titel&Thumbnail-Karte, Einstellungen, Audio-Upload, manuelles Skript-Feld, Szenenliste.
+- **`#view-editor`** — der eigentliche Storyboard-Editor für EIN Video, seit der UI-Neuordnung (Juli 2026) als klar nummerierter, gated Workflow statt loser Kartensammlung.
 
 Umschalten über `openVideo()` / `backToVideoList()` / `showVideoListView()`.
 
-### 9.2 Globaler State (Top of `<script>`, dashboard.html:411)
+#### 9.1.1 Schritt-für-Schritt-Reihenfolge im Editor
+
+Der Editor war ursprünglich eine flache Kartensammlung (Titel&Thumbnail und Einstellungen standen ganz oben, noch bevor überhaupt ein Skript existierte — irreführend, weil diese Karten inhaltlich *nachgelagerte* Schritte sind). Neu strukturiert in fünf sichtbar nummerierte Schritte, jeder Folgeschritt erst sichtbar/aktiv, wenn sein Vorgänger einen Zustand geliefert hat, der ihn sinnvoll macht:
+
+| Schritt | Karte | Sichtbarkeits-/Freischalt-Bedingung |
+|---|---|---|
+| ① Modus | Modus-Toggle (`image`/`video`) | immer sichtbar |
+| ② Skript/Voice-Over | Ziel-Länge-Einstellung (`cardSettings`, je nach Modus `settingsImg`/`settingsVid`) + Audio-Upload (Option A, empfohlen) + manuelles Skript-Feld (Option B, geschätztes Timing) | immer sichtbar |
+| ③ Bilder generieren | `planArea` (Szenenliste, Toolbar, Batch-Status) | `display:none` bis ein Plan existiert |
+| ④ Titel & Thumbnail | `titleThumbCard` | `display:none` bis `SCENES.length > 0`; `genTitlesBtn`/`genThumbBtn` zusätzlich `disabled` |
+| ⑤ Video rendern | `renderCard` | `display:none` bis Bilder existieren (bestehendes `updateRenderCardVisibility()`) |
+
+Zwei parallele Sichtbarkeits-Funktionen mit identischem Muster:
+- `updateTitleThumbCardVisibility()` — steuert Schritt ④, aufgerufen aus `renderScenes()` und aus dem Completion-Zweig von `startBatchPoll()`.
+- `updateRenderCardVisibility()` — steuert Schritt ⑤ (bereits aus Feature B, unverändert wiederverwendet).
+
+`openVideo()` setzt beim Öffnen eines Videos **beide** Karten explizit auf `display:none`, bevor der eigentliche Lade-Code läuft (zusätzlich zum bestehenden Reset von `planArea`) — sonst blieben `titleThumbCard`/`renderCard` sichtbar-stale, wenn man von einem Video mit Szenen zu einem leeren Video wechselt (in dieser Runde selbst gefunden und behoben, kein vom Nutzer gemeldeter Bug).
+
+**Bewusst entfernt aus der alten Oben-Position:** Die „Wörter/Sekunde"-Einstellung stand vorher prominent über allem, obwohl sie durch die Pacing-Analyse (Abschnitt 7) für die meisten Fälle nur noch ein Richtwert ist, kein hartes Timing-Element mehr. Sie lebt jetzt platzsparend innerhalb von Schritt ②, direkt am Ort, wo Skript/Audio eingegeben werden — nicht mehr als eigene Karte davor.
+
+### 9.2 Globaler State (Top of `<script>`, dashboard.html:486 ff.)
 
 ```js
 SCENES         // aktuell geladene Szenen-Liste (Spiegel von plan.json)
@@ -216,28 +233,30 @@ api(url, method, body)  // roher fetch-Wrapper ohne automatisches Channel/Video
 ```
 Fast der gesamte Code nutzt `ch_api`/`ch_get` — `api()` direkt wird nur für kanal-übergreifende Dinge (z.B. `/api/channels`) oder Spezialfälle mit anderem Video-Parameter genutzt.
 
-### 9.4 Polling-Pattern (wiederholt sich viermal, gleiche Grundidee)
+### 9.4 Polling-Pattern (wiederholt sich sechsmal, gleiche Grundidee)
 
-Jede lange Aktion hat: **Start-Request** (nur "starte den Job") + **Poll-Loop** (fragt Status alle 2-4s ab, aktualisiert UI, stoppt sich selbst wenn fertig):
+Jede lange Aktion hat: **Start-Request** (nur "starte den Job") + **Poll-Loop** (fragt Status alle 1-4s ab, aktualisiert UI, stoppt sich selbst wenn fertig):
 
 | Aktion | Start | Poll-Funktion | Intervall |
 |---|---|---|---|
-| Plan erstellen | `makePlan()` → `/api/plan` | `startPlanPoll()` (875) | 2s |
-| Alle Bilder generieren | `genAll()` → `/api/generate_all_start` | `startBatchPoll()` (759) | 3s |
-| Einzelnes Bild | `genOne()` → `/api/generate_one` | Inline-Loop in `genOne()` selbst (1107) | 2s, 130 Versuche |
-| Transkription | `transcribeAudio()` → `/api/transcribe` | `startStatusPoll()` (937) | 1.2s |
+| Plan erstellen | `makePlan()` (994) → `/api/plan` | `startPlanPoll()` (1002) | 2s |
+| Alle Bilder generieren | `genAll()` (1469) → `/api/generate_all_start` | `startBatchPoll()` (865) | 3s |
+| Einzelnes Bild | `genOne()` (1245) → `/api/generate_one` | Inline-Loop in `genOne()` selbst | 2s, 130 Versuche |
+| Transkription | `transcribeAudio()` (1082) → `/api/transcribe` | `startStatusPoll()` (1065) | 1.2s |
+| Rendern | `renderVideo()` (1534) → `/api/render_start` | `startRenderPoll()` (1547) | 2s |
+| Ein-Knopf-Orchestrator | `produceAll()` (1616) → `/api/produce_start` | `startProducePoll()` (1644, Abschnitt 17.3) | 2.5s |
 
-Wichtig: `openVideo()` (571) prüft beim Öffnen eines Videos, ob im Hintergrund noch ein Plan- oder Batch-Job läuft (Server hat den Zustand, nicht der Browser) und **nimmt den Poll automatisch wieder auf** — das ist, was Reload-Sicherheit für den Nutzer tatsächlich bedeutet: nicht "der Job überlebt", sondern "die Anzeige findet den laufenden Job wieder".
+Wichtig: `openVideo()` (646) prüft beim Öffnen eines Videos, ob im Hintergrund noch einer dieser sechs Jobs läuft (Server hat den Zustand, nicht der Browser) und **nimmt den Poll automatisch wieder auf** — das ist, was Reload-Sicherheit für den Nutzer tatsächlich bedeutet: nicht "der Job überlebt", sondern "die Anzeige findet den laufenden Job wieder".
 
 ### 9.5 Szenen-Rendering — Sync mit dem Server ohne komplettes Re-Render
 
-`_applyFreshScene(fresh)` (677) ist die zentrale Stelle, die einzelne DOM-Elemente gezielt aktualisiert (Bild-Tag ersetzen, Status-Badge ändern), statt bei jedem Poll `renderScenes()` komplett neu zu bauen (würde Bild-Requests unnötig wiederholen, Formularinhalte in Video-Prompt-Textareas verlieren). Wird von drei Stellen genutzt: `_refreshScenesFromPlan()`, `_watchRunningScenes()`, `startBatchPoll()`.
+`_applyFreshScene(fresh)` (783) ist die zentrale Stelle, die einzelne DOM-Elemente gezielt aktualisiert (Bild-Tag ersetzen, Status-Badge ändern), statt bei jedem Poll `renderScenes()` komplett neu zu bauen (würde Bild-Requests unnötig wiederholen, Formularinhalte in Video-Prompt-Textareas verlieren). Wird von drei Stellen genutzt: `_refreshScenesFromPlan()` (805), `_watchRunningScenes()` (817), `startBatchPoll()` (865).
 
 ## 10. HTTP-Routing — vollständige Tabelle
 
 Alle Routen sind flache `if p == "/api/...":`-Blöcke in `do_GET`/`do_POST` (keine Router-Bibliothek). `cid`/`vid` werden am Anfang jeder Methode aus Query-Params (GET) bzw. JSON-Body (POST) gelesen.
 
-**GET** (dashboard.py:2028 ff.):
+**GET** (dashboard.py:2957 ff.):
 | Route | Zweck |
 |---|---|
 | `/` | liefert `dashboard.html` |
@@ -245,13 +264,14 @@ Alle Routen sind flache `if p == "/api/...":`-Blöcke in `do_GET`/`do_POST` (kei
 | `/api/char_ref`, `/api/image_model` | aktuelle Werte lesen |
 | `/api/get_mode`, `/api/master`, `/api/vid_master` | Kanal/Video-Konfiguration |
 | `/api/plan` | aktuelles `plan.json` |
-| `/api/plan_status`, `/api/generate_all_status`, `/api/transcribe_status`, `/api/job_status`, `/api/render_status` | Job-Polling |
+| `/api/plan_status`, `/api/generate_all_status`, `/api/transcribe_status`, `/api/job_status`, `/api/render_status`, `/api/produce_status` | Job-Polling |
+| `/api/overlay_opts` | Text-Overlay-Toggles lesen (Abschnitt 18.5) |
 | `/api/video_meta` | Titel/Thumbnail-Status |
 | `/api/download` | ZIP aller Bilder |
 | `/generated/<file>`, `/charsheets/<file>` | Datei-Ausgabe (Bilder/Videos) |
 | `/api/charsheets` | Charakter-Liste |
 
-**POST** (dashboard.py:2116 ff.):
+**POST** (dashboard.py:3055 ff.):
 | Route | Zweck |
 |---|---|
 | `/api/videos`, `/videos/delete`, `/videos/rename` | Video-CRUD |
@@ -267,11 +287,13 @@ Alle Routen sind flache `if p == "/api/...":`-Blöcke in `do_GET`/`do_POST` (kei
 | `/api/generate_video` | I2V-Animation (Bild-Modus, Grok) |
 | `/api/set_char_ref`, `/api/gen_char_ref` | Kanal-Charakter-Referenzbild |
 | `/api/render_start`, `/api/render_stop` | Auto-Rendering starten/stoppen (Abschnitt 13) |
+| `/api/produce_start`, `/api/produce_stop` | Ein-Knopf-Orchestrator starten/stoppen (Abschnitt 17) |
+| `/api/overlay_opts` | Text-Overlay-Toggles speichern (Abschnitt 18.5) |
 
 ## 11. Bekannte Stolperfallen / Dinge, an die man sich erinnern sollte
 
-- **Zwei tote Code-Pfade**: `video_prompts_batch()`/`_video_prompt_chunk()` (1018/918) und `gen_t2v()`/`T2V_MODEL` (1758/1756) sind vollständig implementiert, aber an keinem HTTP-Endpunkt angeschlossen. Der tatsächlich genutzte Video-Pfad ist `make_t2v_prompt()` + `gen_veo()`/`extend_veo()`.
-- **`_migrate_legacy_video()`** (189) läuft bei **jedem Start** (`init_channels()`, Zeile 247, Modulebene — nicht nur beim allerersten Mal) und prüft für jeden Kanal, ob eine Migration vom alten Ein-Video-pro-Kanal-Layout nötig ist. Harmlos im Normalbetrieb (early-return sobald `videos.json` existiert), aber falls mal ein Kanal-Ordner von Hand angelegt wird, kann das überraschende Effekte haben.
+- **Toter Code aufgeräumt (Juli 2026)**: eine externe Architektur-Bewertung (auf Basis dieses Dokuments) stieß auf zwei bereits hier dokumentierte tote Pfade — Anlass für einen systematischen Scan (jede Top-Level-Funktion in `dashboard.py` darauf geprüft, ob sie irgendwo tatsächlich mit `(` aufgerufen wird, nicht nur in einem Kommentar erwähnt). Ergebnis: **vier** tote Funktionsgruppen, nicht zwei — `charsheet_path()` (griff zudem auf eine nirgends definierte Konstante `CHARSHEET_DIR` zu, hätte bei einem Aufruf sofort einen `NameError` geworfen) und `poll_kie_video()` waren bisher undokumentiert. Alle vier vollständig entfernt: `video_prompts_batch()`/`_video_prompt_chunk()`/`_video_prompt_single_retry()`/`_validate_video_prompt_entry()` (eigene Video-Prompt-Pipeline, nie an einen Endpunkt angeschlossen — der tatsächlich genutzte Pfad ist `make_t2v_prompt()`, Abschnitt 7.2), `gen_t2v()`/`T2V_MODEL` (unverdrahteter zweiter Video-Pfad über Grok, tatsächlich genutzt wird `gen_veo()`/`extend_veo()`), `charsheet_path()`, `poll_kie_video()` (veralteter KIE-Polling-Helfer, ersetzt durch inline Polling in `_veo_job_worker`). `dashboard.py` dadurch von 3995 auf 3744 Zeilen geschrumpft. **Lehre für künftige Sessions**: nach größeren Feature-Wellen diesen Scan wiederholen (Einzeiler, siehe Session-Notizen) statt Dead Code sich anzusammeln zu lassen — die Funktionsnamen-Ähnlichkeit zu aktivem Code (`gen_t2v` vs. `/api/generate_t2v`, `video_prompts_batch` vs. `visual_prompts`) macht manuelles Erkennen beim Lesen überraschend unzuverlässig.
+- **`_migrate_legacy_video()`** (217) läuft bei **jedem Start** (`init_channels()`, Zeile 267, Modulebene — nicht nur beim allerersten Mal) und prüft für jeden Kanal, ob eine Migration vom alten Ein-Video-pro-Kanal-Layout nötig ist. Harmlos im Normalbetrieb (early-return sobald `videos.json` existiert), aber falls mal ein Kanal-Ordner von Hand angelegt wird, kann das überraschende Effekte haben.
 - **Server-Neustart-Regel**: vor jedem `pkill`/Neustart von `dashboard.py` erst `/api/generate_all_status` und `/api/plan_status` für das gerade aktive Video prüfen — ein laufender Batch-/Plan-Job wird beim harten Kill nicht sauber beendet, sondern verwaist (Szenen bleiben auf `läuft` hängen).
 - **`dashboard.html`-Änderungen brauchen keinen Neustart**, `dashboard.py`-Änderungen schon (neuer Python-Prozess).
 
@@ -354,10 +376,162 @@ Bewusst **eng geschnittener** erster Teil von Phase 4: Crossfades gibt es **nur*
 
 **Das Sync-Invarianten-Problem bei Crossfades und seine Lösung:** Ein Crossfade überlappt zwei Clips zeitlich (Gesamtdauer = `dauer_a + dauer_b - crossfade_dauer`), was die von `_apply_sync_invariant()` (Abschnitt 13) exakt berechnete Bild-Ton-Synchronität sonst um genau diese Überlappung verkürzen würde. Lösung: **Kompensation vor dem Rendern**, nicht danach — die Szene UNMITTELBAR VOR einem Übergang bekommt zusätzliche `round(TRANSITION_DURATION_SEC * fps)` Frames an ihre `_frames` addiert, bevor `_render_clip()` sie rendert (mehr Ken-Burns-Bewegung derselben Szene, nicht mehr Bildinhalt). Der Crossfade "verbraucht" exakt diese Zusatz-Frames beim Überlappen, sodass die gemergte Clip-Dauer wieder exakt der ursprünglichen, unkompensierten Summe beider Plansdauern entspricht — **verifiziert**: zwei Clips mit geplant 3.0s/2.0s ergeben nach Kompensation+Crossfade exakt 5.0s gemergte Dauer, nicht 4.5s.
 
-**`_crossfade_clips(clip_a, clip_b, out_path, duration)`** — nimmt zwei bereits fertig gerenderte Clips, ermittelt `clip_a`s tatsächliche Dauer per `ffprobe` (`_clip_duration_sec`), berechnet den `xfade`-Offset (`dauer_a - duration`) und rendert den Übergang (`transition=fade`, reine Überblendung — keine Wipe/Slide-Varianten, das war die bewusste Scope-Entscheidung) mit demselben Encoder wie die Einzel-Clips.
+**`_crossfade_clips(clip_a, clip_b, out_path, duration, transition_type="fade")`** — nimmt zwei bereits fertig gerenderte Clips, ermittelt `clip_a`s tatsächliche Dauer per `ffprobe` (`_clip_duration_sec`), berechnet den `xfade`-Offset (`dauer_a - duration`) und rendert den Übergang mit demselben Encoder wie die Einzel-Clips. In Teil 1 war `transition_type` fest `"fade"` (reine Überblendung, bewusste Scope-Entscheidung für den ersten Wurf) — seit Teil 2 (Abschnitt 15.1) variabel, siehe dort.
 
 **Verkettung im `_render_worker`**: nach dem Rendern aller Einzel-Clips werden sie in einer Schleife zu `merged_paths` zusammengeführt — trifft ein Index auf einen Übergangspunkt, wird **das letzte Element** von `merged_paths` (das selbst schon ein Merge-Ergebnis eines vorherigen Übergangs sein kann) mit dem aktuellen Clip verschmolzen und ersetzt. Das behandelt auch unmittelbar aufeinanderfolgende Übergänge korrekt, ohne auf einen bereits verbrauchten Clip-Pfad zu verweisen.
 
 **Neue Fortschritts-Stufe** `"transitions"` zwischen `"clips"` und `"assemble"` in `RENDER_JOBS`/`RENDER_STAGE_ORDER` (dashboard.html) — zeigt bei mehreren Übergängen ebenfalls einen Fortschrittsbalken (`done`/`total`), analog zur `"clips"`-Stufe.
 
 **End-to-End verifiziert** (Juli 2026): 4-Szenen-Testvideo (normal → Sequenz-1-Anker → Sequenz-1-Fortsetzung → Sequenz-2-Anker/punchy) mit 2 erwarteten Übergangspunkten über die echte HTTP-API gerendert — `final.mp4` exakt 8.0s (identisch zur synthetischen Voiceover-Länge; ohne korrekte Kompensation wäre es 7.0s gewesen, 2×0.5s kürzer), Video- und Audiospur vorhanden, `render_tmp/` korrekt aufgeräumt.
+
+## 15.1 Phase 4 (Teil 2) — Übergangs-Bibliothek, gekoppelte SFX, frame-genaue Impact-Akzente
+
+Nutzerwunsch: "richtig professioneller Schnitt" statt immer derselben Überblendung, plus passende Sounds pro Übergang — und explizit eine **Bibliothek**, auf die man zurückgreifen kann, statt Einzel-Hacks. Der eigentliche Fund dabei: **die Bibliothek existiert bereits** — ffmpegs `xfade`-Filter bringt von Haus aus 58 fertige Übergangstypen mit (`ffmpeg -h filter=xfade`), Teil 1 nutzte davon nur einen (`fade`). Kein neues Paket, keine eigene Formel — nur eine Auswahlregel, die den vorhandenen Typenkatalog tatsächlich ausnutzt.
+
+**`TRANSITION_LIBRARY`** (dashboard.py, nahe `TRANSITION_DURATION_SEC`) — drei kuratierte Familien statt aller 58 Typen (Auswahl nach Stilgefühl fürs Ink/Stickman-Format, nicht alle 58 wirken professionell):
+| Familie | ffmpeg-Typen (Richtung alterniert) | SFX |
+|---|---|---|
+| `fade` | `fade`, `dissolve` | keins — ein Whoosh würde eine ruhige `calm`-Szene stören |
+| `wipe` | `wipeleft`, `wiperight` | `whoosh` — energischer, "harter" Look |
+| `smooth` | `smoothleft`, `smoothright` | `whoosh` — moderner Standardfall, unauffälliger als ein Wipe |
+
+**`_transition_for_scene(scene, idx)`** — regelbasiert, kein LLM-Call, kein Zufall (Zufall würde einen Resume-Render nach Reload optisch anders aussehen lassen als den ursprünglichen Lauf): Familie folgt dem bereits vorhandenen `pacing`-Feld der Szene (`calm`→`fade`, `punchy`→`wipe`, sonst `smooth`), Richtung (links/rechts) alterniert deterministisch über `scene["i"] % 2` — dasselbe Muster wie die Zoom-Richtung in `_motion_for_scene`. Gibt `(transition_type, sfx_or_None)` zurück.
+
+**Bild und Ton sind durch dieselbe Funktion gekoppelt, nicht zwei unabhängige Regeln:** `_render_worker`s Merge-Schleife ruft `_transition_for_scene()` für den Video-Crossfade auf, `_build_sfx_events()` ruft **dieselbe Funktion** für das begleitende SFX auf. Eine `fade`-Familie liefert dadurch garantiert keinen Whoosh (statt vorher immer einen), ein `wipe`/`smooth`-Übergang garantiert einen. Der gewählte `transition_type` wird zusätzlich auf der Szene persistiert (`scene["transition_type"]`, sichtbar in `plan.json`) — dasselbe Debug-Sichtbarkeits-Prinzip wie `char_ref_applied` aus Feature A.
+
+**Phase 4.2 — Frame-genauer Impact-Akzent auf harten Schnitten:** `_build_sfx_events()` erweitert um ein drittes Ereignis, das erst durch Phase 3 sinnvoll wurde. Eine `punchy`-Szene, die **kein** Übergangspunkt ist (also ein harter Schnitt bleibt, keine Überblendung), bekommt zusätzlich zum bestehenden `riser`-Ereignis ein `impact`-Ereignis exakt auf `start_aligned` (Whisper-Wortgrenze statt Schätzung) — ein scharfer, perkussiver Treffer genau auf dem Schnitt. Punchy-Szenen, die GLEICHZEITIG Übergangspunkte sind, bekommen bewusst KEIN Impact (der weiche Video-Crossfade + Whoosh würde mit einem harten Perkussions-Treffer kollidieren). Nebenbei: das `impact`-Sound-Asset (`SFX_FILES["impact"]`) existierte bereits seit Phase 2.5, wurde aber nie tatsächlich ausgelöst — jetzt hat es seine Funktion.
+
+**End-to-End verifiziert** (Juli 2026): 6-Szenen-Testvideo (`calm`→`normal`→`punchy` innerhalb Sequenz 1, dann drei je eigene Sequenzen mit `punchy`/`normal`/`calm`) über die echte HTTP-API gerendert. `plan.json` zeigt korrekt `wiperight` (Sequenzwechsel auf punchy-Szene), `smoothleft` (Sequenzwechsel auf normal-Szene), `dissolve` (Sequenzwechsel auf calm-Szene) — drei verschiedene Übergangstypen im selben Video statt immer `fade`. Server-Log bestätigt "5 SFX-Ereignisse platziert", exakt die erwartete Kombination (Impact+Riser auf dem harten punchy-Schnitt, Whoosh+Riser auf dem punchy-Übergang, Whoosh auf dem normal-Übergang, nichts auf dem calm-Übergang). `final.mp4`: exakt 12.0s (= Sync-Invariante hält trotz variabler Übergangstypen), Video- und Audiospur vorhanden.
+
+## 16. Phase 3 — Frame-genaues Timing: Pivot von ElevenLabs Scribe zu lokalem `faster-whisper`
+
+Der externe `IMPLEMENTATION_PLAN.md` sah für Phase 3 ursprünglich „ElevenLabs Scribe über KIE" vor (`transcribe_words_scribe`). Diese Quelle wurde **verworfen, bevor auch nur eine Zeile Code dafür geschrieben wurde** — reine Recherche/Live-Test-Phase, kein Rollback nötig.
+
+### 16.1 Warum ElevenLabs Scribe (über KIE) ausscheidet
+
+Zwei von KIE-Marktplatz-Docs zitierte Modelle wurden zuerst geprüft und als grundlegend falsche Richtung erkannt:
+- `elevenlabs/text-to-dialogue-v3` — **Text-zu-Sprache**, generiert neues Audio aus Text. Falsche Richtung: es soll ein bestehendes Voiceover transkribiert werden, nicht neues erzeugt.
+- `elevenlabs/text-to-speech-multilingual-v2` — hat zwar einen `timestamps`-Parameter, aber nur für selbst generierte TTS-Ausgabe, nicht für eine hochgeladene Datei. Hätte das echte Nutzer-Voiceover durch KI-Sprache ersetzt — ein produktzerstörender Fehler, wäre er implementiert worden.
+
+Der tatsächlich passende Modellname (`elevenlabs/speech-to-text`, über Web-Suche mit zwei unabhängigen Quellen als `audio_url`/`language_code`/`tag_audio_events`/`diarize`-Parametersatz bestätigt) wurde **live getestet**: deutsche TTS-Testdatei erzeugt (macOS `say`), hochgeladen, per KIE-API submitted — gültige `taskId`, `code:200`, aber der Task blieb über 10+ Minuten permanent im Status `"waiting"` hängen, ohne je Fortschritt zu zeigen, bei bereits verbrauchten `0.12` Credits. **KIE-Modell-Listings sind keine Garantie für tatsächliche Funktionsfähigkeit** — dieses Modell ist über KIE praktisch nicht nutzbar (Stand Juli 2026). Kein weiteres Polling/Credits-Verbrauchen, sofort abgebrochen und Testdateien aufgeräumt.
+
+### 16.2 Warum nicht Gemini als Alternative
+
+Gemini generiert im Rahmen dieses Projekts bereits den gesamten Text-Content (Skript-Analyse, Titel, etc.) und wäre naheliegend gewesen. Verworfen, weil Gemini bei **präzisen Timestamps** unzuverlässig ist — es liefert einen guten Transkript-Text, „weiß" aber nicht zuverlässig, an welcher exakten Sekunde/Millisekunde ein bestimmtes Wort gesprochen wurde (Halluzinationsrisiko genau bei der Information, auf die Phase 3 angewiesen ist).
+
+### 16.3 Entscheidung: lokales `faster-whisper`
+
+- Dedizierte ASR-Engine (Automatic Speech Recognition), kein Text-Generierungsmodell — löst genau das Problem, für das Scribe gedacht war.
+- **Lokal, nicht API-basiert**: kein Rate-Limit, keine laufenden Kosten, kein Hänge-Risiko wie bei KIE, funktioniert offline.
+- Ressourcenbedarf gering und **kein Dauerlast**: ~500 MB einmaliger Modell-Download ("small"), ~1 GB RAM während der kurzen Transkriptions-Burst-Phase pro Video, danach wieder frei.
+- `word_timestamps=True` liefert exakt das, was Phase 3 braucht: Wort-für-Wort-Zeitstempel statt nur Satz-/Segment-Zeitstempel.
+- Nicht `openai-whisper` (die Original-Referenzimplementierung), sondern `faster-whisper` (CTranslate2-basiert) — deutlich schneller bei gleicher Modellqualität, relevant weil die Transkription synchron im bestehenden Job-Pattern laufen soll (Daemon-Thread + Status-Polling, wie überall sonst in diesem Projekt).
+
+### 16.4 Umsetzung
+
+**Isolierte venv statt Import ins Hauptprozess:** `faster-whisper` (und seine Abhängigkeit `ctranslate2`) wird NICHT in `dashboard.py` importiert — das würde die Zero-Framework/Stdlib-only-Regel des Hauptprozesses verletzen und ist ohnehin unnötig, da Homebrew-Python hier "externally managed" ist (kein `pip install` direkt ins System-Python ohne `--break-system-packages`, was bewusst vermieden wurde). Stattdessen: eigene venv unter `.venv_whisper/` (in `.gitignore`, maschinenspezifisch, ~464 MB inkl. Modell-Cache unter `~/.cache/huggingface/`), ein eigenständiges Skript `whisper_transcribe.py` darin, aufgerufen per `subprocess.run([...])` — exakt dasselbe Muster wie der bestehende `ffmpeg`-Aufruf. `dashboard.py` bleibt dadurch so stdlib-rein wie vorher.
+
+- **`transcribe_words_whisper(audio_path, language=None)`** (dashboard.py, nahe `transcribe_and_segment`) — startet `whisper_transcribe.py` in der venv, Modell "small", `word_timestamps=True`, Timeout 900s. Gibt `{"text","language","language_probability","words":[{"word","start","end"}]}` zurück.
+- **`align_scenes_to_whisper(scenes, whisper_words)`** — ordnet jeder Szene `start_aligned`/`end_aligned` zu. Kein Fuzzy-Text-Matching: da Gemini (`transcribe_and_segment`) und Whisper dieselbe Audiodatei in derselben Reihenfolge transkribieren, genügt sequenzielles Vorrücken um `len(scene["text"].split())` Wörter durch die Whisper-Wortliste. Toleriert einzelne ASR-Abweichungen zwischen den beiden Engines (verifiziert: Whisper hörte "Wortszeitstempel", Gemini/Referenztext "Wort-Zeitstempel" — beides ein Token, Zählung bleibt korrekt), weil nur die WortANZAHL zählt, nie der exakte Wortlaut.
+- **Wiring: in `_render_worker`, nicht in `/api/transcribe`** — siehe 16.5 für die Korrektur und Begründung.
+- **Renderer/SFX/Crossfade bevorzugen `*_aligned`**: `_apply_sync_invariant()` (Abschnitt 13) berechnet die Szenendauer jetzt über eine kleine `scene_dur()`-Hilfsfunktion, die `end_aligned - start_aligned` nimmt, falls vorhanden, sonst das geschätzte `dur` — die zwei-Schritte-Sync-Invariante selbst (lineare Normierung + Integer-Frame-Rundung) läuft unverändert danach. `_build_sfx_events()` (Abschnitt 14) nutzt analog `start_aligned` statt `start` für die SFX-Zeitpunkte, falls vorhanden.
+
+### 16.5 Korrektur: Alignment gehört an den Render-Zeitpunkt, nicht an den Transkriptions-Zeitpunkt
+
+**Vom Nutzer selbst gefunden, nicht von mir:** Die ursprüngliche Umsetzung (16.4, erste Fassung) rief `align_scenes_to_whisper` direkt im `/api/transcribe`-Handler auf — das deckt nur den Audio-Transkriptions-Pfad (Option A) ab. Der Nutzer stellte die berechtigte Frage, ob das nicht unnötig doppelt/inkonsistent ist: **`_render_worker` verlangt so oder so IMMER ein hochgeladenes Voice-over** (`v_audio`), unabhängig davon, ob die Szenen-Texte aus der Audio-Transkription oder dem manuellen Skript-Pfad (`_plan_generate_worker`, Option B, rein WPM-geschätzte Timeline) stammen. Da `align_scenes_to_whisper` in Option B nie aufgerufen wurde, blieb der manuelle Pfad **dauerhaft** auf der groben WPM-Schätzung sitzen, selbst nachdem der Nutzer später ein echtes Voice-over hochlud und rendern ließ — genau die „Mitte driftet"-Schwäche, die Phase 3 eigentlich beheben sollte, griff für Option B nie.
+
+**Fix:** Whisper-Aufruf + Alignment aus `/api/transcribe` entfernt (Handler wieder bei 4 statt 5 `TX_STATUS`-Stufen), stattdessen in `_render_worker` verschoben — direkt nach dem Laden von `audio_duration` per `ffprobe`, als neue Stage `"timing"` (zwischen `"prepare"` und `"motion"`, auch in `RENDER_STAGE_LABELS`/`RENDER_STAGE_ORDER` in dashboard.html ergänzt). Läuft dadurch für **jeden** Render, unabhängig vom Ursprung der Szenen-Texte — ein einziger Alignment-Punkt statt eines, der nur einen von zwei Pfaden abdeckt. Resume-sicher: überspringt den Whisper-Lauf, wenn alle Szenen schon `start_aligned` aus einem vorigen Render tragen (`if any(s.get("start_aligned") is None for s in scenes)`), damit ein wiederholter Render nicht unnötig erneut transkribiert. Graceful Degradation unverändert: schlägt Whisper fehl, behalten die Szenen ihre geschätzten `start`/`dur`-Werte, der Rest des Renders läuft normal weiter.
+
+**End-to-End verifiziert** (Juli 2026), beide Pfade getrennt:
+- **Option A** (Audio-Transkription): `/api/transcribe` liefert jetzt wieder reine geschätzte Szenen ohne `start_aligned` (4 Stufen, kein Whisper mehr an dieser Stelle) — korrektes Verhalten, die Ausrichtung folgt beim Rendern.
+- **Option B** (manueller Skript-Pfad, hier simuliert: Szenen mit WPM-geschätztem `start`/`dur`, kein `source`-Feld, keine `start_aligned`-Felder) + echtes deutsches TTS-Voice-over hochgeladen + gerendert: Server-Log zeigt `[Whisper] 27 Wörter ausgerichtet (Sprache: de, p=0.984)`, `plan.json` zeigt danach `start_aligned`/`end_aligned` auf allen drei Szenen — und zwar spürbar abweichend von der WPM-Schätzung (Szene 0 geschätzt `0.0–4.0`, ausgerichtet `0.0–3.04`; die reale Aufnahme war insgesamt nur `9.84s` lang, nicht die geschätzten `12.0s`). Damit bekommt Option B jetzt exakt dieselbe Timing-Qualität wie Option A, sobald ein echtes Voice-over vorliegt.
+
+## 17. Phase 4.5 — Ein-Knopf-Orchestrator
+
+Ursprünglicher Nutzerwunsch, jetzt umgesetzt: „Skript oder Audio rein → ein Klick → fertiges Video." Kein neuer fachlicher Baustein — verkettet nur die drei bereits einzeln getesteten Jobs (Plan/Transkription → Bilder → Rendern) hintereinander in einem einzigen Hintergrund-Thread, exakt das etablierte Server-seitige Job-Muster (`PRODUCE_JOBS`/`_PRODUCE_JOBS_LOCK`, analog zu `BATCH_JOBS`/`RENDER_JOBS`/`PLAN_JOBS`).
+
+### 17.1 Refactor als Voraussetzung: `_transcribe_generate_worker`
+
+Vor dem Orchestrator war die Audio→Plan-Logik (Gemini-Transkription, Szenen-Bau, `analyze_script`, Bild-Prompts) als ~50 Zeilen **inline im `/api/transcribe`-HTTP-Handler** vergraben — als einzige der vier langlaufenden Aktionen NICHT als eigenständige Funktion, anders als `_plan_generate_worker`/`_batch_generate_worker`/`_render_worker`. Um sie im Orchestrator ohne Code-Duplikation wiederzuverwenden, wurde sie in `_transcribe_generate_worker(cid, vid, sec)` extrahiert; der HTTP-Handler ist jetzt ein dünner Wrapper, der nur noch Fehlerbehandlung/Response-Formatierung übernimmt.
+
+### 17.2 `_produce_worker(cid, vid, text, wpm, sec)`
+
+Drei Etappen, jede ruft dieselbe Worker-Funktion wie ihr eigener Einzel-Button:
+1. **`"plan"`** — übersprungen, wenn `plan.json` schon Szenen enthält (Resume). Sonst: existiert ein hochgeladenes Voice-over → `_transcribe_generate_worker` (Option A); sonst nicht-leerer `text`-Parameter → `_plan_generate_worker` (Option B); sonst Fehler ("kein Voice-over, kein Skript").
+2. **`"images"`** — `_batch_generate_worker(cid, vid)` direkt aufgerufen (blockierend, da `_produce_worker` selbst schon in einem eigenen Daemon-Thread läuft). Bereits generierte Szenen werden dank dessen eigenem `todo`-Filter automatisch übersprungen.
+3. **`"render"`** — `_render_worker(cid, vid)` direkt aufgerufen, inklusive alles, was in den vorigen Abschnitten gebaut wurde (Whisper-Timing, Übergangs-Bibliothek, Sound-Design, Impact-Akzente).
+
+Bricht bei Fehler in einer Etappe sofort ab (`fail(stage, msg)`), der Etappen-Name landet zusammen mit dem Fehlergrund in `PRODUCE_JOBS` — sichtbar im Frontend als „Fehlgeschlagen (Rendern): …" statt eines nichtssagenden generischen Fehlers.
+
+**Stop-Propagation:** `_produce_worker` prüft sein eigenes `stop_requested` nur ZWISCHEN Etappen (ein Stop während einer laufenden Etappe würde sonst erst nach deren Ende greifen). `/api/produce_stop` setzt deshalb zusätzlich das `stop_requested`-Flag des GERADE aktiven Sub-Jobs (`BATCH_JOBS`/`RENDER_JOBS`), damit ein Stop-Klick auch mitten in der Bild-Generierung oder mitten im Rendern sofort wirkt.
+
+### 17.3 Frontend: `produceCard`
+
+Neue Karte direkt nach Schritt ② (Skript/Voice-Over), vor Schritt ③ — bewusst nicht als weiterer Punkt in der bestehenden Toolbar, sondern als eigenständiger, visuell hervorgehobener Block (`background:var(--acc-soft)`), der signalisiert: „das hier ersetzt alle folgenden Einzel-Schritte". Sichtbar nur im Bild-Modus (`CURRENT_MODE !== 'video'` — der Veo/Grok-Pfad hat eine eigene, unangetastete Logik) und erst, sobald Rohmaterial vorliegt: ein bereits bestehender Plan (`SCENES.length>0`), ein ausgewähltes Audio-File (`audioB64`), oder eingetippter Skript-Text — `updateProduceCardVisibility()`, aufgerufen von `applyMode()`, `audioSelected()`, `estimate()` und überall dort, wo auch `updateRenderCardVisibility()`/`updateTitleThumbCardVisibility()` laufen.
+
+`produceAll()` lädt zuerst ein ggf. gewähltes, aber noch nicht hochgeladenes Audio-File hoch (derselbe Schritt wie in `transcribeAudio()`), dann `POST /api/produce_start` mit `text`/`wpm`/`sec`. `startProducePoll()` pollt `/api/produce_status` alle 2.5s, highlighted die aktuelle Etappe (`pstage-plan`/`pstage-images`/`pstage-render`, identisches `.done`/`.active`-Muster wie die Render-Karte), und ruft bei Erfolg **`refreshPlanAndStatus()`** auf — eine aus `openVideo()` extrahierte gemeinsame Funktion, die Szenen/Batch-Status/Render-Status neu vom Server lädt, exakt wie ein frischer Seitenaufruf. Reload-Sicherheit: `openVideo()` prüft `/api/produce_status` genauso wie die drei bestehenden Jobs und nimmt einen laufenden Orchestrator-Lauf nach Reload wieder auf.
+
+### 17.4 Nebenbefund: `suggestCharsFromPlan()` erwartete das falsche Datenmodell
+
+Beim End-to-End-Test (ein 1-Szenen-Testskript mit einer LLM-erkannten Figur) crashte `refreshPlanAndStatus()` mit `Cannot read properties of undefined (reading 'toLowerCase')`. Ursache: `analyze_script()` (dashboard.py) liefert Charaktere als `{id, name_or_role, visual_description, ...}`, aber `suggestCharsFromPlan()` (dashboard.html) griff auf `ch.name`/`ch.description` zu — ein Feld, das in dieser Datenstruktur nie existiert hat. Der Bug ist **nicht neu und nicht durch den Orchestrator verursacht**: dieselbe Funktion wird identisch aus `openVideo()` aufgerufen und hätte dort genauso gecrasht, sobald ein Plan mit nicht-leerem `characters`-Array neu geladen wird — vermutlich seit Einführung von `analyze_script`s Charakter-Erkennung unbemerkt kaputt, weil ein unbehandelter Fehler in einer async-Funktion ohne sichtbare Fehlermeldung einfach den Rest der aufrufenden Kette abbricht. **Fix:** `suggestCharsFromPlan()` liest jetzt `ch.name_or_role||ch.name` und `ch.visual_description||ch.description`, mit Kommentar zur Datenform. Behoben, weil beim Testen dieses Features gefunden — kein separater Auftrag, aber zu wichtig (bricht `openVideo()`s Reload-Resume lautlos), um es stehen zu lassen.
+
+### 17.5 End-to-End verifiziert (Juli 2026)
+
+Realer Testlauf über die Browser-UI (nicht nur die API direkt): Skript-Text eingetippt → „🚀 Alles auf einmal" geklickt → Karte zeigt live „Plan erstellen …" → „Bilder generieren …" mit Etappen-Hervorhebung. Ohne hochgeladenes Voice-over bricht der Lauf korrekt in der Render-Etappe ab (Plan + 1 echtes KIE-generiertes Bild bleiben erhalten, kein Datenverlust), Fehlermeldung „Fehlgeschlagen (Rendern): Kein hochgeladenes Voice-over gefunden …", UI kehrt in einen normal bedienbaren Zustand zurück (Schritt ⑤ zeigt den manuellen „Video rendern"-Button wieder aktiv). Nach nachträglichem Audio-Upload: zweiter Klick auf „Alles auf einmal" überspringt Plan+Bilder (Resume bestätigt — kein erneuter KIE-Bildaufruf, keine erneute Transkription) und rendert direkt ein echtes `final.mp4` (3.9s, Video- und Audiospur, `start_aligned`/`end_aligned` korrekt gesetzt, alle Selbstprüfungs-Checks grün) — im Browser sichtbar in der Render-Karte nach automatischem Refresh, inklusive funktionierendem Download-Button.
+
+## 18. Phase 4.4 — Text-Overlays (Untertitel, Zahlen-Callouts, Kapitel-Titel)
+
+Nutzerwunsch (alle drei zugleich gewählt, siehe Rückfrage vor Umsetzung): automatische Untertitel, Zahlen-/Statistik-Callouts, Kapitel-Titel. Alle drei standardmäßig AUS — der Plan markiert 4.4 explizit als optional, ein Video darf sich nie ungefragt im Look ändern.
+
+### 18.1 Blocker: `drawtext` nicht verfügbar, PNG-Overlay statt Filter-Text
+
+Der installierte ffmpeg-Build (Homebrew-Standardformel) hat kein `freetype`/`fontconfig` kompiliert — `ffmpeg -h filter=drawtext` meldet „Unknown filter". Die Alternative `ffmpeg-full` hätte 47 zusätzliche Abhängigkeiten bedeutet und ein Risiko für die bereits getestete Encoder-/Sync-Pipeline (andere Standard-Parameter, anderer Build) — bewusst nicht gewählt. Stattdessen: Text wird als transparentes PNG per **Pillow** gerendert (`render_overlay.py`, isolierte `.venv_whisper`-venv, dieselbe wie Whisper — jetzt mit Pillow ergänzt statt einer dritten venv), dann per ffmpegs `overlay`+`fade`-Filtern aufs Ken-Burns-Bild gelegt. Beide Filter sind in jedem Standard-ffmpeg-Build enthalten, kein Compile-Flag nötig. In der isolierten Test-Reihenfolge zuerst als eigenständiges Multi-Input-ffmpeg-Kommando verifiziert (`-loop 1 -i base.jpg -loop 1 -i overlay.png -t 3 -r 30 -filter_complex "..."`), bevor `_render_clip` angefasst wurde — exakte Frame-Anzahl/Auflösung bestätigt, bevor das Risiko für die bestehende Pipeline eingegangen wurde.
+
+### 18.2 `render_overlay.py` — drei Stile
+
+- **`caption`**: unten verankert, weißer Fettdruck mit schwarzem Textrand, halbtransparente Box, Zeilenumbruch via `draw.textlength`-Messung (max. 3 Zeilen, danach „…"). Zeigt `scene["text"]` für die GESAMTE Clip-Dauer.
+- **`callout`**: groß, gelb, oberer Bildbereich, kein Kasten — für kurze Zahlen/Daten, ca. 1–1.5s sichtbar.
+- **`chapter`**: mittig, weiß, kleiner als ein Callout, kein Kasten — kurzes Szenerie-Label, ca. 2s sichtbar bei einem Sequenz-Anker.
+
+Alle drei nutzen `/System/Library/Fonts/Supplemental/Arial Bold.ttf` (auf diesem Mac vorhanden), Text wird base64-kodiert per `argv` übergeben (kein Shell-Escaping für beliebige Satzzeichen/Unicode nötig).
+
+### 18.3 Datenherkunft — zwei Felder, die vorher berechnet und dann verworfen wurden
+
+- **`seq_reason`** (Kapitel-Titel): `analyze_script()`s `visual_sequences`-Schema hatte von Anfang an ein `"reason"`-Feld (Feature A, Abschnitt 12) — wurde bisher nur für die Sequenz-Gruppierung selbst genutzt, der Text danach verworfen. Jetzt in `_apply_visual_sequences_direct` (Audio-Pfad) und `segment_by_pacing` (manueller Pfad, via neues `reason_by_sid`-Mapping) auf `scene["seq_reason"]` persistiert.
+- **`callout`** (Zahlen-Callout): neues Feld `"callouts": [{"beat": N, "text": "1969"}]` im `analyze_script`-Schema — **kein zusätzlicher LLM-Call**, derselbe Analyse-Pass, der auch Pacing/Sequenzen liefert. Striktes Prompt-Wording: nur bei explizit im Text genannten konkreten Zahlen/Daten, nichts erfinden, die meisten Beats haben keinen Callout. Im manuellen Pfad durch `segment_by_pacing` mit einem eigenen `callout_by_i`/`cur_callout`-Tracking durch Merge/Split hindurchgereicht (analog zu `seq_by_i`), im Audio-Pfad direkte Beat-Index-Zuordnung wie Pacing.
+
+### 18.4 `_render_clip` — von Single-Input zu Multi-Input-Filtergraph
+
+`_overlay_specs_for_scene(scene, clip_dur, overlay_opts)` entscheidet pro Szene, welche Overlays (falls per Toggle aktiviert) greifen und ihr Zeitfenster: Kapitel-Titel nur bei `seq_pos==0` mit vorhandenem `seq_reason`, Callout nur bei vorhandenem `scene["callout"]`, Caption immer wenn `scene["text"]` existiert (praktisch immer). `_render_clip` selbst baut jetzt einen `-filter_complex`-Graphen mit einem `-loop 1 -i`-Input pro aktivem Overlay zusätzlich zum Basisbild — jedes Overlay-PNG bekommt `format=rgba,fade=in,fade=out` für weiches Ein-/Ausblenden, dann `overlay=enable='between(t,t0,t1)'` verkettet auf das vorherige Zwischenergebnis. Temporäre Overlay-PNGs werden nach dem Rendern (auch im Fehlerfall, `finally`-Block) wieder gelöscht.
+
+### 18.5 Persistenz & Steuerung — pro Video, nicht pro Render-Klick
+
+`get_video_overlay_opts`/`set_video_overlay_opts` (neu, analog zu `get_video_image_model`) speichern die drei Toggles in `meta.json`, nicht im Request-Body — dadurch liest `_render_worker` sie selbstständig, unabhängig davon, ob der Render über den manuellen „🎬 Video rendern"-Button oder den Ein-Knopf-Orchestrator (`_produce_worker` → `_render_worker`, Abschnitt 17) ausgelöst wurde, ohne dass die Optionen durch jeden Aufruf-Pfad einzeln durchgereicht werden müssten. Neue Routen `GET`/`POST /api/overlay_opts`. Frontend: drei Checkboxen in der Render-Karte (`ovCaptions`/`ovCallouts`/`ovChapters`), alle initial unchecked, `loadOverlayOpts()` beim Öffnen eines Videos, `saveOverlayOpts()` bei jeder Änderung.
+
+### 18.6 End-to-End verifiziert (Juli 2026)
+
+Isolierter `_render_clip`-Test zuerst (alle drei Overlays auf einer synthetischen Testszene, `overlay_opts` alle `True`): Frame bei t=0.5s zeigt Callout+Kapitel-Titel+Caption gleichzeitig korrekt positioniert, Frame bei t=2.5s zeigt Callout/Kapitel-Titel korrekt ausgeblendet, nur die Caption bleibt (erwartetes Timing). Danach vollständiger Produktions-Testlauf über die echte HTTP-API (Ein-Knopf-Orchestrator, Skript über einen Mondlandungs-Text mit explizitem Jahr „1969"): reales Gemini-Ergebnis erkannte selbstständig `callout="1969"` auf der ersten Szene UND gruppierte die ersten drei Szenen zu einer Sequenz mit `seq_reason="Durchgehende Szenerie auf der staubigen Mondoberfläche mit den Astronauten."` — beides ohne jede Sonderbehandlung im Prompt für diesen Testfall, allein aus der bestehenden Schema-Erweiterung. Fertig gerendertes `final.mp4` (18.4s, alle Selbstprüfungs-Checks grün) zeigt auf einem echten KIE-generierten Mondlandungsbild Callout, Kapitel-Titel und Untertitel gleichzeitig, gut lesbar, korrekt positioniert.
+
+## 19. Pausen-Kürzung (auf Nutzerwunsch, nach Phase 3)
+
+Nutzer-Beobachtung: ein 8-Minuten-Voiceover hat naturgemäß Satzpausen dazwischen — stille Momente, die im geschnittenen Video wie totes Material wirken. Lösung nutzt eine Datenquelle, die durch Phase 3 (Whisper) bereits vorliegt: die Lücke zwischen dem Ende von Wort N und dem Start von Wort N+1 IST die Sprechpause, kein separater Erkennungs-Schritt nötig. Auf Nutzer-Entscheidung: jede Pause wird auf `MAX_PAUSE_SEC = 0.3` Sekunden gekappt (nicht komplett entfernt — ein kurzer Atem-Abstand bleibt, nur die toten, langen Stellen verschwinden).
+
+### 19.1 Drei neue Funktionen (dashboard.py, direkt nach `align_scenes_to_whisper`)
+
+- **`_compute_pause_trims(words, max_pause=0.3)`** — findet jede Wortlücke über `max_pause` und gibt das jeweils zu entfernende ÜBERSCHUSS-Intervall zurück (nicht die ganze Pause — die ersten `max_pause` Sekunden bleiben als natürlicher Atem-Abstand). Jedes Intervall liegt garantiert vollständig innerhalb einer Stille, kann also nie ein gesprochenes Wort anschneiden.
+- **`_trim_audio_pauses(audio_path, trims, out_path)`** — schneidet die Intervalle per ffmpeg `atrim`+`concat` heraus (eine Filterkette aus „keep intervals" zwischen den Trim-Punkten, verlustfrei als WAV). Isoliert getestet: 3.5s Audio (0.5s Ton, 2.5s Stille, 0.5s Ton) mit Trim `(0.8, 3.0)` ergibt exakt 1.3s — `3.5 - (3.0-0.8) = 1.3`.
+- **`_adjust_words_for_trims(words, trims)`** — verschiebt jeden Wort-Zeitstempel auf die NEUE, gekürzte Zeitachse: jedes Wort verliert die kumulierte Dauer aller Trim-Intervalle, die vor ihm liegen. Da ein Trim-Intervall nie innerhalb eines Wortes liegt (nur zwischen Wörtern), ist ein einziger kumulativer Versatz pro Wort exakt für Start UND Ende.
+
+### 19.2 Einbindung in `_render_worker`
+
+Läuft in derselben `"timing"`-Stage wie die Whisper-Ausrichtung (Abschnitt 16.5) — logisch zusammengehörig, da das Kürzen der Audiospur die Wort-Zeitstempel verschiebt und ohne verlässliche Wortgrenzen kein sicherer Trim-Punkt existiert. Die gekürzte Datei landet als `voiceover_trimmed.wav` NEBEN dem Original in `v_uploads()` (nicht in `render_tmp/`, das nach jedem Render gelöscht wird) — ihre Existenz ist selbst der Resume-Marker: schon getrimmt + Szenen schon ausgerichtet heißt kein erneuter Whisper-Lauf bei einem Wiederholungs-Render. Alles Nachgelagerte (Sync-Invariante, Sound-Design, finaler Mux) verwendet ab dann `voiceover_trimmed.wav` statt des Original-Uploads — `audio_duration` für die Sync-Invariante wird entsprechend von der GEKÜRZTEN Datei per `ffprobe` ermittelt, nicht vom Original.
+
+**Invalidierung bei neuem Upload:** `/api/upload_audio` löscht ein vorhandenes `voiceover_trimmed.wav` und leert `start_aligned`/`end_aligned` auf allen Szenen, sobald eine NEUE Aufnahme hochgeladen wird — sonst würde ein zweiter Render nach einer Neuaufnahme lautlos die alte, zur neuen Datei nicht mehr passende getrimmte Spur/Zeitstempel weiterverwenden.
+
+### 19.3 Nebenbefund beim Testen: `WhisperModel()` versucht bei JEDEM Aufruf ins Netz, auch wenn das Modell längst lokal gecacht ist
+
+Während des End-to-End-Tests blieb der Render minutenlang in der `"timing"`-Stage hängen (kein Hang im eigentlichen Sinn — der Prozess lief, aber wartete auf einen Netzwerk-Timeout). Ursache: `faster_whisper.WhisperModel()` ruft beim Initialisieren `huggingface_hub` auf, das selbst bei einem bereits lokal vorhandenen Modell (`~/.cache/huggingface/hub/models--Systran--faster-whisper-small`, siehe Abschnitt 16.3) einen Online-Check versucht — auf diesem Rechner/Netz manchmal ein 60-Sekunden-Timeout statt eines schnellen Fehlschlags, reproduzierbar zweimal hintereinander beobachtet. **Fix:** `whisper_transcribe.py` setzt jetzt `HF_HUB_OFFLINE=1`/`TRANSFORMERS_OFFLINE=1`, bevor `faster_whisper` importiert wird — der lokale Cache wird dadurch als maßgeblich behandelt, kein Netzwerk-Aufruf mehr nötig. Nicht durch die Pausen-Kürzung verursacht, aber durch deren Test aufgedeckt: dieselbe Verzögerung hätte auch die normale Whisper-Ausrichtung (Abschnitt 16) bei jedem Render treffen können, abhängig von Netzwerkbedingungen.
+
+### 19.4 End-to-End verifiziert (Juli 2026)
+
+Synthetisches 3-Satz-Voiceover mit zwei fest eingefügten 2-Sekunden-Stille-Abschnitten zwischen den Sätzen (11.93s Gesamtlänge) über die echte Render-API verarbeitet: Whisper erkannte beide Pausen (~1.9s effektiv, TTS-Grenzeffekte eingerechnet) klar über der 0.3s-Schwelle, `voiceover_trimmed.wav` landet bei 8.74s (-3.19s), `final.mp4` exakt 8.73s (nicht die ursprünglichen 11.93s) — alle drei Szenen zeigen lückenlos aneinander anschließende `start_aligned`/`end_aligned`-Werte statt der ursprünglichen Lücken. Selbstprüfung grün.

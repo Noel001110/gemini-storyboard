@@ -27,6 +27,9 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Isolated venv for faster-whisper (Phase 3) — machine-specific, not portable
+.venv_whisper/
+
 # macOS
 .DS_Store
 

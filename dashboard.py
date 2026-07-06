@@ -114,6 +114,22 @@ def set_video_image_model(cid: str, vid: str, model: str):
     meta["image_model"] = model
     save_v_meta(cid, vid, meta)
 
+OVERLAY_KEYS = ("captions", "callouts", "chapters")
+
+def get_video_overlay_opts(cid: str, vid: str) -> dict:
+    """Text-overlay toggles (Phase 4.4) are per-VIDEO, persisted like image_model —
+    the render worker reads this directly (no need to pass it through every call site,
+    including the one-button orchestrator's _render_worker call). Off by default: the
+    plan explicitly marks this feature optional, so a video's look never changes
+    without the user deliberately opting in."""
+    saved = load_v_meta(cid, vid).get("overlay_opts", {})
+    return {k: bool(saved.get(k, False)) for k in OVERLAY_KEYS}
+
+def set_video_overlay_opts(cid: str, vid: str, opts: dict):
+    meta = load_v_meta(cid, vid)
+    meta["overlay_opts"] = {k: bool(opts.get(k, False)) for k in OVERLAY_KEYS}
+    save_v_meta(cid, vid, meta)
+
 def ensure_channel(cid):
     os.makedirs(ch_dir(cid), exist_ok=True)
     os.makedirs(ch_sheets(cid), exist_ok=True)
@@ -573,7 +589,7 @@ PACING_WARN_THRESHOLD = 0.30  # if >30% of units come back "punchy", the classif
                                # exploding the scene (and KIE credit) count.
 
 def segment_by_pacing(units: list, pacing: list, wpm: float, normal_sec: float,
-                       sequences: list = None) -> list:
+                       sequences: list = None, callouts: list = None) -> list:
     """Groups atomic text units (from split_units) into scenes using a per-unit pacing
     label ("calm"/"normal"/"punchy") that analyze_script() already assigned in the SAME
     pass it used to read the emotional arc — so pacing can't drift from what the model
@@ -599,13 +615,18 @@ def segment_by_pacing(units: list, pacing: list, wpm: float, normal_sec: float,
     lines up with the final scene count."""
     label_by_i = {p.get("beat"): p.get("label", "normal") for p in (pacing or []) if isinstance(p, dict)}
     seq_by_i = {}
+    reason_by_sid = {}
     for seq in (sequences or []):
         if not isinstance(seq, dict):
             continue
         sid = seq.get("seq_id")
+        if sid is not None and seq.get("reason"):
+            reason_by_sid[sid] = seq["reason"]
         for beat_i in seq.get("beats", []) or []:
             if sid is not None:
                 seq_by_i[beat_i] = sid
+    callout_by_i = {c.get("beat"): c.get("text") for c in (callouts or [])
+                    if isinstance(c, dict) and c.get("text")}
     targets = {"calm": PACING_TARGET_SEC["calm"],
                "normal": max(1.5, min(normal_sec, 4.0)),
                "punchy": PACING_TARGET_SEC["punchy"]}
@@ -616,21 +637,25 @@ def segment_by_pacing(units: list, pacing: list, wpm: float, normal_sec: float,
         print(f"  [Plan] WARNUNG: {n_punchy}/{len(units)} Einheiten als 'punchy' eingestuft "
               f"({n_punchy/len(units)*100:.0f}%) — ungewöhnlich hoch, ggf. Fehlklassifizierung", flush=True)
 
-    segs, seg_seq_ids, seg_labels, cur, cur_label, cur_seq = [], [], [], [], None, None
+    segs, seg_seq_ids, seg_labels, seg_callouts = [], [], [], []
+    cur, cur_label, cur_seq, cur_callout = [], None, None, None
     def flush():
-        nonlocal cur, cur_seq
+        nonlocal cur, cur_seq, cur_callout
         if cur:
             segs.append(" ".join(cur))
             seg_seq_ids.append(cur_seq)
             seg_labels.append(cur_label)
+            seg_callouts.append(cur_callout)
             cur = []
             cur_seq = None
+            cur_callout = None
 
     for i, u in enumerate(units):
         label = label_by_i.get(i, "normal")
         if label not in targets:
             label = "normal"
         seq_id = seq_by_i.get(i)
+        callout = callout_by_i.get(i)
         words = u.split()
         target_words = max(2, round(targets[label] * wpm / 60.0))
 
@@ -640,18 +665,18 @@ def segment_by_pacing(units: list, pacing: list, wpm: float, normal_sec: float,
             # longer one — the "two rapid images" gut-punch effect. Falls back to
             # hard-cap-sized chunks instead if it's so long that even halving it would
             # still blow MAX_SCENE_SEC (rare, but a single scene must never exceed it).
-            # Every resulting piece inherits this unit's seq_id (if any) — splitting a
-            # unit never breaks it out of its sequence.
+            # Every resulting piece inherits this unit's seq_id/callout (if any) —
+            # splitting a unit never breaks it out of its sequence or drops its callout.
             flush()
             if len(words) > hard_cap_words * 2:
                 for j in range(0, len(words), hard_cap_words):
-                    segs.append(" ".join(words[j:j+hard_cap_words])); seg_seq_ids.append(seq_id); seg_labels.append(label)
+                    segs.append(" ".join(words[j:j+hard_cap_words])); seg_seq_ids.append(seq_id); seg_labels.append(label); seg_callouts.append(callout)
             elif len(words) > target_words * 1.8:
                 mid = len(words) // 2
-                segs.append(" ".join(words[:mid])); seg_seq_ids.append(seq_id); seg_labels.append(label)
-                segs.append(" ".join(words[mid:])); seg_seq_ids.append(seq_id); seg_labels.append(label)
+                segs.append(" ".join(words[:mid])); seg_seq_ids.append(seq_id); seg_labels.append(label); seg_callouts.append(callout)
+                segs.append(" ".join(words[mid:])); seg_seq_ids.append(seq_id); seg_labels.append(label); seg_callouts.append(callout)
             else:
-                segs.append(u); seg_seq_ids.append(seq_id); seg_labels.append(label)
+                segs.append(u); seg_seq_ids.append(seq_id); seg_labels.append(label); seg_callouts.append(callout)
             cur_label = None
             continue
 
@@ -663,7 +688,7 @@ def segment_by_pacing(units: list, pacing: list, wpm: float, normal_sec: float,
         if len(words) > hard_cap_words:
             flush()
             for j in range(0, len(words), hard_cap_words):
-                segs.append(" ".join(words[j:j+hard_cap_words])); seg_seq_ids.append(seq_id); seg_labels.append(label)
+                segs.append(" ".join(words[j:j+hard_cap_words])); seg_seq_ids.append(seq_id); seg_labels.append(label); seg_callouts.append(callout)
             cur_label = None
             continue
 
@@ -676,6 +701,8 @@ def segment_by_pacing(units: list, pacing: list, wpm: float, normal_sec: float,
         cur.extend(words)
         cur_label = label
         cur_seq = seq_id
+        if callout:
+            cur_callout = callout
         if len(cur) >= target_words:
             flush()
             cur_label = None
@@ -688,6 +715,11 @@ def segment_by_pacing(units: list, pacing: list, wpm: float, normal_sec: float,
                  "pacing": seg_labels[i] or "normal"}
         if seg_seq_ids[i] is not None:
             scene["seq_id"] = seg_seq_ids[i]
+            reason = reason_by_sid.get(seg_seq_ids[i])
+            if reason:
+                scene["seq_reason"] = reason
+        if seg_callouts[i]:
+            scene["callout"] = seg_callouts[i]
         scenes.append(scene)
         t += dur
 
@@ -720,9 +752,15 @@ def _apply_visual_sequences_direct(scenes: list, sequences: list) -> None:
         sid = seq.get("seq_id")
         if sid is None:
             continue
+        reason = seq.get("reason")
         for beat_i in seq.get("beats", []) or []:
             if isinstance(beat_i, int) and 0 <= beat_i < len(scenes):
                 scenes[beat_i]["seq_id"] = sid
+                # Only needed on the anchor (seq_pos==0 after renumbering below), but
+                # stored on every beat of the sequence since we don't know yet which one
+                # will end up as the anchor — cheap, and unused fields are harmless.
+                if reason:
+                    scenes[beat_i]["seq_reason"] = reason
     _renumber_seq_pos(scenes)
 
 def fmt_t(s):
@@ -752,7 +790,8 @@ def analyze_script(beats):
         '  "callbacks": [{"from_beat": N, "to_beat": M, "shared_element": string}],\n'
         '  "pacing": [{"beat": N, "label": "calm" | "normal" | "punchy"}],\n'
         '  "visual_sequences": [{"seq_id": N, "beats": [N, N, N], "reason": string, '
-        '"camera": "slow push-in" | "pan" | "static series"}]\n'
+        '"camera": "slow push-in" | "pan" | "static series"}],\n'
+        '  "callouts": [{"beat": N, "text": "short number/date/stat, max ~6 chars"}]\n'
         "}\n\n"
         'Rule: set "anonymize": true for every real, identifiable named person (public '
         "figures, named victims/individuals) — these get depicted later only as a "
@@ -775,6 +814,12 @@ def analyze_script(beats):
         "images are the safe default; most beats belong to no sequence at all. 'beats' "
         "are 0-indexed positions into the SAME BEATS array given below (identical index "
         "space to PACING above), listed in order.\n\n"
+        "CALLOUTS — ONLY if a beat states a concrete, specific number/date/statistic "
+        "explicitly in its own text (e.g. a year, a count, a percentage, an age) — never "
+        "invent one, never paraphrase a vague amount into a fake-precise number. Omit a "
+        "beat entirely if nothing concrete fits; most beats will have no callout at all. "
+        "Keep 'text' extremely short — the exact figure only (e.g. \"1969\", \"3.2M\", "
+        "\"47%\"), no surrounding words.\n\n"
         "BEATS:\n" + json.dumps(beats, ensure_ascii=False)
     )
     for attempt in (1, 2):
@@ -973,210 +1018,9 @@ def story_phase(i: int, total: int) -> str:
         "RESOLUTION"
     )
 
-VIDEO_PROMPT_CHUNK_SIZE = 20  # scenes per LLM call — see IMAGE_PROMPT_CHUNK_SIZE comment:
-# the repeated analysis/few-shot/style context per chunk call is the real cost driver, not
-# call count. Larger chunks cut that repetition significantly.
 VIDEO_PROMPT_MIN_LEN    = 280  # chars — forces setting/light/camera to be spelled out, not just a mood word
 
-_VIDEO_PROMPT_FEWSHOT = """\
-EXAMPLE — TOO SHORT / MISSES THE CONTENT (do not do this):
-Line: "Reports suggested that people around him were monitored before his murder."
-Bad video_prompt: "Dark ominous scene, surveillance concept, cinematic lighting"
-→ Wrong: doesn't say WHO was monitored, doesn't show the surveillance mechanism, loses the actual fact in the line.
-
-EXAMPLE — CORRECT:
-Line: "Reports suggested that people around him were monitored before his murder."
-core_statement: "The target's inner circle was surveilled before his death."
-concrete_entity: "char_target (anonymized), sym_surveillance_device"
-Good video_prompt: "An empty chair in a press room, a phone resting on the floor beside it,
-a faint red glow pulsing from the phone screen suggesting active surveillance, dim somber
-lighting from a single overhead source, nobody visible in frame, close-up composition
-emphasizing absence and unease"
-→ Why better: translates "inner circle monitored" into a concrete object (glowing phone =
-surveillance symbol), AND is long enough to define setting/light/framing — not just a mood word.\
-"""
-
-def _validate_video_prompt_entry(entry: dict, anonymized_words: set = frozenset()) -> bool:
-    vp = (entry.get("video_prompt") or "").strip()
-    if len(vp) < VIDEO_PROMPT_MIN_LEN:
-        return False
-    entity = (entry.get("concrete_entity") or "").strip().lower()
-    if entity and entity not in ("none", "n/a", "-"):
-        # crude heuristic: does at least one meaningful word from concrete_entity show up in the prompt?
-        words = [w for w in re.findall(r"[a-zA-Z]{4,}", entity)
-                 if w not in ("char", "loc", "sym", "anonymized") and w.lower() not in anonymized_words]
-        if words and not any(w.lower() in vp.lower() for w in words):
-            return False
-    return True
-
-def _video_prompt_chunk(chunk_beats: list, chunk_offset: int, total: int,
-                         analysis_ctx: str, vid_master: str, prev_prompts: list,
-                         has_char_ref: bool) -> list:
-    """One LLM call for a small chunk of scenes (8-10), forcing intermediate reasoning
-    fields per scene before the final video_prompt text. Returns list of entry dicts."""
-    numbered = "\n".join(
-        f"{chunk_offset+i+1}. [{story_phase(chunk_offset+i, total)}] {t}"
-        for i, t in enumerate(chunk_beats)
-    )
-    ref_note = (
-        "A character reference image will be supplied to the video model — "
-        "focus prompts on ACTION and MOVEMENT, not appearance."
-        if has_char_ref else
-        "No reference image — describe character appearance briefly in each prompt as defined in CHARACTER CONTEXT."
-    )
-    prev_ctx = (
-        "PREVIOUSLY GENERATED PROMPTS (last 2, for visual continuity — reuse the same "
-        "visual representation for any recurring entity shown here):\n" +
-        "\n".join(f"  • {p[:160]}" for p in prev_prompts[-2:])
-        if prev_prompts else ""
-    )
-
-    instr = f"""\
-You are a video scene director for a documentary/factual video. You receive a structural
-ANALYSIS of the full script and a CHUNK of consecutive narrator lines. Work through each
-line in order using the forced fields below — do not skip straight to the final prompt text.
-
-ANALYSIS (entities, locations, symbols, emotional arc, callbacks — extracted from the FULL script):
-{analysis_ctx}
-
-{prev_ctx}
-
-CHARACTER & STYLE CONTEXT (visual style only — do not repeat this in video_prompt, style is applied separately):
-{vid_master.strip()}
-
-REFERENCE IMAGE: {ref_note}
-
-{_VIDEO_PROMPT_FEWSHOT}
-
-For EACH line in the chunk below, produce an object with ALL of these fields, in order:
-{{
-  "scene": N,
-  "core_statement": "What is this line actually claiming/showing? One sentence.",
-  "concrete_entity": "The EXACT entity id from ANALYSIS (locations/characters/recurring_symbols)
-                       relevant here. If none fits, name the new concrete thing from the line
-                       itself (person/place/object/technology). Abstract metaphor ONLY if the
-                       line truly has no concrete referent.",
-  "callback_check": "Does ANALYSIS.callbacks say this scene references an earlier one? If yes,
-                      name the recurring element that MUST appear in video_prompt. Else 'none'.",
-  "shot_framing": "Derive shot size ONLY from the story phase tag:
-                    OPENING -> wide/establishing shot
-                    RISING ACTION -> medium shot, light tension cues in frame
-                    CLIMAX -> close-up, high intensity, tight framing
-                    RESOLUTION -> wide/distanced, calmer composition",
-  "video_prompt": "The final image text. MUST visibly include concrete_entity AND the
-                    callback_check element (if not 'none'). MUST implement shot_framing.
-                    NO style text here — style is appended separately after this call.
-                    Must explicitly name: (1) the concrete main subject, (2) the setting/
-                    location, (3) a lighting mood, (4) the camera angle/shot size.
-                    A prompt that only describes a vague mood without these four elements
-                    is invalid. Minimum {VIDEO_PROMPT_MIN_LEN} characters."
-}}
-
-HARD RULE: if a line names a concrete person, place, or technology, video_prompt MUST show
-exactly that — check this yourself against your own concrete_entity field before writing it.
-
-NARRATOR LINES IN THIS CHUNK:
-{numbered}
-
-Return a JSON array of {len(chunk_beats)} objects, one per line above, in the same order.
-"""
-    # gemini-3-5-flash + thinkingLevel=high: counteracts the "gets lazy/generic on
-    # later batch items" behavior seen with 2.5-flash on long scripts.
-    txt = post_gemini_native([{"role": "user", "content": instr}], json_mode=True, temp=0.45)
-    arr = json.loads(txt)
-    if isinstance(arr, dict):
-        for v in arr.values():
-            if isinstance(v, list) and len(v) == len(chunk_beats):
-                arr = v; break
-    if not isinstance(arr, list) or len(arr) != len(chunk_beats):
-        raise ValueError(f"unexpected chunk response shape ({type(arr)}, len={len(arr) if isinstance(arr,list) else '?'})")
-    return arr
-
-def _video_prompt_single_retry(beat_text: str, beat_i: int, total: int,
-                                analysis_ctx: str, vid_master: str, prev_prompts: list,
-                                has_char_ref: bool) -> dict:
-    """Focused single-scene retry for entries that failed validation in the batch call —
-    smaller call, less room for the model to get 'lazy'."""
-    try:
-        result = _video_prompt_chunk([beat_text], beat_i, total, analysis_ctx, vid_master,
-                                      prev_prompts, has_char_ref)
-        return result[0]
-    except Exception as e:
-        print(f"  [VidPrompt] Einzel-Retry Szene {beat_i} fehlgeschlagen: {e}", flush=True)
-        return {
-            "scene": beat_i + 1, "concrete_entity": "",
-            "video_prompt": f"Scene illustrating: {beat_text[:80]}. "
-                             "Character center frame, deliberate gesture matching the scene energy. Camera slow zoom-in.",
-        }
-
-def video_prompts_batch(scenes: list, vid_master: str, has_char_ref: bool = False,
-                         analysis: dict = None) -> list:
-    """Generate all T2V video prompts, chunked (not all-in-one) to avoid context
-    degradation over long scripts, with forced intermediate reasoning fields and a
-    validation+retry pass for entries that come back too short/generic.
-
-    Pass an already-computed `analysis` (from analyze_script()) to avoid re-running
-    the full-script analysis a second time when the image pipeline already did it
-    for the same scenes — analyze_script() is a real LLM call, not free.
-
-    Returns list of prompt strings, one per scene, same order as scenes.
-    """
-    beats = [s["text"] for s in scenes]
-    total = len(beats)
-    if total == 0:
-        return []
-
-    if analysis is None:
-        print(f"  [VidPrompt] Analysiere {total} Szenen …", flush=True)
-        analysis = analyze_script(beats)
-    analysis_ctx = json.dumps(analysis, ensure_ascii=False, indent=1) if analysis else "{}"
-    anon_words = _anonymized_words(analysis)
-
-    def _fetch_video_chunk(chunk, chunk_offset, prev):
-        """Same split-retry strategy as the image pipeline — a truncated/malformed JSON
-        response on a big chunk only costs half the chunk, not the whole thing."""
-        try:
-            return _video_prompt_chunk(chunk, chunk_offset, total, analysis_ctx, vid_master,
-                                        prev, has_char_ref)
-        except Exception as e:
-            if len(chunk) <= 1:
-                print(f"  [VidPrompt] Chunk-Fehler (Szene {chunk_offset}): {e} — Fallback", flush=True)
-                return [{"video_prompt": f"Scene illustrating: {chunk[0][:80]}. "
-                         "Character center frame, deliberate gesture matching the scene energy. Camera slow zoom-in.",
-                         "concrete_entity": ""}]
-            mid = len(chunk) // 2
-            print(f"  [VidPrompt] Chunk-Fehler: {e} — teile Chunk und wiederhole …", flush=True)
-            left  = _fetch_video_chunk(chunk[:mid], chunk_offset, prev)
-            left_prompts = [str(entry.get("video_prompt") or "") for entry in left]
-            right = _fetch_video_chunk(chunk[mid:], chunk_offset + mid, prev + left_prompts)
-            return left + right
-
-    prompts: list[str] = []
-    prev_prompts: list[str] = []
-    chunks = [beats[i:i+VIDEO_PROMPT_CHUNK_SIZE] for i in range(0, total, VIDEO_PROMPT_CHUNK_SIZE)]
-    offset = 0
-    for ci, chunk in enumerate(chunks):
-        print(f"  [VidPrompt] Chunk {ci+1}/{len(chunks)} ({len(chunk)} Szenen) …", flush=True)
-        entries = _fetch_video_chunk(chunk, offset, prev_prompts)
-
-        for j, entry in enumerate(entries):
-            beat_i = offset + j
-            if not _validate_video_prompt_entry(entry, anon_words):
-                print(f"  [VidPrompt] Szene {beat_i} zu kurz/generisch — Einzel-Retry …", flush=True)
-                entry = _video_prompt_single_retry(beats[beat_i], beat_i, total, analysis_ctx,
-                                                    vid_master, prev_prompts, has_char_ref)
-            vp = str(entry.get("video_prompt") or f"Scene illustrating: {beats[beat_i][:80]}.")
-            prompts.append(vp)
-            prev_prompts.append(vp)
-        offset += len(chunk)
-
-    return prompts
-
 # ---------- Character sheets ----------
-
-def charsheet_path(name):
-    safe = re.sub(r"[^\w\-]", "_", name.lower())
-    return os.path.join(CHARSHEET_DIR, safe)
 
 def load_char_refs(cid="default"):
     refs = []
@@ -1781,10 +1625,20 @@ def _apply_sync_invariant(scenes: list, audio_duration: float, fps: int) -> list
        rounding and cuts off early) — no code downstream ever compares durations as
        floats again, only these integer frame counts are treated as ground truth.
 
-    Returns a list of per-scene frame counts, same order/length as `scenes`."""
-    total_dur = sum(s.get("dur", 0) for s in scenes) or 1.0
+    Returns a list of per-scene frame counts, same order/length as `scenes`.
+
+    Prefers `start_aligned`/`end_aligned` (Phase 3, Whisper word-timestamps) over the
+    estimated `dur` when present on a scene — same two-step math either way, just fed
+    with a more accurate per-scene duration where available."""
+    def scene_dur(s):
+        sa, ea = s.get("start_aligned"), s.get("end_aligned")
+        if sa is not None and ea is not None and ea > sa:
+            return ea - sa
+        return s.get("dur", 0)
+
+    total_dur = sum(scene_dur(s) for s in scenes) or 1.0
     factor = audio_duration / total_dur
-    normalized = [max(0.1, s.get("dur", 0) * factor) for s in scenes]
+    normalized = [max(0.1, scene_dur(s) * factor) for s in scenes]
 
     audio_frames = round(audio_duration * fps)
     frames = [round(d * fps) for d in normalized]
@@ -1816,9 +1670,31 @@ def _motion_for_scene(scene: dict, prev_scene: dict) -> dict:
     return {"type": zoom_type, "z_end": round(1.0 + intensity, 3), "focus": [0.5, 0.45]}
 
 
-def _render_clip(img_path: str, scene: dict, out_path: str, fps: int = RENDER_FPS) -> None:
-    """Renders one scene's still image into a short Ken-Burns clip. Resume-safe: skips
-    entirely if out_path already exists and is non-empty — same pattern as
+def _overlay_specs_for_scene(scene: dict, clip_dur: float, overlay_opts: dict) -> list:
+    """Decides which text overlays (if any) apply to this scene and their on-screen
+    window. Returns a list of (style, text, t0, t1) tuples, evaluated in the order they
+    should be layered (chapter title first/bottom-most, caption last/top-most is NOT
+    required here since they occupy different screen regions and never overlap)."""
+    if not overlay_opts:
+        return []
+    specs = []
+    if overlay_opts.get("chapters") and scene.get("seq_pos") == 0 and scene.get("seq_reason"):
+        specs.append(("chapter", scene["seq_reason"], 0.0, min(2.0, clip_dur)))
+    if overlay_opts.get("callouts") and scene.get("callout"):
+        t0 = min(0.2, clip_dur * 0.1)
+        t1 = min(1.6, clip_dur - 0.05) if clip_dur > 0.3 else clip_dur
+        if t1 > t0:
+            specs.append(("callout", scene["callout"], t0, t1))
+    if overlay_opts.get("captions") and scene.get("text"):
+        specs.append(("caption", scene["text"], 0.0, clip_dur))
+    return specs
+
+
+def _render_clip(img_path: str, scene: dict, out_path: str, fps: int = RENDER_FPS,
+                  overlay_opts: dict = None) -> None:
+    """Renders one scene's still image into a short Ken-Burns clip, optionally with text
+    overlays (captions/callouts/chapter titles, Phase 4.4) composited on top. Resume-safe:
+    skips entirely if out_path already exists and is non-empty — same pattern as
     _batch_generate_worker's `todo = [s for s in scenes if not s.get("file")]`, so a
     crashed/restarted render only redoes the clips actually missing, not everything."""
     if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
@@ -1827,6 +1703,7 @@ def _render_clip(img_path: str, scene: dict, out_path: str, fps: int = RENDER_FP
     frames = max(1, scene.get("_frames") or round(scene.get("dur", 3.0) * fps))
     z0, z1 = (1.0, motion["z_end"]) if motion["type"] != "zoom_out" else (motion["z_end"], 1.0)
     fx, fy = motion.get("focus", [0.5, 0.5])
+    clip_dur = frames / fps
 
     # Smoothstep easing (3t²-2t³), built purely from the frame index `on`/`frames` — NOT
     # from zoompan's internal `zoom` variable (which holds the clamped previous-frame
@@ -1836,22 +1713,56 @@ def _render_clip(img_path: str, scene: dict, out_path: str, fps: int = RENDER_FP
     x_expr = f"(iw*{fx})-(iw/zoom/2)"
     y_expr = f"(ih*{fy})-(ih/zoom/2)"
 
+    overlay_specs = _overlay_specs_for_scene(scene, clip_dur, overlay_opts)
     encoder, encoder_args = _probe_video_encoder()
-    cmd = [
-        "ffmpeg", "-y", "-loop", "1", "-i", img_path,
-        "-t", str(frames / fps), "-r", str(fps),
-        "-filter_complex",
-        f"scale={RENDER_SUPERSAMPLE_WIDTH}:-2,"
+    inputs = ["-loop", "1", "-i", img_path]
+    filter_parts = [
+        f"[0:v]scale={RENDER_SUPERSAMPLE_WIDTH}:-2,"
         f"zoompan=z='{z_expr}':d={frames}:x='{x_expr}':y='{y_expr}':"
-        f"s={RENDER_WIDTH}x{RENDER_HEIGHT}:fps={fps},setsar=1",
-        "-c:v", encoder, *encoder_args,
-        "-pix_fmt", "yuv420p", "-video_track_timescale", "90000",
-        out_path,
+        f"s={RENDER_WIDTH}x{RENDER_HEIGHT}:fps={fps},setsar=1[base]"
     ]
-    result = subprocess.run(cmd, capture_output=True, timeout=120)
-    if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg Clip-Render fehlgeschlagen ({os.path.basename(img_path)}): "
-                            f"{result.stderr.decode(errors='replace')[-300:]}")
+    overlay_pngs = []
+    last_label = "base"
+    try:
+        for idx, (style, text, t0, t1) in enumerate(overlay_specs):
+            png_path = f"{out_path}.ov{idx}.png"
+            render_text_overlay_png(png_path, RENDER_WIDTH, RENDER_HEIGHT, style, text)
+            overlay_pngs.append(png_path)
+            inputs += ["-loop", "1", "-i", png_path]
+            in_idx = idx + 1
+            fade_dur = min(0.3, max(0.05, (t1 - t0) / 4))
+            fade_out_st = max(t0, t1 - fade_dur)
+            faded_label = f"ov{idx}f"
+            filter_parts.append(
+                f"[{in_idx}:v]format=rgba,"
+                f"fade=t=in:st={t0}:d={fade_dur}:alpha=1,"
+                f"fade=t=out:st={fade_out_st}:d={fade_dur}:alpha=1[{faded_label}]"
+            )
+            is_last = idx == len(overlay_specs) - 1
+            next_label = "outv" if is_last else f"comp{idx}"
+            filter_parts.append(
+                f"[{last_label}][{faded_label}]overlay=enable='between(t,{t0},{t1})'[{next_label}]"
+            )
+            last_label = next_label
+        map_label = last_label if overlay_specs else "base"
+
+        cmd = [
+            "ffmpeg", "-y", *inputs,
+            "-t", str(clip_dur), "-r", str(fps),
+            "-filter_complex", ";".join(filter_parts),
+            "-map", f"[{map_label}]",
+            "-c:v", encoder, *encoder_args,
+            "-pix_fmt", "yuv420p", "-video_track_timescale", "90000",
+            out_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, timeout=120)
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg Clip-Render fehlgeschlagen ({os.path.basename(img_path)}): "
+                                f"{result.stderr.decode(errors='replace')[-300:]}")
+    finally:
+        for p in overlay_pngs:
+            try: os.remove(p)
+            except: pass
 
 
 def _assemble_clips(clip_paths: list, out_path: str) -> None:
@@ -1910,10 +1821,40 @@ def _render_selfcheck(final_path: str, expected_audio_duration: float) -> dict:
     return checks
 
 
-# ---------- Übergänge (Phase 4, Teil 1) — Crossfade NUR an echten Sequenz-/Szenen- ----
-# wechseln, alles andere bleibt harter Schnitt über den verlustfreien concat-Demuxer.
+# ---------- Übergänge (Phase 4) — Crossfade NUR an echten Sequenz-/Szenenwechseln, ----
+# alles andere bleibt harter Schnitt über den verlustfreien concat-Demuxer.
 TRANSITION_DURATION_SEC = 0.5
-TRANSITION_TYPE = "fade"  # ffmpeg xfade-Übergangsname — einfache Überblendung
+
+# Kuratierte Übergangs-Bibliothek: ffmpegs xfade-Filter bringt bereits 58 fertige
+# Übergangstypen mit (kein neues Paket, keine eigene Easing-Formel nötig für diesen
+# Teil) — "die Bibliothek" ist also bereits da, es fehlte nur eine Auswahlregel statt
+# immer denselben Typ ("fade") zu nehmen. Pro Familie zwei Richtungsvarianten, damit
+# ein längeres Video nicht monoton wirkt; welche Familie greift, ist regelbasiert aus
+# bereits vorhandenen Szenendaten (pacing) abgeleitet, kein LLM-Call, kein Zufall
+# (Zufall würde Resume-Läufe nach einem Reload inkonsistent machen).
+#   - "calm"   -> sanftes Dissolve/Fade, kein SFX (ein Whoosh würde eine ruhige Szene
+#                 stören)
+#   - "punchy" -> energischer Wipe, mit Whoosh (schneller, "harter" Übergangs-Look)
+#   - sonst    -> neutraler Smooth-Übergang (moderner als ein reines Fade, aber
+#                 unauffälliger als ein Wipe) — der Standardfall
+TRANSITION_LIBRARY = {
+    "fade":   {"types": ["fade", "dissolve"],           "sfx": None},
+    "wipe":   {"types": ["wipeleft", "wiperight"],      "sfx": "whoosh"},
+    "smooth": {"types": ["smoothleft", "smoothright"],  "sfx": "whoosh"},
+}
+
+
+def _transition_for_scene(scene: dict, idx: int) -> tuple:
+    """Wählt Übergangstyp + passendes SFX (oder None) für den Schnitt VOR `scene`.
+    Richtung (links/rechts) alterniert über den Szenenindex — dasselbe deterministische
+    Muster wie die Zoom-Richtung in _motion_for_scene, damit ein erneuter Render (Resume
+    nach Reload) exakt denselben Übergang produziert, kein Zufalls-Rauschen."""
+    family = "fade" if scene.get("pacing") == "calm" else \
+             "wipe" if scene.get("pacing") == "punchy" else "smooth"
+    types = TRANSITION_LIBRARY[family]["types"]
+    transition_type = types[scene.get("i", idx) % len(types)]
+    return transition_type, TRANSITION_LIBRARY[family]["sfx"]
+
 
 def _has_transition_before(scenes: list, idx: int) -> bool:
     """Identische Regel wie das Whoosh-SFX-Ereignis (_build_sfx_events) — bewusst so:
@@ -1933,19 +1874,22 @@ def _clip_duration_sec(path: str) -> float:
     return float(out.stdout.strip())
 
 
-def _crossfade_clips(clip_a: str, clip_b: str, out_path: str, duration: float) -> None:
+def _crossfade_clips(clip_a: str, clip_b: str, out_path: str, duration: float, transition_type: str = "fade") -> None:
     """Merges two already-rendered clips into one with a crossfade at the boundary.
     `clip_a` MUST have been rendered with `duration` extra seconds of Ken-Burns motion
     tacked onto its planned length beforehand (see _render_worker's transition_frames
     compensation) — the crossfade consumes exactly that overlap, so the merged clip's
     total duration still equals the ORIGINAL uncompensated sum of both scenes' planned
     durations. That's what keeps the frame-exact audio sync invariant (_apply_sync_
-    invariant) intact even though a crossfade inherently overlaps two clips in time."""
+    invariant) intact even though a crossfade inherently overlaps two clips in time.
+    `transition_type` is any of ffmpeg xfade's ~58 built-in names (see TRANSITION_LIBRARY
+    for the curated subset actually selected from) — picking a different name costs
+    nothing extra, it's the same filter."""
     dur_a = _clip_duration_sec(clip_a)
     offset = max(0.0, dur_a - duration)
     encoder, encoder_args = _probe_video_encoder()
     cmd = ["ffmpeg", "-y", "-i", clip_a, "-i", clip_b,
-           "-filter_complex", f"[0:v][1:v]xfade=transition={TRANSITION_TYPE}:duration={duration}:offset={offset}[v]",
+           "-filter_complex", f"[0:v][1:v]xfade=transition={transition_type}:duration={duration}:offset={offset}[v]",
            "-map", "[v]", "-c:v", encoder, *encoder_args,
            "-pix_fmt", "yuv420p", "-video_track_timescale", "90000", out_path]
     result = subprocess.run(cmd, capture_output=True, timeout=120)
@@ -1968,22 +1912,43 @@ SFX_FILES = {
 
 
 def _build_sfx_events(scenes: list) -> list:
-    """Rule-based SFX timing — no LLM call. 'whoosh' fires at a real sequence/scene
-    change: a scene that's the anchor (seq_pos == 0) of a sequence, whose immediately
-    preceding scene belongs to a DIFFERENT sequence (or none) — i.e. an actual visual
-    transition, not just the first scene of the video. 'impact' fires at every scene
-    analyze_script's pacing labeled 'punchy' (emotional peaks/reveals/cliffhangers) —
-    the closest available proxy for "strongest emotional_arc transitions" from the plan,
-    since this codebase's scene model has no explicit chapter markers to key off of."""
+    """Rule-based SFX timing — no LLM call.
+    - At a real sequence/scene change (this scene is the anchor, seq_pos==0, of a
+      sequence whose immediately preceding scene belongs to a DIFFERENT sequence or
+      none): the SFX is whatever _transition_for_scene picked for the matching visual
+      crossfade (same selection call as _render_worker uses for the video side) — a
+      "fade"-family transition gets no SFX (a whoosh would fight a slow, calm dissolve),
+      "wipe"/"smooth" get "whoosh". Visual and audio transition are therefore always in
+      sync by construction, never two independently-computed choices that could drift.
+    - 'riser' fires at every scene pacing labeled 'punchy' — the closest available proxy
+      for "strongest emotional_arc transitions" from the plan, since this codebase's
+      scene model has no explicit chapter markers to key off of.
+    - 'impact' (Phase 4.2) additionally fires at a 'punchy' scene that is NOT already a
+      crossfade transition point — a genuine hard cut on a dramatic beat gets a sharp,
+      percussive accent landing exactly on the cut, which only became possible frame-
+      accurately once Phase 3 (Whisper word-timestamps) existed. A transition point
+      already has a soft video crossfade + whoosh; stacking an impact hit on top of that
+      would clash, hence the exclusion.
+    Timing prefers `start_aligned` (Phase 3, Whisper word-timestamps) over the estimated
+    `start` when present — same placement rule, just landing on the real word boundary
+    instead of an approximate one."""
+    def scene_start(s):
+        return s["start_aligned"] if s.get("start_aligned") is not None else s.get("start", 0)
+
     events = []
     for idx, s in enumerate(scenes):
         if idx == 0:
             continue
         prev = scenes[idx - 1]
-        if s.get("seq_id") is not None and s.get("seq_pos", 0) == 0 and prev.get("seq_id") != s.get("seq_id"):
-            events.append({"start": s.get("start", 0), "sfx": "whoosh"})
+        is_transition = s.get("seq_id") is not None and s.get("seq_pos", 0) == 0 and prev.get("seq_id") != s.get("seq_id")
+        if is_transition:
+            _transition_type, sfx = _transition_for_scene(s, idx)
+            if sfx:
+                events.append({"start": scene_start(s), "sfx": sfx})
         if s.get("pacing") == "punchy":
-            events.append({"start": s.get("start", 0), "sfx": "riser"})
+            events.append({"start": scene_start(s), "sfx": "riser"})
+            if not is_transition:
+                events.append({"start": scene_start(s), "sfx": "impact"})
     return events
 
 
@@ -2093,6 +2058,45 @@ def _render_worker(cid: str, vid: str):
         if not audio_path or not os.path.exists(audio_path):
             raise RuntimeError("Kein hochgeladenes Voice-over gefunden — Rendern braucht eine durchgehende Audiospur.")
 
+        # Whisper-Alignment + Pausen-Kürzung laufen HIER, nicht im /api/transcribe-
+        # Handler -- an dieser Stelle liegt IMMER ein hochgeladenes Voice-over vor,
+        # unabhängig davon, ob die Szenen-Texte ursprünglich aus der Audio-
+        # Transkription (Option A) oder dem manuellen Skript-Pfad (Option B, geschätzte
+        # WPM-Timeline) stammen. Ein einziger Punkt statt zwei getrennter, damit BEIDE
+        # Pfade dieselbe frame-genaue Timing-Qualität bekommen (ARCHITECTURE.md 16.5).
+        # Die gekürzte Audiospur wird NEBEN dem Original abgelegt (v_uploads, nicht
+        # render_tmp/, das nach jedem Render gelöscht wird) -- ihre Existenz ist damit
+        # selbst der Resume-Marker: schon getrimmt + Szenen schon ausgerichtet heißt
+        # kein erneuter Whisper-Lauf bei einem Wiederholungs-Render.
+        trimmed_audio_path = os.path.join(v_uploads(cid, vid), "voiceover_trimmed.wav")
+        needs_alignment = any(s.get("start_aligned") is None for s in scenes)
+        if needs_alignment or not os.path.exists(trimmed_audio_path):
+            stage("timing")
+            try:
+                whisper_result = transcribe_words_whisper(audio_path)
+                trims = _compute_pause_trims(whisper_result["words"])
+                _trim_audio_pauses(audio_path, trims, trimmed_audio_path)
+                adjusted_words = _adjust_words_for_trims(whisper_result["words"], trims)
+                align_scenes_to_whisper(scenes, adjusted_words)
+                trimmed_total = sum(b - a for a, b in trims)
+                print(f"  [Whisper] {len(whisper_result['words'])} Wörter ausgerichtet, "
+                      f"{len(trims)} Pause(n) auf {MAX_PAUSE_SEC}s gekürzt (-{trimmed_total:.1f}s) "
+                      f"(Sprache: {whisper_result['language']}, p={whisper_result['language_probability']})",
+                      flush=True)
+            except Exception as e:
+                # Graceful degradation: scenes keep their estimated start/dur, the
+                # sync invariant and SFX timing simply fall back to those (both
+                # already check start_aligned/end_aligned for None before using them),
+                # and the raw (untrimmed) upload is used for muxing below.
+                print(f"  [Whisper] Übersprungen, geschätzte Timeline bleibt aktiv: {e}", flush=True)
+
+        # Everything downstream (sync invariant, sound design, final mux) uses the
+        # pause-trimmed audio whenever it exists — it's the same recording, just
+        # shorter, so nothing about "which audio is the real one" changes for the
+        # viewer, only that dead air is gone.
+        if os.path.exists(trimmed_audio_path) and os.path.getsize(trimmed_audio_path) > 0:
+            audio_path = trimmed_audio_path
+
         probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
                                  "-of", "csv=p=0", audio_path], capture_output=True, text=True, timeout=15)
         audio_duration = float(probe.stdout.strip())
@@ -2117,6 +2121,7 @@ def _render_worker(cid: str, vid: str):
             prev = scenes[idx - 1]
             prev["_frames"] = (prev.get("_frames") or round(prev["dur"] * RENDER_FPS)) + transition_frames
 
+        overlay_opts = get_video_overlay_opts(cid, vid)
         stage("clips", 0, len(scenes))
         clip_paths = []
         for idx, s in enumerate(scenes):
@@ -2124,7 +2129,7 @@ def _render_worker(cid: str, vid: str):
                 raise RuntimeError("Abgebrochen (Stop angefordert)")
             clip_path = os.path.join(render_dir, f"{s['i']:03d}.mp4")
             img_path = os.path.join(v_out(cid, vid), s["file"])
-            _render_clip(img_path, s, clip_path, fps=RENDER_FPS)
+            _render_clip(img_path, s, clip_path, fps=RENDER_FPS, overlay_opts=overlay_opts)
             clip_paths.append(clip_path)
             s["clip_file"] = os.path.basename(clip_path)
             stage("clips", idx + 1, len(scenes))
@@ -2140,8 +2145,10 @@ def _render_worker(cid: str, vid: str):
         for idx, s in enumerate(scenes):
             path = clip_paths[idx]
             if idx in transition_at and merged_paths:
+                transition_type, _sfx = _transition_for_scene(s, idx)
+                s["transition_type"] = transition_type  # sichtbar in plan.json, zum Nachvollziehen
                 merged_path = os.path.join(render_dir, f"xfade_{s['i']:03d}.mp4")
-                _crossfade_clips(merged_paths[-1], path, merged_path, TRANSITION_DURATION_SEC)
+                _crossfade_clips(merged_paths[-1], path, merged_path, TRANSITION_DURATION_SEC, transition_type)
                 merged_paths[-1] = merged_path
                 transitions_done += 1
                 stage("transitions", transitions_done, len(transition_at))
@@ -2172,6 +2179,11 @@ def _render_worker(cid: str, vid: str):
                 if s["i"] in by_i:
                     by_i[s["i"]]["motion"] = s["motion"]
                     by_i[s["i"]]["clip_file"] = s["clip_file"]
+                    if "transition_type" in s:
+                        by_i[s["i"]]["transition_type"] = s["transition_type"]
+                    if s.get("start_aligned") is not None:
+                        by_i[s["i"]]["start_aligned"] = s["start_aligned"]
+                        by_i[s["i"]]["end_aligned"] = s["end_aligned"]
             fresh_plan["audio_duration"] = audio_duration
             fresh_plan["render"] = {"file": "final.mp4", "ts": int(time.time()), "checks": checks}
             json.dump(fresh_plan, open(plan_path, "w"), ensure_ascii=False, indent=1)
@@ -2228,7 +2240,8 @@ def _plan_generate_worker(cid: str, vid: str, text: str, wpm: float, sec: float)
         with _PLAN_JOBS_LOCK:
             PLAN_JOBS[key]["step"] = "Gruppiere Szenen nach Pacing …"
         scenes = segment_by_pacing(units, analysis.get("pacing", []), wpm, sec,
-                                    sequences=analysis.get("visual_sequences", []))
+                                    sequences=analysis.get("visual_sequences", []),
+                                    callouts=analysis.get("callouts", []))
 
         with _PLAN_JOBS_LOCK:
             PLAN_JOBS[key]["step"] = f"Schreibe Bild-Prompts für {len(scenes)} Szenen …"
@@ -2249,6 +2262,102 @@ def _plan_generate_worker(cid: str, vid: str, text: str, wpm: float, sec: float)
         import traceback; traceback.print_exc()
         with _PLAN_JOBS_LOCK:
             PLAN_JOBS[key] = {"running": False, "step": "Fehler", "error": str(e), "done": False}
+
+
+# ---------- Phase 4.5: Ein-Knopf-Orchestrator ----------
+# Kein neuer fachlicher Baustein -- verkettet nur die drei bereits einzeln getesteten
+# Jobs (Plan/Transkription -> Bilder -> Rendern) hintereinander in einem einzigen
+# Hintergrund-Thread, exakt dasselbe Server-seitige Job-Muster wie BATCH_JOBS/
+# RENDER_JOBS/PLAN_JOBS. Jede Etappe ruft dieselbe Worker-Funktion auf wie ihr eigener
+# bestehender Einzel-Button -- kein Zusatzrisiko, keine neue fachliche Logik.
+# {(cid, vid): {"running": bool, "stage": str, "stop_requested": bool, "error": str|None,
+#               "file": str|None}}
+PRODUCE_JOBS: dict = {}
+_PRODUCE_JOBS_LOCK = threading.Lock()
+
+
+def _produce_worker(cid: str, vid: str, text: str = "", wpm: float = 130.0, sec: float = 4.0):
+    """Plan (falls nötig) -> Alle Bilder generieren -> Rendern, nacheinander. Bevorzugt
+    einen bereits bestehenden Plan; sonst ein hochgeladenes Voice-over (Option A); sonst
+    das übergebene `text` (Option B, manueller Skript-Pfad). Bricht bei Fehler in einer
+    Etappe sofort ab, der Etappen-Name + Fehlergrund landen in PRODUCE_JOBS."""
+    key = (cid, vid)
+
+    def set_stage(stage):
+        with _PRODUCE_JOBS_LOCK:
+            if key in PRODUCE_JOBS:
+                PRODUCE_JOBS[key]["stage"] = stage
+
+    def stop_requested():
+        with _PRODUCE_JOBS_LOCK:
+            return PRODUCE_JOBS.get(key, {}).get("stop_requested", False)
+
+    def fail(stage, msg):
+        with _PRODUCE_JOBS_LOCK:
+            PRODUCE_JOBS[key] = {"running": False, "stage": stage, "stop_requested": False,
+                                  "error": msg, "file": None}
+        print(f"  [Produce] {cid}/{vid}: Fehler in Etappe '{stage}': {msg}", flush=True)
+
+    try:
+        plan_path = v_plan(cid, vid)
+        try:
+            has_plan = bool(json.load(open(plan_path)).get("scenes"))
+        except Exception:
+            has_plan = False
+
+        if not has_plan:
+            if stop_requested():
+                return fail("plan", "Abgebrochen (Stop angefordert)")
+            set_stage("plan")
+            if os.path.exists(v_audio(cid, vid)):
+                try:
+                    _transcribe_generate_worker(cid, vid, sec)
+                except Exception as e:
+                    return fail("plan", f"Transkription fehlgeschlagen: {e}")
+            elif text.strip():
+                with _PLAN_JOBS_LOCK:
+                    PLAN_JOBS[key] = {"running": True, "step": "Startet …", "error": None, "done": False}
+                _plan_generate_worker(cid, vid, text, wpm, sec)
+                with _PLAN_JOBS_LOCK:
+                    plan_err = PLAN_JOBS.get(key, {}).get("error")
+                if plan_err:
+                    return fail("plan", plan_err)
+            else:
+                return fail("plan", "Kein Voice-over hochgeladen und kein Skript eingegeben.")
+
+        if stop_requested():
+            return fail("images", "Abgebrochen (Stop angefordert)")
+        set_stage("images")
+        with _BATCH_JOBS_LOCK:
+            if BATCH_JOBS.get(key, {}).get("running"):
+                return fail("images", "Bild-Generierung läuft bereits für dieses Video.")
+        _batch_generate_worker(cid, vid)
+        with _BATCH_JOBS_LOCK:
+            batch_err = BATCH_JOBS.get(key, {}).get("error")
+        if batch_err:
+            return fail("images", batch_err)
+
+        if stop_requested():
+            return fail("render", "Abgebrochen (Stop angefordert)")
+        set_stage("render")
+        with _RENDER_JOBS_LOCK:
+            RENDER_JOBS[key] = {"running": True, "stop_requested": False, "stage": "startet",
+                                 "done": 0, "total": 0, "error": None, "file": None}
+        _render_worker(cid, vid)
+        with _RENDER_JOBS_LOCK:
+            render_state = dict(RENDER_JOBS.get(key, {}))
+        if render_state.get("error"):
+            return fail("render", render_state["error"])
+
+        with _PRODUCE_JOBS_LOCK:
+            PRODUCE_JOBS[key] = {"running": False, "stage": "fertig", "stop_requested": False,
+                                  "error": None, "file": render_state.get("file")}
+        print(f"  [Produce] {cid}/{vid}: fertig → {render_state.get('file')}", flush=True)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        with _PRODUCE_JOBS_LOCK:
+            cur_stage = PRODUCE_JOBS.get(key, {}).get("stage", "unbekannt")
+        fail(cur_stage, str(e))
 
 
 def gen_image(scene_prompt, master, out_path, char_refs=None):
@@ -2417,56 +2526,6 @@ def make_t2v_prompt(scene_text: str, scene_i: int, total_scenes: int,
             f"Scene illustrating: {scene_text[:80]}. "
             f"Camera slow zoom-in, {story_phase} pacing."
         )
-
-T2V_MODEL = "grok-imagine/text-to-video"  # confirmed working on KIE
-
-def gen_t2v(video_prompt: str, duration: int = 6) -> dict:
-    """Submit KIE text-to-video job. Returns {ok, task_id} or {ok:False, error}."""
-    hdrs = {"Authorization": f"Bearer {kie_key()}", "Content-Type": "application/json"}
-    body = {
-        "model": T2V_MODEL,
-        "input": {
-            "prompt":       video_prompt,
-            "duration":     max(6, min(30, duration)),
-            "resolution":   "720p",
-            "aspect_ratio": "16:9",
-            "mode":         "normal",
-        },
-    }
-    try:
-        req = urllib.request.Request(f"{KIE_API}/createTask",
-                                     data=json.dumps(body).encode(), headers=hdrs)
-        with urllib.request.urlopen(req, timeout=30) as r:
-            resp = json.load(r)
-    except urllib.error.HTTPError as e:
-        return {"ok": False, "error": f"KIE HTTP {e.code}: {e.read().decode()[:300]}"}
-    if resp.get("code") != 200:
-        return {"ok": False, "error": f"KIE: {resp.get('msg', str(resp))}"}
-    return {"ok": True, "task_id": resp["data"]["taskId"]}
-
-def poll_kie_video(task_id: str, timeout: int = 600) -> dict:
-    """Poll KIE until task succeeds or fails. Returns {ok, video_url} or {ok:False, error}."""
-    hdrs = {"Authorization": f"Bearer {kie_key()}"}
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        time.sleep(8)
-        try:
-            req = urllib.request.Request(f"{KIE_API}/recordInfo?taskId={task_id}", headers=hdrs)
-            with urllib.request.urlopen(req, timeout=15) as r:
-                info = json.load(r)["data"]
-            state = info.get("state", "")
-            pct   = info.get("completePercent", 0) or 0
-            print(f"  [T2V] {state} ({pct}%)", flush=True)
-            if state == "success":
-                result = json.loads(info.get("resultJson", "{}"))
-                url = result.get("resultUrls", [""])[0]
-                return {"ok": True, "video_url": url}
-            elif state == "fail":
-                return {"ok": False, "error": f"KIE fail: {info.get('failMsg', 'unknown')}"}
-        except Exception as e:
-            print(f"  [T2V] poll error: {e}", flush=True)
-    return {"ok": False, "error": "Timeout"}
-
 
 VEO_API = "https://api.kie.ai/api/v1/veo"
 MAX_CHAIN_LENGTH = 4  # max consecutive extends before forcing a fresh anchor shot
@@ -2645,6 +2704,148 @@ def gen_video(scene_url: str, video_prompt: str, duration: int = 6, char_ref_url
     return {"ok": False, "error": "KIE Video Timeout (>6 min)"}
 
 
+# ---------- Phase 3: lokale Wort-Timestamps via faster-whisper ----------
+# Läuft in einer isolierten venv (.venv_whisper/), per subprocess aufgerufen --
+# genau wie ffmpeg ein externes Binary ist, bleibt dashboard.py selbst
+# stdlib-only. Ersetzt den ursprünglich geplanten ElevenLabs-Scribe-Weg (über
+# KIE live getestet, Task blieb dauerhaft auf "waiting" haengen, siehe
+# ARCHITECTURE.md Abschnitt 16). Gemini (oben, transcribe_and_segment) bleibt
+# für die grobe Story-Segmentierung zuständig -- es liefert nur keine
+# verlässlichen Wort-Zeitstempel, dafür ist dieser Pfad da.
+WHISPER_VENV_PY = os.path.join(HERE, ".venv_whisper", "bin", "python3")
+WHISPER_SCRIPT = os.path.join(HERE, "whisper_transcribe.py")
+
+
+def transcribe_words_whisper(audio_path, language=None):
+    """Lokale Wort-Timestamp-Transkription. Gibt
+    {"text","language","language_probability","words":[{"word","start","end"}]} zurück."""
+    if not os.path.exists(WHISPER_VENV_PY):
+        raise RuntimeError(
+            "Whisper-venv fehlt (.venv_whisper/) -- einmalig einrichten: "
+            "python3 -m venv .venv_whisper && ./.venv_whisper/bin/pip install faster-whisper"
+        )
+    args = [WHISPER_VENV_PY, WHISPER_SCRIPT, audio_path, language or "auto"]
+    result = subprocess.run(args, capture_output=True, text=True, timeout=900)
+    if result.returncode != 0:
+        raise RuntimeError(f"Whisper-Transkription fehlgeschlagen: {result.stderr[-2000:]}")
+    data = json.loads(result.stdout)
+    if "error" in data:
+        raise RuntimeError(data["error"])
+    return data
+
+
+def align_scenes_to_whisper(scenes: list, whisper_words: list) -> None:
+    """Sets `start_aligned`/`end_aligned` on each scene in place, by sequentially
+    consuming `len(scene["text"].split())` words per scene from the Whisper word list.
+
+    Gemini's per-scene `text` and Whisper's word list are both transcriptions of the
+    SAME audio in the SAME order, so word-count-based advancement is enough — no fuzzy
+    text matching needed. This also tolerates the two engines disagreeing on individual
+    words (e.g. Whisper hearing "Wortszeitstempel" where Gemini heard "Wort-Zeitstempel")
+    since only the word COUNT is used to advance the pointer, never the text itself."""
+    wi = 0
+    n = len(whisper_words)
+    for s in scenes:
+        words_in_scene = len(s.get("text", "").split())
+        if words_in_scene == 0 or wi >= n:
+            continue
+        start_idx = wi
+        end_idx = min(wi + words_in_scene, n) - 1
+        s["start_aligned"] = whisper_words[start_idx]["start"]
+        s["end_aligned"] = whisper_words[end_idx]["end"]
+        wi = end_idx + 1
+
+
+# ---------- Pausen-Kürzung (auf Wunsch des Nutzers, nach Phase 3) ----------
+# Nutzt genau die Whisper-Wort-Zeitstempel, die Phase 3 ohnehin schon berechnet -- die
+# Lücke zwischen Wort N Ende und Wort N+1 Start IST die Sprechpause. Nur der Teil einer
+# Pause, der über MAX_PAUSE_SEC hinausgeht, wird herausgeschnitten -- ein kurzer,
+# natürlicher Atem-Abstand bleibt erhalten, nur die toten, langen Stellen (z.B. 2-3s
+# zwischen Sätzen in einem 8-Minuten-Voiceover) verschwinden.
+MAX_PAUSE_SEC = 0.3
+
+
+def _compute_pause_trims(words: list, max_pause: float = MAX_PAUSE_SEC) -> list:
+    """Returns [(trim_start, trim_end), ...] -- the EXCESS portion of every gap between
+    consecutive words that's longer than max_pause. Each interval lies entirely inside
+    a silent gap, never overlapping an actual spoken word, so cutting it out can never
+    clip speech."""
+    trims = []
+    for i in range(len(words) - 1):
+        gap_start = words[i]["end"]
+        gap_end = words[i + 1]["start"]
+        if gap_end - gap_start > max_pause:
+            trims.append((gap_start + max_pause, gap_end))
+    return trims
+
+
+def _trim_audio_pauses(audio_path: str, trims: list, out_path: str) -> None:
+    """Cuts the given (start,end) intervals out of audio_path via ffmpeg's atrim+concat,
+    producing out_path with those silent stretches removed. Lossless WAV intermediate --
+    this is consumed immediately by the render pipeline, not user-facing, so no reason
+    to re-encode voice audio through a lossy codec twice."""
+    if not trims:
+        shutil.copy(audio_path, out_path)
+        return
+    audio_duration = _clip_duration_sec(audio_path)
+    keep_intervals, cursor = [], 0.0
+    for (a, b) in trims:
+        if a > cursor:
+            keep_intervals.append((cursor, a))
+        cursor = b
+    if cursor < audio_duration:
+        keep_intervals.append((cursor, audio_duration))
+
+    filter_parts, labels = [], []
+    for idx, (s, e) in enumerate(keep_intervals):
+        label = f"a{idx}"
+        filter_parts.append(f"[0:a]atrim=start={s}:end={e},asetpts=PTS-STARTPTS[{label}]")
+        labels.append(f"[{label}]")
+    filter_complex = ";".join(filter_parts) + f";{''.join(labels)}concat=n={len(labels)}:v=0:a=1[outa]"
+    cmd = ["ffmpeg", "-y", "-i", audio_path, "-filter_complex", filter_complex, "-map", "[outa]", out_path]
+    result = subprocess.run(cmd, capture_output=True, timeout=180)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg Pausen-Trimmen fehlgeschlagen: {result.stderr.decode(errors='replace')[-300:]}")
+
+
+def _adjust_words_for_trims(words: list, trims: list) -> list:
+    """Re-expresses each word's start/end on the TRIMMED audio's timeline -- every
+    timestamp loses the cumulative duration of every trim interval that ends at or
+    before it. A trim interval never falls strictly inside a word's own [start,end]
+    (trims only exist inside inter-word silence), so one cumulative offset per word
+    is exact for both its start and end."""
+    adjusted = []
+    for w in words:
+        cum = sum(b - a for (a, b) in trims if b <= w["start"])
+        adjusted.append({"word": w["word"], "start": w["start"] - cum, "end": w["end"] - cum})
+    return adjusted
+
+
+# ---------- Phase 4.4: Text-Overlays (Untertitel/Callouts/Kapitel-Titel) ----------
+# Dieselbe isolierte venv wie Whisper oben, jetzt auch für Pillow -- der installierte
+# ffmpeg-Build hat kein freetype/fontconfig kompiliert (`drawtext` daher nicht
+# verfügbar; eine Neuinstallation mit ffmpeg-full hätte 47 neue Abhängigkeiten und ein
+# Risiko für die bereits getestete Encoder-/Sync-Pipeline bedeutet). Stattdessen: Text
+# wird als transparentes PNG per Pillow gerendert, dann per ffmpegs overlay/fade-Filter
+# aufs Ken-Burns-Bild gelegt -- beide Filter sind in jedem Standard-Build enthalten.
+OVERLAY_SCRIPT = os.path.join(HERE, "render_overlay.py")
+
+
+def render_text_overlay_png(out_path: str, width: int, height: int, style: str, text: str) -> None:
+    """style: 'caption' | 'callout' | 'chapter'. Text wird base64-kodiert übergeben,
+    damit beliebige Satzzeichen/Unicode nicht per Shell-Escaping durchgereicht werden müssen."""
+    if not os.path.exists(WHISPER_VENV_PY):
+        raise RuntimeError(
+            "Helfer-venv fehlt (.venv_whisper/) -- einmalig einrichten: "
+            "python3 -m venv .venv_whisper && ./.venv_whisper/bin/pip install faster-whisper Pillow"
+        )
+    text_b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    args = [WHISPER_VENV_PY, OVERLAY_SCRIPT, out_path, str(width), str(height), style, text_b64]
+    result = subprocess.run(args, capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        raise RuntimeError(f"Overlay-Rendering fehlgeschlagen: {result.stderr[-500:]}")
+
+
 def transcribe_and_segment(local_path, mime_type, sec_per_img):
     """Transcribe audio via KIE.ai Gemini 2.5 Flash (inline base64 data URI)."""
     with open(local_path, "rb") as f:
@@ -2668,6 +2869,69 @@ def transcribe_and_segment(local_path, mime_type, sec_per_img):
     # strip possible markdown code fences
     txt = re.sub(r"```[a-z]*\n?", "", txt).strip()
     return json.loads(txt)
+
+
+def _transcribe_generate_worker(cid: str, vid: str, sec: float) -> dict:
+    """Audio -> Plan, extracted out of the /api/transcribe HTTP handler so it's a
+    standalone function like every other long-running action in this project
+    (_plan_generate_worker, _batch_generate_worker, _render_worker) -- lets the
+    one-button orchestrator (_produce_worker) call this exact same logic instead of
+    duplicating it. Raises on failure; caller decides how to report that (HTTP error
+    response vs. PRODUCE_JOBS error field)."""
+    meta = json.load(open(v_audio(cid, vid)))
+    # Clear old generated files when transcribing new audio.
+    out_dir = v_out(cid, vid)
+    for f in os.listdir(out_dir):
+        if f.endswith((".jpg", ".png", ".mp4")):
+            try:
+                os.remove(os.path.join(out_dir, f))
+                print(f"  [Transcribe] Gelösche alte Datei: {f}", flush=True)
+            except: pass
+
+    mb = os.path.getsize(meta["path"]) / 1024 / 1024
+    tx(1, f"Sende Audio an KIE ({mb:.1f} MB) …")
+    beats = transcribe_and_segment(meta["path"], meta["mime"], sec)
+    tx(2, f"{len(beats)} Szenen transkribiert — baue Szenen …")
+
+    scenes = []
+    for i, b in enumerate(beats):
+        dur = (beats[i+1]["start"] - b["start"]) if i+1 < len(beats) else sec
+        scenes.append({"i": i, "start": round(float(b["start"]), 1), "dur": round(float(dur), 1),
+                       "text": b["text"], "t": fmt_t(float(b["start"])),
+                       "file": None, "status": "geplant", "prompt": ""})
+
+    # Whisper-Alignment passiert bewusst NICHT hier, sondern erst in _render_worker
+    # (Stage "timing") -- dort liegt so oder so schon das hochgeladene Voice-over vor,
+    # UNABHÄNGIG davon ob dieser Plan hier (Audio-Transkription) oder der manuelle
+    # Skript-Pfad (_plan_generate_worker) die Szenen-Texte geliefert hat. Ein einziger
+    # Alignment-Punkt statt zwei, siehe ARCHITECTURE.md Abschnitt 16.5.
+    tx(3, f"Analysiere Story-Struktur ({len(scenes)} Szenen) …")
+    analysis = analyze_script([s["text"] for s in scenes])
+    # This path's scenes are already 1:1 with the beats just analyzed (no
+    # grouping/splitting like the manual-script path) — direct index assignment.
+    _apply_visual_sequences_direct(scenes, analysis.get("visual_sequences", []))
+    pacing_by_beat = {p.get("beat"): p.get("label") for p in analysis.get("pacing", [])
+                      if isinstance(p, dict) and p.get("label") in ("calm", "normal", "punchy")}
+    callout_by_beat = {c.get("beat"): c.get("text") for c in analysis.get("callouts", [])
+                       if isinstance(c, dict) and c.get("text")}
+    for s in scenes:
+        s["pacing"] = pacing_by_beat.get(s["i"], "normal")
+        if s["i"] in callout_by_beat:
+            s["callout"] = callout_by_beat[s["i"]]
+
+    tx(4, "Schreibe Bild-Prompts …")
+    prompts = visual_prompts(scenes, analysis)
+    for s, pr in zip(scenes, prompts):
+        s["prompt"] = pr["prompt"]; s["concrete_entity"] = pr["concrete_entity"]
+    # video_prompt stays empty — only generated on demand per scene, see /api/plan comment
+    for s in scenes:
+        s["video_prompt"] = ""
+        s["phase"] = story_phase(s["i"], len(scenes))
+    tx(4, f"Fertig — {len(scenes)} Szenen bereit ✓")
+
+    out = {"scenes": scenes, "sec": sec, "source": "audio", "characters": analysis.get("characters", [])}
+    json.dump(out, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
+    return out
 
 
 # ---------- HTTP ----------
@@ -2722,6 +2986,10 @@ class H(BaseHTTPRequestHandler):
             with _RENDER_JOBS_LOCK:
                 state = RENDER_JOBS.get((cid, vid))
             return self._send(200, state or {"running": False})
+        if p == "/api/produce_status":
+            with _PRODUCE_JOBS_LOCK:
+                state = PRODUCE_JOBS.get((cid, vid))
+            return self._send(200, state or {"running": False})
         if p == "/api/video_meta":
             meta = load_v_meta(cid, vid)
             meta["has_thumbnail"] = os.path.exists(os.path.join(v_out(cid, vid), "thumbnail.jpg"))
@@ -2732,6 +3000,8 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, {"master": read_master(cid)})
         if p == "/api/image_model":
             return self._send(200, {"model": get_video_image_model(cid, vid), "options": list(VALID_IMAGE_MODELS)})
+        if p == "/api/overlay_opts":
+            return self._send(200, get_video_overlay_opts(cid, vid))
         if p == "/api/plan":
             try:    return self._send(200, json.load(open(v_plan(cid, vid))))
             except: return self._send(200, {"scenes": []})
@@ -2844,6 +3114,10 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/image_model":
             if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
             set_video_image_model(cid, vid, d.get("model", "nano-banana-2"))
+            return self._send(200, {"ok": True})
+        if p == "/api/overlay_opts":
+            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
+            set_video_overlay_opts(cid, vid, d.get("opts", {}))
             return self._send(200, {"ok": True})
 
         # ── Script generator (global, no channel needed) ──────────────────────
@@ -3082,6 +3356,22 @@ class H(BaseHTTPRequestHandler):
             open(local_path, "wb").write(raw)
             json.dump({"path": local_path, "mime": d.get("mime", "audio/mpeg"), "name": d.get("name", "")},
                       open(v_audio(cid, vid), "w"))
+            # A fresh recording invalidates any previously trimmed audio and word-
+            # alignment computed against the OLD file -- both would silently produce
+            # wrong timing/cuts if left in place (the pause-trim + start_aligned/
+            # end_aligned re-derive automatically at the next render, see _render_worker).
+            trimmed_path = os.path.join(v_uploads(cid, vid), "voiceover_trimmed.wav")
+            if os.path.exists(trimmed_path):
+                os.remove(trimmed_path)
+            try:
+                with _PLAN_WRITE_LOCK:
+                    plan = json.load(open(v_plan(cid, vid)))
+                    for s in plan.get("scenes", []):
+                        s.pop("start_aligned", None)
+                        s.pop("end_aligned", None)
+                    json.dump(plan, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
+            except Exception:
+                pass
             print(f"  [Audio] {os.path.basename(local_path)} ({len(raw)//1024} KB)", flush=True)
             return self._send(200, {"ok": True, "size": len(raw), "name": d.get("name", "")})
 
@@ -3092,53 +3382,16 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/transcribe":
             sec = float(d.get("sec", 4))
             if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
-            try:    meta = json.load(open(v_audio(cid, vid)))
-            except: return self._send(400, {"error": "Keine Audio-Datei hochgeladen."})
+            if not os.path.exists(v_audio(cid, vid)):
+                return self._send(400, {"error": "Keine Audio-Datei hochgeladen."})
             TX_STATUS["running"] = True; TX_STATUS["error"] = ""
-            # Clear old generated files when transcribing new audio
-            out = v_out(cid, vid)
-            for f in os.listdir(out):
-                if f.endswith((".jpg", ".png", ".mp4")):
-                    try:
-                        os.remove(os.path.join(out, f))
-                        print(f"  [Transcribe] Gelösche alte Datei: {f}", flush=True)
-                    except: pass
             try:
-                mb = os.path.getsize(meta["path"]) / 1024 / 1024
-                tx(1, f"Sende Audio an KIE ({mb:.1f} MB) …")
-                beats = transcribe_and_segment(meta["path"], meta["mime"], sec)
-                tx(2, f"{len(beats)} Szenen transkribiert — baue Szenen …")
+                out = _transcribe_generate_worker(cid, vid, sec)
             except Exception as e:
                 import traceback; traceback.print_exc()
                 TX_STATUS["running"] = False; TX_STATUS["error"] = str(e)
                 return self._send(500, {"error": f"Transkription fehlgeschlagen: {e}"})
-            scenes = []
-            for i, b in enumerate(beats):
-                dur = (beats[i+1]["start"] - b["start"]) if i+1 < len(beats) else sec
-                scenes.append({"i": i, "start": round(float(b["start"]), 1), "dur": round(float(dur), 1),
-                               "text": b["text"], "t": fmt_t(float(b["start"])),
-                               "file": None, "status": "geplant", "prompt": ""})
-            tx(3, f"Analysiere Story-Struktur ({len(scenes)} Szenen) …")
-            analysis = analyze_script([s["text"] for s in scenes])
-            # This path's scenes are already 1:1 with the beats just analyzed (no
-            # grouping/splitting like the manual-script path) — direct index assignment.
-            _apply_visual_sequences_direct(scenes, analysis.get("visual_sequences", []))
-            pacing_by_i = {p.get("beat"): p.get("label") for p in analysis.get("pacing", [])
-                           if isinstance(p, dict) and p.get("label") in ("calm", "normal", "punchy")}
-            for s in scenes:
-                s["pacing"] = pacing_by_i.get(s["i"], "normal")
-            tx(4, "Schreibe Bild-Prompts …")
-            prompts = visual_prompts(scenes, analysis)
-            for s, pr in zip(scenes, prompts):
-                s["prompt"] = pr["prompt"]; s["concrete_entity"] = pr["concrete_entity"]
-            # video_prompt stays empty — only generated on demand per scene, see /api/plan comment
-            for s in scenes:
-                s["video_prompt"] = ""
-                s["phase"] = story_phase(s["i"], len(scenes))
-            tx(4, f"Fertig — {len(scenes)} Szenen bereit ✓")
             TX_STATUS["running"] = False
-            out = {"scenes": scenes, "sec": sec, "source": "audio", "characters": analysis.get("characters", [])}
-            json.dump(out, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
             return self._send(200, out)
 
         # ── Character refs ────────────────────────────────────────────────────
@@ -3219,6 +3472,37 @@ class H(BaseHTTPRequestHandler):
             key = (cid, vid)
             with _RENDER_JOBS_LOCK:
                 if key in RENDER_JOBS:
+                    RENDER_JOBS[key]["stop_requested"] = True
+            return self._send(200, {"ok": True})
+
+        if p == "/api/produce_start":
+            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
+            key = (cid, vid)
+            text = d.get("text", ""); wpm = float(d.get("wpm", 130)); sec = float(d.get("sec", 4))
+            with _PRODUCE_JOBS_LOCK:
+                if PRODUCE_JOBS.get(key, {}).get("running"):
+                    return self._send(200, {"ok": True, "already_running": True})
+                # Same atomic "set running=True before the thread exists" fix as
+                # generate_all_start/render_start above.
+                PRODUCE_JOBS[key] = {"running": True, "stage": "startet", "stop_requested": False,
+                                      "error": None, "file": None}
+            threading.Thread(target=_produce_worker, args=(cid, vid, text, wpm, sec), daemon=True).start()
+            return self._send(200, {"ok": True, "already_running": False})
+
+        if p == "/api/produce_stop":
+            key = (cid, vid)
+            with _PRODUCE_JOBS_LOCK:
+                if key in PRODUCE_JOBS:
+                    PRODUCE_JOBS[key]["stop_requested"] = True
+            # Also forward the stop into whichever sub-job is CURRENTLY running --
+            # _produce_worker only checks its own stop_requested BETWEEN stages, so a
+            # stage already in flight (image batch or render) needs its own flag set
+            # too, otherwise "Stop" would silently wait for that stage to finish first.
+            with _BATCH_JOBS_LOCK:
+                if BATCH_JOBS.get(key, {}).get("running"):
+                    BATCH_JOBS[key]["stop_requested"] = True
+            with _RENDER_JOBS_LOCK:
+                if RENDER_JOBS.get(key, {}).get("running"):
                     RENDER_JOBS[key]["stop_requested"] = True
             return self._send(200, {"ok": True})
 

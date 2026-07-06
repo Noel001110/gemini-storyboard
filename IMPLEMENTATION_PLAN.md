@@ -8,6 +8,10 @@ Stand: Juli 2026. Dieses Dokument ist **selbsterklärend** — es setzt keine vo
 
 ---
 
+**Errata (nachträglich, Stand siehe `ARCHITECTURE.md` Abschnitt 16):** Überall in diesem Dokument, wo **„ElevenLabs Scribe"** als Quelle für Wort-Timestamps in Phase 3 genannt wird, gilt das als **überholt**. Live-Test von `elevenlabs/speech-to-text` über KIE (echter Task, echte Credits) blieb dauerhaft im Status `"waiting"` hängen, ohne je ein Ergebnis zu liefern — das Modell ist über KIE nicht nutzbar. Gemini wurde als Alternative geprüft und verworfen, da es bei präzisen Timestamps halluziniert (für reinen Transkript-Text ist es gut, für "wann genau wurde welches Wort gesagt" nicht verlässlich). **Ersetzt durch: lokales `faster-whisper`** (Modell "small", `word_timestamps=True`) — läuft offline, ohne Rate-Limit, ohne laufende Kosten, mit ~500 MB einmaligem Modell-Download und ~1 GB RAM-Bedarf während einer kurzen Transkriptions-Burst-Phase. Jede Erwähnung von „Scribe"/`transcribe_words_scribe` unten ist im Sinne dieser Ersetzung zu lesen.
+
+---
+
 ## 0. Anleitung für Claude Code
 
 1. **Lies `dashboard.py` und `dashboard.html` vollständig, bevor du irgendetwas änderst.** Die Zeilenangaben in diesem Dokument stammen aus einem Repo-Snapshot (GitHub `main`, Juli 2026) und können vom lokalen Stand leicht abweichen — nutze sie als *Orientierung*, verifiziere Funktionsnamen als *Anker* (siehe Abschnitt 1).
@@ -274,7 +278,7 @@ ffmpeg -y -i silent.mp4 -i voiceover.mp3 \
 
 **Sync-Invariante (kritisch):** Die Summe aller Szenen-`dur` muss der echten Audiolänge entsprechen, sonst driftet das Bild gegen den Ton. Vor dem Rendern: `audio_duration` per `ffprobe` ermitteln (`ffprobe -v error -show_entries format=duration -of csv=p=0 voiceover.mp3`), dann **alle `dur` linear normieren**: `faktor = audio_duration / sum(dur)`, jede `dur *= faktor`. Die Differenz *nur* auf die letzte Szene aufzuschlagen ist zu vermeiden — ein Bild, das plötzlich 2 s länger steht als der Rest, fällt sichtbar auf. Lineare Normierung verteilt die (typisch kleine) Korrektur unsichtbar über alle Clips. Diese Korrektur passiert einmalig direkt vor dem Rendern, nicht im gespeicherten Plan.
 
-**Grenze der geschätzten Timeline (ehrlich benannt):** Lineare Normierung hält **Anfang und Ende** synchron, garantiert aber nicht die **Mitte** — weicht die wpm-Schätzung stellenweise stark von der echten Sprechgeschwindigkeit ab, kann der Schnitt innerhalb des Videos gegen die Stimme verrutschen. Das ist die inhärente Grenze der geschätzten Timeline und die eigentliche Motivation, später Wort-Timestamps (Scribe) nachzurüsten (Abschnitt 9.5). Für V1 ist die Normierung die beste verfügbare Methode.
+**Grenze der geschätzten Timeline (ehrlich benannt):** Lineare Normierung hält **Anfang und Ende** synchron, garantiert aber nicht die **Mitte** — weicht die wpm-Schätzung stellenweise stark von der echten Sprechgeschwindigkeit ab, kann der Schnitt innerhalb des Videos gegen die Stimme verrutschen. Das ist die inhärente Grenze der geschätzten Timeline und die eigentliche Motivation, später Wort-Timestamps (lokal via `faster-whisper`, siehe Errata oben) nachzurüsten (Abschnitt 9, Punkt 5). Für V1 ist die Normierung die beste verfügbare Methode.
 
 ### 3.7 Datenmodell-Erweiterung (`plan.json`, additiv, Fortsetzung von Abschnitt 2.3)
 
@@ -370,7 +374,7 @@ Dieses `final_audio.mp3` ersetzt dann im Mux-Schritt (3.6) die rohe `voiceover.m
 - Woosh/Transition-SFX: an jeder Szene mit `seq_pos == 0` **und** Vorgänger aus anderer `seq_id` (echter Sequenz-/Szenenwechsel) — die Info liefert Feature A bereits.
 - Riser/Impact: an Kapitelgrenzen (falls Kapitel-Info im Skript/Plan vorhanden) oder an den stärksten `emotional_arc`-Wechseln aus `analyze_script`.
 - Zeitpunkt = `scene["start"]` (bzw. `start_aligned` ab Phase 3) × 1000 ms für `adelay`.
-- **Grob schon in Phase 2.5 möglich; frame-genau erst mit Phase 3** (Scribe). Sound-Design und Scribe verstärken sich — deshalb Phase 2.5 grob, Phase 4 tight.
+- **Grob schon in Phase 2.5 möglich; frame-genau erst mit Phase 3** (Whisper-Wort-Timestamps). Sound-Design und Whisper-Timing verstärken sich — deshalb Phase 2.5 grob, Phase 4 tight.
 
 **Trade-off:** Ein zusätzlicher Audio-Pass vor dem finalen Video-Mux. Vernachlässigbar (Audio-Only-FFmpeg ist schnell). Vorteil: der Video-Mux (3.6) bleibt unverändert, er bekommt nur eine andere Audio-Datei.
 
@@ -488,32 +492,23 @@ Größter „klingt-professionell"-Effekt nach dem Easing. Setzt nur ein lauffä
 
 **Phase 3 — Frame-genaues Timing (mittel, hoher Nutzen, Voraussetzung für tighten Schnitt)**
 Behebt die „Mitte driftet"-Grenze der geschätzten Timeline (3.6) und macht wort-/beatgenaue Schnitte und SFX überhaupt erst möglich.
-- 3.1 Wort-Timestamps via ElevenLabs Scribe über KIE (`transcribe_words_scribe`), Alignment Skript↔Transkript, `start_aligned`/`end_aligned` in `plan.json`.
-- 3.2 Renderer bevorzugt `*_aligned`-Werte; SFX aus Phase 2.5 rasten jetzt auf echte Wortgrenzen/Betonungen statt auf geschätzte Zeiten.
-**Definition of Done:** Schnitte sitzen hörbar auf Satzenden/Betonungen statt „ungefähr".
+
+**Update (siehe Errata oben):** Ursprünglich als „ElevenLabs Scribe über KIE" geplant — live getestet und verworfen (Task blieb dauerhaft auf `"waiting"` hängen, 0.12 Credits verbraucht, kein Ergebnis). Gemini als Alternative verworfen (halluziniert bei Timestamps, für reinen Transkript-Text aber ok). Stattdessen: **lokales `faster-whisper`**, Modell "small", `word_timestamps=True` — offline, kostenlos nach Setup, kein Rate-Limit, ~500 MB Modell-Download, ~1 GB RAM während der kurzen Transkriptions-Burst-Phase (kein Dauerlast).
+
+- 3.1 `faster-whisper` als Abhängigkeit installieren, lokale Transkriptionsfunktion mit `word_timestamps=True` bauen (nimmt die bereits hochgeladene Voiceover-Datei, kein neuer Upload-Schritt nötig — die Datei liegt durch den bestehenden `/api/transcribe`-Flow schon lokal vor).
+- 3.2 Alignment Skript↔Transkript: Whisper liefert Wort-für-Wort-Timestamps für das, was tatsächlich gesagt wurde; das bestehende Skript/die Szenen-Texte werden pro Szene den passenden Whisper-Wörtern zugeordnet (sequenzielles Fenster-Matching, da Reihenfolge identisch ist — kein Fuzzy-Matching nötig, nur Wortanzahl-Verschiebung durch evtl. Whisper-Transkriptionsfehler abfangen). Ergebnis: `start_aligned`/`end_aligned` in `plan.json`.
+- 3.3 Renderer bevorzugt `*_aligned`-Werte, falls vorhanden (sonst Fallback auf die geschätzte Timeline aus Phase 2); SFX aus Phase 2.5 rasten jetzt auf echte Wortgrenzen/Betonungen statt auf geschätzte Zeiten.
+**Definition of Done:** Ein echtes Voiceover wird lokal per Whisper transkribiert, `plan.json` enthält `start_aligned`/`end_aligned` pro Szene, und Schnitte sitzen hörbar auf Satzenden/Betonungen statt „ungefähr".
 
 **Phase 4 — Micro-Dynamics & Übergänge (gemischt, meist billig)**
-- 4.1 `xfade`-Übergänge mit Easing (Whip-Pan/Slide/Wipe) an Sequenz-/Kapitelgrenzen statt überall hartem Schnitt (3.11 gilt auch für `xfade`).
-- 4.2 Sound-Design-getriebene Akzente (Glitch/Impact) auf harte Schnitte, jetzt frame-genau dank Phase 3.
+- 4.1 ✅ **erledigt** (siehe `ARCHITECTURE.md` Abschnitt 15.1) — `xfade`-Übergänge an Sequenz-/Szenengrenzen statt überall hartem Schnitt, ABER nicht als eigene Easing-Formel: ffmpegs `xfade`-Filter bringt bereits 58 fertige Übergangstypen mit, kuratiert zu drei Familien (`fade`/`wipe`/`smooth`), Auswahl regelbasiert über das vorhandene `pacing`-Feld (`TRANSITION_LIBRARY`/`_transition_for_scene` in dashboard.py).
+- 4.2 ✅ **erledigt** — Impact-Akzent auf harten (nicht-übergangs-) Schnitten bei `pacing=="punchy"`, frame-genau auf `start_aligned` (Whisper) statt geschätzt. Nutzt das seit Phase 2.5 ungenutzte `impact`-SFX-Asset. Zusätzlich: Übergangs-SFX (`whoosh`/keins) ist jetzt an dieselbe Auswahlfunktion gekoppelt wie der visuelle Übergangstyp, nicht mehr unabhängig fest verdrahtet.
 - 4.3 Reload-Wiederaufnahme für Render-Jobs in `openVideo()` (4.5), mehrstufige Fortschrittsanzeige (4.7).
-- 4.4 Optional `drawtext`-Text-/Zahlen-Overlays mit Ein-/Ausblenden.
+- 4.4 ✅ **erledigt** (siehe `ARCHITECTURE.md` Abschnitt 18) — Text-Overlays (Untertitel, Zahlen-Callouts, Kapitel-Titel) mit Ein-/Ausblenden, alle drei standardmäßig aus. Abweichung vom Plan: nicht `drawtext` (der installierte ffmpeg-Build hat kein freetype/fontconfig kompiliert), sondern Pillow-gerenderte PNGs + ffmpegs `overlay`/`fade`-Filter, isolierte venv wie Phase 3.
 
-**Phase 4.5 — "Ein-Knopf"-Orchestrator (war schon vor diesem Dokument geplant, hier nachgetragen)**
-Ursprünglicher Nutzerwunsch: „Skript rein → auf einen Klick alle Bilder generieren, zusammenschneiden, Sound drüber, fertiges Video." Kein neuer Baustein, sondern ein dünner Job, der die bereits existierenden Einzel-Jobs verkettet:
-```python
-PRODUCE_JOBS = {}                     # (cid,vid) -> {stage, done, total, error}
-_PRODUCE_JOBS_LOCK = threading.Lock()
-
-def _produce_worker(cid, vid):
-    # stage "plan":    Plan erstellen, falls noch keiner existiert (bestehende Logik)
-    # stage "images":  _batch_generate_worker(cid, vid) direkt aufrufen (kein neuer Thread nötig,
-    #                  _produce_worker läuft ja schon in einem eigenen Daemon-Thread)
-    # stage "timing":  Scribe-Alignment, falls Phase 3 aktiv und Nutzer es angefordert hat
-    # stage "render":  _render_worker(cid, vid) direkt aufrufen
-    # bei jedem Stage-Wechsel: PRODUCE_JOBS[key] aktualisieren
-```
-Routen: `POST /api/produce_start`, `GET /api/produce_status` — exakt das bestehende Muster. **Setzt voraus, dass Phase 1 + 2 (mindestens) einzeln funktionieren** — der Orchestrator ruft nur bereits getestete Bausteine nacheinander auf, er enthält selbst keine neue fachliche Logik. Frontend: ein zusätzlicher „🚀 Alles auf einmal"-Button neben dem bisherigen „🎬 Video rendern", mit mehrstufiger Fortschrittsanzeige (Plan → Bilder → Timing → Render).
-**Definition of Done:** Ein Klick von einem frischen, leeren Video (nur Skript + Audio hochgeladen) führt ohne weiteres Zutun zu einem fertigen `final.mp4`.
+**Phase 4.5 — "Ein-Knopf"-Orchestrator — ✅ erledigt (siehe `ARCHITECTURE.md` Abschnitt 17)**
+Ursprünglicher Nutzerwunsch: „Skript oder Audio rein → auf einen Klick alle Bilder generieren, zusammenschneiden, Sound drüber, fertiges Video." Umgesetzt exakt wie hier skizziert, mit einer Abweichung: keine eigene `"timing"`-Stufe im Orchestrator — Whisper-Alignment läuft bereits automatisch INNERHALB der `"render"`-Stufe (siehe Abschnitt 16.5-Korrektur: Alignment gehört an den Render-Zeitpunkt, nicht davor, damit sowohl Audio-Transkription als auch manueller Skript-Pfad gleichermaßen profitieren). Tatsächliche Etappen: `"plan"` (Resume-fähig — übersprungen, wenn schon ein Plan existiert; sonst Audio-Transkription oder manueller Skript-Text, je nachdem was vorliegt) → `"images"` (`_batch_generate_worker`, Resume-fähig) → `"render"` (`_render_worker`, inkl. Whisper-Timing/Übergänge/Sound-Design/Impact-Akzente). Voraussetzung war die Extraktion von `_transcribe_generate_worker` aus dem bis dahin inline im HTTP-Handler vergrabenen `/api/transcribe`-Code. Frontend: „🚀 Alles auf einmal"-Karte direkt nach Schritt ② (nicht neben dem Render-Button — sie ersetzt mehrere nachfolgende Schritte auf einmal, das verdient einen eigenen, hervorgehobenen Platz weiter oben), mit dreistufiger Fortschrittsanzeige (Plan → Bilder → Rendern), Stop-Propagation in laufende Sub-Jobs, Reload-Sicherheit.
+**Definition of Done — erfüllt:** End-to-End über die echte Browser-UI getestet (nicht nur die API): Skript eingetippt, Klick, korrekter Abbruch in der Render-Etappe ohne Voice-over, danach Audio nachgereicht, zweiter Klick übersprang Plan+Bilder (Resume bestätigt) und lieferte ein echtes, abspielbares `final.mp4`. Nebenbefund beim Testen behoben: `suggestCharsFromPlan()` im Frontend erwartete ein falsches Datenmodell (`ch.name` statt `ch.name_or_role`) und crashte lautlos bei jedem Plan mit erkannten Charakteren — betraf auch das bestehende `openVideo()`, nicht nur den neuen Orchestrator.
 
 **Phase 5 — Parallax / 2.5D (teuer, fragil, zurückgestellt)**
 Bewusst ans Ende: echter Parallax braucht eine Tiefenschätzung (Depth-Map via ML-Modell — tangiert die Zero-Framework-Regel, da lokales ML) oder manuell freigestellte Vordergrund-Layer, dann getrennte Ebenen-Bewegung. Höchster Aufwand, unsicherster Ertrag — besonders bei flächigem Ink/Stickman-Stil schwächer sichtbar als bei fotorealistischen Essays. **Erst angehen, wenn Phasen 2.5–4 den Look bereits tragen** und ein konkreter Bedarf bleibt. Kein V1-Thema.
@@ -526,7 +521,7 @@ Bewusst ans Ende: echter Parallax braucht eine Tiefenschätzung (Depth-Map via M
 2. **FFmpeg-Installation:** `ffmpeg -version` auf dem Zielrechner verifizieren (der bestehende Code in `_veo_job_worker` setzt es implizit voraus).
 3. **Ziel-Framerate/Auflösung — ENTSCHIEDEN:** In V1 **fix 1080p/30fps als globale Backend-Konstante**. Uneinheitliche Frameraten killen den `concat`-Demuxer. Pro-Kanal-Konfigurierbarkeit erst nach V1, falls überhaupt nötig.
 4. **Clip-Aufbewahrung — ENTSCHIEDEN:** In Phase 2 die Clips nach erfolgreichem Muxing **und** bestandenem `_render_selfcheck` löschen (`shutil.rmtree(render_tmp_dir)`). **Sicherheitsauflage (kritisch):** Die Clips liegen zwingend in einem **separaten** Verzeichnis (`videos/<vid>/render_tmp/`), **niemals** in `generated/` — sonst löscht `rmtree` die generierten Bilder mit. **Trade-off-Notiz:** Ohne Clip-Cache muss jeder erneute Render alle Ken-Burns-Clips neu erzeugen (auch bei nur einer geänderten Szene). Ein Hash-basierter Cache (Clip nur neu rendern, wenn sich Bild/motion/dur geändert haben) lohnt erst später und braucht dann ein `clip_hash`-Feld in `plan.json`.
-5. **Scribe/präzises Wort-Timing:** bewusst nicht Teil dieses Plans (Phase 2 nutzt die geschätzte Timeline aus `segment()`/`transcribe_and_segment` + lineare Normierung aus 3.6). Späterer Baustein zur Behebung der in 3.6 benannten „Mitte-driftet"-Grenze: Wort-Timestamps via ElevenLabs Scribe über KIE, Alignment-Schritt Skript↔Transkript. Ausgeklammert, um Phase 2 klein und schnell testbar zu halten.
+5. **Präzises Wort-Timing (Phase 3) — Quelle geklärt (siehe Errata oben):** bewusst nicht Teil von Phase 1/2 (die nutzen die geschätzte Timeline aus `segment()`/`transcribe_and_segment` + lineare Normierung aus 3.6). Späterer Baustein zur Behebung der in 3.6 benannten „Mitte-driftet"-Grenze: Wort-Timestamps via **lokales `faster-whisper`** (nicht mehr ElevenLabs Scribe — über KIE live getestet und als nicht funktionsfähig verworfen), Alignment-Schritt Skript↔Transkript. Ausgeklammert aus Phase 1/2, um diese klein und schnell testbar zu halten.
 
 ---
 
@@ -544,7 +539,7 @@ Dieser Plan **vergrößert** `dashboard.py` (ca. 15 neue Funktionen) und `dashbo
 Siehe Abschnitt 6.1 (neu) — die Begründung, warum Remotion/Editly/Agent-Orchestrierung bewusst abgelehnt wurden, ist jetzt im Dokument, nicht nur das nackte Verbot.
 
 ### 11.3 Phasen, die in diesem Dokument stehen, aber noch nicht umgesetzt sind
-Zur Erinnerung, damit nichts als „schon erledigt" missverstanden wird: **nur Phase 1 und 2 sind bau-bereit ausdetailliert.** Phasen 2.5–5 (Sound, Scribe, Micro-Dynamics, Orchestrator, Parallax) sind konzeptionell fertig geplant, aber bewusst erst *nach* einem stabilen Phase-1/2-Ergebnis anzugehen (siehe Cinematic-Roadmap, Abschnitt 8). Reihenfolge nicht vertauschen, auch wenn einzelne Punkte (z. B. Sound) verlockend klingen — jede Phase baut auf einem getesteten Vorgänger auf.
+Zur Erinnerung, damit nichts als „schon erledigt" missverstanden wird: **Phase 1, 2 und 2.5 sind umgesetzt und end-to-end verifiziert** (siehe `ARCHITECTURE.md`). Phase 3 (Whisper-Timing, nicht mehr Scribe — siehe Errata oben), 4 (Micro-Dynamics, Crossfades bereits teilweise umgesetzt), 4.5 (Orchestrator) und 5 (Parallax) sind konzeptionell fertig geplant, aber Phase 3 ist die aktuell laufende Arbeit und 4.5/5 folgen erst danach (siehe Cinematic-Roadmap, Abschnitt 8). Reihenfolge nicht vertauschen — jede Phase baut auf einem getesteten Vorgänger auf.
 
 ### 11.4 Nicht diskutiert, potenziell relevant für später (unvollständige Liste, kein Auftrag)
 - Mehrsprachigkeit über Deutsch/Englisch hinaus (aktuell nur `SCRIPT_SYSTEM`/`setLang('de'|'en')`).

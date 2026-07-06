@@ -285,10 +285,10 @@
   <div id="view-editor" style="display:none">
     <div class="back-link" onclick="backToVideoList()">← Zurück zu Videos</div>
 
-    <!-- Mode Toggle -->
+    <!-- Schritt ① — Modus wählen -->
     <div class="card" style="padding:14px 16px">
       <div class="row" style="align-items:center;gap:16px">
-        <strong style="font-size:13px">Modus:</strong>
+        <strong style="font-size:13px">① Modus:</strong>
         <div class="seg">
           <button id="modeBtnImg" class="sel" onclick="setMode('image')">📷 Bild</button>
           <button id="modeBtnVid" onclick="setMode('video')">🎬 Video (T2V)</button>
@@ -297,49 +297,30 @@
       </div>
     </div>
 
-    <!-- Title & Thumbnail -->
+    <!-- Schritt ② — Skript oder Voice-Over einfügen (beides führt zum selben Szenen-Plan) -->
     <div class="card">
-      <h2>🎯 Titel &amp; Thumbnail</h2>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
-        <div>
-          <div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Titel-Optionen</div>
-          <div id="titleList" style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px"></div>
-          <button class="sm ghost" onclick="genTitles()" id="genTitlesBtn">✍️ Titel generieren</button>
+      <h2>② Skript oder Voice-Over einfügen</h2>
+
+      <div id="cardSettings" style="margin-bottom:16px;padding-bottom:14px;border-bottom:1px solid var(--border)">
+        <div id="settingsImg" class="row" style="align-items:center">
+          <label>Ziel-Länge pro Bild<input type="number" id="sec" value="4" min="2" max="10" step="0.5"></label>
+          <span class="hint">Richtwert für normale Szenen — ruhige Szenen dürfen länger stehen, dramatische Momente werden automatisch kürzer geschnitten (Pacing-Analyse)</span>
         </div>
-        <div>
-          <div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Thumbnail</div>
-          <div class="slot" id="thumbSlot" style="margin-bottom:10px">
-            <div class="slot-empty"><span class="slot-icon">🖼</span><span class="slot-label">Noch kein Thumbnail</span></div>
+        <div id="settingsVid" style="display:none">
+          <div class="row" style="align-items:center">
+            <label>Video-Dauer
+              <select id="veoDuration">
+                <option value="4">4 Sekunden</option>
+                <option value="6">6 Sekunden</option>
+                <option value="8" selected>8 Sekunden (max.)</option>
+              </select>
+            </label>
+            <span class="hint">REFERENCE_2_VIDEO immer 8s · TEXT_2_VIDEO wählbar · Veo 3.1 Lite 1080p</span>
           </div>
-          <button class="sm ghost" onclick="genThumbnail()" id="genThumbBtn">✨ Thumbnail generieren</button>
         </div>
       </div>
-    </div>
 
-    <!-- Video mode settings (duration) -->
-    <div class="card" id="cardSettings">
-      <h2>Einstellungen</h2>
-      <div id="settingsImg" class="row" style="align-items:center">
-        <label>Sekunden / Bild<input type="number" id="sec" value="4" min="2" max="10" step="0.5"></label>
-        <span class="hint">Stil &amp; Farben kommen aus dem Kanal-Master-Prompt</span>
-      </div>
-      <div id="settingsVid" style="display:none">
-        <div class="row" style="align-items:center;margin-bottom:12px">
-          <label>Video-Dauer
-            <select id="veoDuration">
-              <option value="4">4 Sekunden</option>
-              <option value="6">6 Sekunden</option>
-              <option value="8" selected>8 Sekunden (max.)</option>
-            </select>
-          </label>
-          <span class="hint">REFERENCE_2_VIDEO immer 8s · TEXT_2_VIDEO wählbar · Veo 3.1 Lite 1080p</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- ① Audio flow -->
-    <div class="card">
-      <h2>① Voice-Over hochladen (empfohlen – echte Timestamps)</h2>
+      <div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Option A · Voice-Over hochladen (empfohlen — echte Timestamps)</div>
       <div class="dropzone" id="dropzone" onclick="$('audioFile').click()" ondragover="dragOver(event)" ondragleave="dragLeave()" ondrop="dropFile(event)">
         <p>MP3, WAV, M4A, OGG hier ablegen oder klicken</p>
         <p class="name" id="audioLabel" style="display:none"></p>
@@ -358,13 +339,10 @@
         </div>
         <span class="hint" id="transStatus">Keine Datei</span>
       </div>
-    </div>
 
-    <div class="divider">oder Skript manuell eingeben (ohne echte Audio-Timestamps)</div>
+      <div class="divider">oder</div>
 
-    <!-- ② Manual script flow -->
-    <div class="card">
-      <h2>② Video-Skript (manuell)</h2>
+      <div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Option B · Skript manuell eingeben (Timing geschätzt)</div>
       <textarea id="script" rows="7" placeholder="Skript hier einfügen (Timestamps werden ignoriert) …" oninput="estimate()"></textarea>
       <div class="row" style="margin-top:10px">
         <label>Wörter / Minute<input type="number" id="wpm" value="150" min="80" max="220" oninput="estimate()"></label>
@@ -372,12 +350,34 @@
       </div>
       <div class="row" style="margin-top:10px">
         <button onclick="makePlan()" id="planBtn">Plan aus Skript erstellen</button>
-        <span class="hint">Timing geschätzt via WPM-Formel</span>
+        <span class="hint">Timing geschätzt via WPM-Formel + Pacing-Analyse</span>
       </div>
     </div>
 
-    <!-- Scene plan + generation -->
+    <!-- Ein-Knopf-Orchestrator (Phase 4.5) — verkettet Plan → Bilder → Rendern, ohne
+         zwischendurch einzeln klicken zu müssen. Nur im Bild-Modus sinnvoll: der
+         Veo/Grok-Video-Pfad hat eine eigene, separate Zusammenschnitt-Logik. Resumable:
+         überspringt Etappen, die schon fertig sind (bestehender Plan, bereits
+         generierte Bilder) — ein zweiter Klick nach einem Teil-Fortschritt setzt also
+         nur dort fort, wo aufgehört wurde, statt alles neu zu machen. -->
+    <div class="card" id="produceCard" style="display:none;background:var(--acc-soft);border-color:var(--acc)">
+      <div class="row" style="align-items:center;gap:14px">
+        <button onclick="produceAll()" id="produceBtn">🚀 Alles auf einmal</button>
+        <button onclick="stopProduce()" id="stopProduceBtn" class="ghost" style="display:none;color:var(--danger);border-color:var(--danger)">⏹ Stoppen</button>
+        <span class="hint" id="produceHint">Plan → Bilder → Rendern automatisch, ohne einzelne Klicks dazwischen</span>
+      </div>
+      <div class="steps" id="produceSteps" style="display:none;flex-wrap:wrap;margin-top:10px">
+        <span id="pstage-plan">Plan</span>
+        <span style="color:var(--border)">›</span>
+        <span id="pstage-images">Bilder</span>
+        <span style="color:var(--border)">›</span>
+        <span id="pstage-render">Rendern</span>
+      </div>
+    </div>
+
+    <!-- Schritt ③ — Bilder generieren (erscheint erst, sobald ein Szenen-Plan existiert) -->
     <div id="planArea" style="display:none">
+      <h2 style="font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:0 0 12px;font-weight:700">③ Bilder generieren</h2>
       <div id="batchStatusBar" style="display:none;align-items:center;gap:10px;padding:10px 14px;border-radius:var(--radius);margin-bottom:10px;background:var(--acc-soft);border:1px solid var(--acc);font-weight:600;font-size:13px;color:var(--acc)">
         <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--acc);animation:pulse 1.2s ease-in-out infinite"></span>
         <span id="batchStatusText">Generiert gerade …</span>
@@ -401,16 +401,38 @@
       <div id="scenes" style="margin-top:14px"></div>
     </div>
 
-    <!-- Auto-Rendering — its own card below the scene list, not squeezed into the
-         already-busy "Alle generieren" toolbar above: rendering is a NACHGELAGERTER
-         step that only makes sense once images exist, not "one more option among
-         others" in the generation toolbar. -->
+    <!-- Schritt ④ — Titel & Thumbnail. Bewusst NACH dem Skript/Plan platziert (nicht mehr
+         ganz oben) — beide brauchen den fertigen Skript-Inhalt als Grundlage, vorher
+         ergäbe ein Klick nur einen Fehler ("Kein Skript vorhanden"). Gated analog zur
+         Render-Karte: disabled + Hinweistext, bis ein Plan existiert. -->
+    <div class="card" id="titleThumbCard" style="display:none">
+      <h2>④ Titel &amp; Thumbnail</h2>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+        <div>
+          <div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Titel-Optionen</div>
+          <div id="titleList" style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px"></div>
+          <button class="sm ghost" onclick="genTitles()" id="genTitlesBtn">✍️ Titel generieren</button>
+        </div>
+        <div>
+          <div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Thumbnail</div>
+          <div class="slot" id="thumbSlot" style="margin-bottom:10px">
+            <div class="slot-empty"><span class="slot-icon">🖼</span><span class="slot-label">Noch kein Thumbnail</span></div>
+          </div>
+          <button class="sm ghost" onclick="genThumbnail()" id="genThumbBtn">✨ Thumbnail generieren</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Schritt ⑤ — Auto-Rendering. Braucht mindestens ein generiertes Bild + Voice-over,
+         deshalb ganz am Ende der Kette, mit eigenem Gating (updateRenderCardVisibility()). -->
     <div class="card" id="renderCard" style="display:none">
-      <h2>🎬 Video zusammenschneiden</h2>
+      <h2>⑤ Video zusammenschneiden</h2>
       <p class="hint" id="renderHint" style="margin-bottom:10px">Erst Bilder generieren</p>
 
       <div class="steps" id="renderSteps" style="display:none;flex-wrap:wrap;margin-bottom:10px">
         <span id="rstage-prepare">Vorbereiten</span>
+        <span style="color:var(--border)">›</span>
+        <span id="rstage-timing">Wort-Timing</span>
         <span style="color:var(--border)">›</span>
         <span id="rstage-motion">Kamerabewegung</span>
         <span style="color:var(--border)">›</span>
@@ -425,6 +447,21 @@
         <span id="rstage-review">Prüfung</span>
       </div>
       <div class="bar" id="renderBarWrap" style="display:none"><div id="renderBarFill"></div></div>
+
+      <!-- Phase 4.4, optional -- ffmpegs verfügbarer Build hat kein drawtext, Text wird
+           stattdessen als PNG per Pillow gerendert und via overlay/fade aufgelegt. Alle
+           drei Standard-mäßig aus (Plan markiert dieses Feature explizit als optional). -->
+      <div class="row" style="margin-top:6px;margin-bottom:6px;gap:16px;flex-wrap:wrap">
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--mut);cursor:pointer">
+          <input type="checkbox" id="ovCaptions" onchange="saveOverlayOpts()"> Untertitel
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--mut);cursor:pointer">
+          <input type="checkbox" id="ovCallouts" onchange="saveOverlayOpts()"> Zahlen-Callouts
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--mut);cursor:pointer">
+          <input type="checkbox" id="ovChapters" onchange="saveOverlayOpts()"> Kapitel-Titel
+        </label>
+      </div>
 
       <div class="row" style="margin-top:12px">
         <button onclick="renderVideo()" id="renderBtn" disabled>🎬 Video rendern</button>
@@ -615,9 +652,23 @@ async function openVideo(vid, name){
   SCENES = [];
   $('scenes').innerHTML = '';
   $('planArea').style.display = 'none';
+  // Explicit reset, not just left to renderScenes() — without this, switching from a
+  // video that HAS scenes to one that doesn't would leave these cards visible with
+  // stale content from the previous video, since renderScenes() (which normally hides
+  // them) never runs when there's no plan to render.
+  $('titleThumbCard').style.display = 'none';
+  $('renderCard').style.display = 'none';
+  $('produceCard').style.display = 'none';
 
   const modeR = await ch_get('/api/get_mode');
   applyMode(modeR.mode || 'image');
+
+  // Same reload-resume principle as the plan/batch/render jobs below: a one-button
+  // orchestrator run started before a tab close/reload keeps going server-side.
+  const produceSt = await ch_get('/api/produce_status').catch(() => null);
+  if(produceSt && produceSt.running){
+    startProducePoll();
+  }
 
   // If a plan generation is currently running server-side (started before a reload/tab
   // close), resume showing its progress instead of leaving the page looking idle — that
@@ -627,6 +678,16 @@ async function openVideo(vid, name){
     startPlanPoll();
   }
 
+  await refreshPlanAndStatus();
+  loadVideoMeta();
+  loadImageModel();
+  loadOverlayOpts();
+}
+
+// Extracted out of openVideo() so both a page (re)load AND the one-button orchestrator's
+// completion handler (startProducePoll) can pick up the resulting scenes/render state the
+// same way, without duplicating the plan-fetch + status-resume logic twice.
+async function refreshPlanAndStatus(){
   const r = await ch_get('/api/plan');
   if(r.scenes && r.scenes.length){
     SCENES = r.scenes;
@@ -650,8 +711,6 @@ async function openVideo(vid, name){
       showRenderedVideo(r.render.file);
     }
   }
-  loadVideoMeta();
-  loadImageModel();
 }
 
 // ---- Title & Thumbnail ----
@@ -823,6 +882,8 @@ function startBatchPoll(){
       $('prog').textContent = `${doneCount} / ${SCENES.length}`;
       $('barFill').style.width = (SCENES.length ? doneCount/SCENES.length*100 : 0) + '%';
       updateRenderCardVisibility();
+      updateTitleThumbCardVisibility();
+      updateProduceCardVisibility();
       if(st.error){
         alert('Generierung abgebrochen: ' + st.error);
       }
@@ -863,6 +924,7 @@ function applyMode(mode){
   // _setGenAllUI() already owns that toggle while a run is active.
   if(!_batchPollTimer) $('genAllBtn').style.display = isVid ? 'none' : '';
   if(SCENES.length) renderScenes();
+  updateProduceCardVisibility();
 }
 
 async function setMode(mode){
@@ -894,12 +956,29 @@ async function saveImageModel(){
   await ch_api('/api/image_model', {model: $('imageModel').value});
 }
 
+// ---- Text-Overlays (Phase 4.4, optional — off by default) ----
+async function loadOverlayOpts(){
+  const r = await ch_get('/api/overlay_opts').catch(() => null);
+  if(!r) return;
+  if($('ovCaptions')) $('ovCaptions').checked = !!r.captions;
+  if($('ovCallouts')) $('ovCallouts').checked = !!r.callouts;
+  if($('ovChapters')) $('ovChapters').checked = !!r.chapters;
+}
+async function saveOverlayOpts(){
+  await ch_api('/api/overlay_opts', {opts: {
+    captions: $('ovCaptions').checked,
+    callouts: $('ovCallouts').checked,
+    chapters: $('ovChapters').checked,
+  }});
+}
+
 // ---- Word estimate ----
 function wordCount(s){ return (s.trim().match(/\S+/g)||[]).length; }
 function estimate(){
   const w=wordCount($('script').value), wpm=+$('wpm').value;
   const isVideo = CURRENT_MODE === 'video';
   const sec = isVideo ? +(($('veoDuration')||{}).value||8) : +$('sec').value;
+  updateProduceCardVisibility();
   if(!w){ $('est').textContent='—'; return; }
   const mins=w/wpm, total=mins*60, n=Math.max(1,Math.round(total/sec));
   const label = isVideo ? 'Videos' : 'Bilder';
@@ -962,6 +1041,7 @@ function audioSelected(file){
     audioB64=e.target.result.split(',')[1];
     $('transBtn').disabled=false;
     $('transStatus').textContent='Bereit – '+f.name;
+    updateProduceCardVisibility();
   };
   reader.readAsDataURL(f);
 }
@@ -1139,6 +1219,8 @@ function renderScenes(source){
   $('prog').textContent=`${doneCount} / ${SCENES.length}`;
   $('barFill').style.width=(SCENES.length ? doneCount/SCENES.length*100 : 0)+'%';
   updateRenderCardVisibility();
+  updateTitleThumbCardVisibility();
+  updateProduceCardVisibility();
 }
 
 function setStatus(i,st){ const e=$('st'+i); if(e){e.textContent=st; e.className='st '+st;} }
@@ -1403,10 +1485,24 @@ async function stopGenAll(){
 // updateRenderCardVisibility() keeps the card's enabled/disabled state and hint text
 // in sync with SCENES, called from renderScenes() and after every batch/plan refresh.
 const RENDER_STAGE_LABELS = {
-  prepare: 'Vorbereiten', motion: 'Kamerabewegung', clips: 'Clips', transitions: 'Übergänge',
-  assemble: 'Zusammenschnitt', audio: 'Ton', review: 'Prüfung',
+  prepare: 'Vorbereiten', timing: 'Wort-Timing (Whisper)', motion: 'Kamerabewegung', clips: 'Clips',
+  transitions: 'Übergänge', assemble: 'Zusammenschnitt', audio: 'Ton', review: 'Prüfung',
 };
-const RENDER_STAGE_ORDER = ['prepare', 'motion', 'clips', 'transitions', 'assemble', 'audio', 'review'];
+const RENDER_STAGE_ORDER = ['prepare', 'timing', 'motion', 'clips', 'transitions', 'assemble', 'audio', 'review'];
+
+function updateTitleThumbCardVisibility(){
+  // Schritt ④ braucht den fertigen Skript-Inhalt als Grundlage (Titel/Thumbnail-Prompt
+  // werden aus dem vollen Skripttext generiert) — vorher würde ein Klick nur mit "Kein
+  // Skript vorhanden" fehlschlagen. Sichtbar/aktivierbar sobald ein Plan existiert,
+  // unabhängig vom Bild-Fortschritt (anders als die Render-Karte, die Bilder braucht).
+  const card = $('titleThumbCard');
+  if(!card) return;
+  const hasPlan = SCENES.length > 0;
+  card.style.display = hasPlan ? '' : 'none';
+  const genTitlesBtn = $('genTitlesBtn'), genThumbBtn = $('genThumbBtn');
+  if(genTitlesBtn) genTitlesBtn.disabled = !hasPlan;
+  if(genThumbBtn) genThumbBtn.disabled = !hasPlan;
+}
 
 function updateRenderCardVisibility(){
   const card = $('renderCard');
@@ -1501,6 +1597,94 @@ function downloadFinalVideo(){
   a.download = 'final.mp4'; a.click();
 }
 
+// ---- Ein-Knopf-Orchestrator (Phase 4.5) ----
+// Verkettet Plan/Transkription -> Alle Bilder generieren -> Rendern in einem einzigen
+// Server-Job (_produce_worker), exakt dasselbe Muster wie die drei Einzel-Jobs, die es
+// aufruft. Nur im Bild-Modus sichtbar (der Veo/Grok-Pfad hat eine eigene, unangetastete
+// Zusammenschnitt-Logik) und erst, sobald überhaupt Rohmaterial vorliegt: ein bereits
+// bestehender Plan, ein ausgewähltes Audio-File, oder eingetippter Skript-Text.
+function updateProduceCardVisibility(){
+  const card = $('produceCard');
+  if(!card) return;
+  const isVideo = CURRENT_MODE === 'video';
+  const hasPlan = SCENES.length > 0;
+  const hasAudio = !!audioB64;
+  const hasScript = !!(($('script')||{}).value||'').trim();
+  card.style.display = (!isVideo && (hasPlan || hasAudio || hasScript)) ? '' : 'none';
+}
+
+async function produceAll(){
+  // If a freshly chosen audio file hasn't been sent to the server yet, upload it first
+  // — same step transcribeAudio() does — so the orchestrator's "plan" stage finds it.
+  if(audioB64){
+    const upRes = await fetch('/api/upload_audio', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({data: audioB64, mime: audioMime, name: audioName, channel: ACTIVE_CHANNEL, video: ACTIVE_VIDEO})
+    }).then(r => r.json());
+    if(!upRes.ok){ alert('Audio-Upload fehlgeschlagen: ' + (upRes.error||'unbekannt')); return; }
+  }
+  const sec = CURRENT_MODE === 'video' ? +(($('veoDuration')||{}).value||8) : +$('sec').value;
+  const wpm = +(($('wpm')||{}).value || 150);
+  const text = ($('script')||{}).value || '';
+  const r = await ch_api('/api/produce_start', {text, wpm, sec});
+  if(!r.ok){ alert('Fehler: ' + (r.error||'unbekannt')); return; }
+  startProducePoll();
+}
+
+async function stopProduce(){
+  const btn = $('stopProduceBtn');
+  btn.disabled = true; btn.textContent = '⏳ Stoppt …';
+  await ch_api('/api/produce_stop', {});
+}
+
+const PRODUCE_STAGE_LABELS = {plan: 'Plan erstellen', images: 'Bilder generieren', render: 'Rendern'};
+const PRODUCE_STAGE_ORDER = ['plan', 'images', 'render'];
+let _producePollTimer = null;
+
+function startProducePoll(){
+  if(_producePollTimer) return;
+  $('produceBtn').style.display = 'none';
+  $('stopProduceBtn').style.display = '';
+  $('stopProduceBtn').disabled = false; $('stopProduceBtn').textContent = '⏹ Stoppen';
+  $('produceSteps').style.display = 'flex';
+  $('produceHint').textContent = 'Startet …';
+  const poll = async () => {
+    const st = await ch_get('/api/produce_status').catch(() => null);
+    if(!st) return;
+    if(st.running){
+      const curIdx = PRODUCE_STAGE_ORDER.indexOf(st.stage);
+      PRODUCE_STAGE_ORDER.forEach((s, idx) => {
+        const el = $('pstage-'+s);
+        if(!el) return;
+        el.className = idx < curIdx ? 'done' : idx === curIdx ? 'active' : '';
+      });
+      $('produceHint').textContent = (PRODUCE_STAGE_LABELS[st.stage] || 'Läuft …') + ' …';
+    } else {
+      clearInterval(_producePollTimer); _producePollTimer = null;
+      $('produceBtn').style.display = ''; $('stopProduceBtn').style.display = 'none';
+      $('produceSteps').style.display = 'none';
+      if(st.error){
+        const stageLabel = PRODUCE_STAGE_LABELS[st.stage] || st.stage;
+        alert(`Fehlgeschlagen (${stageLabel}): ${st.error}`);
+        $('produceHint').textContent = `Fehler in Etappe „${stageLabel}"`;
+        await refreshPlanAndStatus();
+        updateProduceCardVisibility();
+      } else if(st.file){
+        $('produceHint').textContent = 'Fertig ✓';
+        // Pull the finished scenes/render state from the server the same way opening
+        // the video fresh would — the orchestrator changed SCENES, images and the
+        // render out from under whatever was on screen before it started.
+        await refreshPlanAndStatus();
+        updateProduceCardVisibility();
+      } else {
+        $('produceHint').textContent = 'Plan → Bilder → Rendern automatisch, ohne einzelne Klicks dazwischen';
+      }
+    }
+  };
+  poll();
+  _producePollTimer = setInterval(poll, 2500);
+}
+
 // ---- Character sheets (channel-scoped) ----
 let CHARS = [];
 
@@ -1584,9 +1768,15 @@ async function uploadCharRef(){
 
 function suggestCharsFromPlan(chars){
   if(!chars||!chars.length) return;
+  // analyze_script() (dashboard.py) returns {id, name_or_role, visual_description, ...}
+  // per character, NOT {name, description} — this mismatch used to throw here (silently
+  // aborting whatever awaited this, e.g. openVideo()'s reload-resume) any time a plan's
+  // characters array was non-empty.
   chars.forEach(ch=>{
-    if(!CHARS.find(c=>c.name.toLowerCase()===ch.name.toLowerCase())){
-      CHARS.push({name: ch.name, description: ch.description||'', safe: ch.name.toLowerCase().replace(/[^\w-]/g,'_'), has_image:false, uri:null});
+    const name = ch.name_or_role || ch.name;
+    if(!name) return;
+    if(!CHARS.find(c=>c.name.toLowerCase()===name.toLowerCase())){
+      CHARS.push({name, description: ch.visual_description||ch.description||'', safe: name.toLowerCase().replace(/[^\w-]/g,'_'), has_image:false, uri:null});
     }
   });
   renderCharList();
