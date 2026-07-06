@@ -946,7 +946,10 @@ def analyze_script(beats):
         '  "pacing": [{"beat": N, "label": "calm" | "normal" | "punchy"}],\n'
         '  "visual_sequences": [{"seq_id": N, "beats": [N, N, N], "reason": string, '
         '"camera": "slow push-in" | "pan" | "static series"}],\n'
-        '  "callouts": [{"beat": N, "text": "short number/date/stat, max ~6 chars"}]\n'
+        '  "callouts": [{"beat": N, "text": "short number/date/stat, max ~6 chars"}],\n'
+        '  "phases": [{"beat": N, "phase": "OPENING" | "RISING_ACTION" | "CLIMAX" | "RESOLUTION"}],\n'
+        '  "act_breaks": [N],\n'
+        '  "climax_beat": N\n'
         "}\n\n"
         'Rule: set "anonymize": true for every real, identifiable named person (public '
         "figures, named victims/individuals) — these get depicted later only as a "
@@ -975,6 +978,23 @@ def analyze_script(beats):
         "beat entirely if nothing concrete fits; most beats will have no callout at all. "
         "Keep 'text' extremely short — the exact figure only (e.g. \"1969\", \"3.2M\", "
         "\"47%\"), no surrounding words.\n\n"
+        "DRAMATURGY (Story-Phase-Engine, Phase 3):\n"
+        "Assign a STORY-PHASE to every beat — one of exactly four values: "
+        "\"OPENING\", \"RISING_ACTION\", \"CLIMAX\", \"RESOLUTION\". These reflect the "
+        "**actual narrative arc, NOT position** — a flash-forward cold-open at position 0 "
+        "legitimately belongs to CLIMAX or RESOLUTION; a calm epilogue that wraps the "
+        "story belongs to RESOLUTION even if it's the last beat. Use the emotional_arc "
+        "you just identified as the primary signal.\n"
+        "- phases: array with exactly one entry per beat, 0-indexed, SAME index space as "
+        "pacing above. Same count as BEATS.\n"
+        "- act_breaks: list of beat indices where the dramatic situation changes "
+        "irreversibly (inciting incident, midpoint reversal, climax into resolution). "
+        "Typical 3-act structure: 2 breaks. Up to 4 for complex narratives. Empty list "
+        "is valid for single-act scripts. Beats listed here should ALSO appear at the "
+        "boundary between two different phases in 'phases'.\n"
+        "- climax_beat: the SINGLE beat index of the highest-tension moment — where the "
+        "protagonist confronts the decisive turn. -1 if the script has no clear climax "
+        "(purely informational scripts).\n\n"
         "BEATS:\n" + json.dumps(beats, ensure_ascii=False)
     )
     for attempt in (1, 2):
@@ -1166,12 +1186,61 @@ def visual_prompts(scenes, analysis=None):
     return prompts
 
 def story_phase(i: int, total: int) -> str:
+    # Underscore form throughout the project — matches analyze_script prompt and
+    # _PHASE_MOTION_CANDIDATES keys. The legacy "RISING ACTION" (with space) was used
+    # by the position-only heuristic before Phase 3; a single source of truth now.
     return (
         "OPENING"        if i < total * 0.15 else
-        "RISING ACTION"  if i < total * 0.50 else
+        "RISING_ACTION"  if i < total * 0.50 else
         "CLIMAX"         if i < total * 0.75 else
         "RESOLUTION"
     )
+
+# Story-Phase-Engine (Phase 3, Juli 2026): LLM-driven phase assignment with 80%-coverage
+# hysteresis. Single source of truth = s["phase"]; s["phase_source"] is a debug-grip field
+# that lets you grep `"phase_source": "position-fallback"` in any plan.json to find which
+# scenes fell back to position-based. Hysterese: partial-LLM-coverage is treated as
+# schema-drift → full fallback instead of mixing reliable fallback with uncertain LLM data.
+PHASE_SET = {"OPENING", "RISING_ACTION", "CLIMAX", "RESOLUTION"}
+PHASE_TO_ACT = {"OPENING": 0, "RISING_ACTION": 1, "CLIMAX": 2, "RESOLUTION": 3}
+PHASE_COVERAGE_THRESHOLD = 0.8  # <80% LLM coverage → full fallback (no mixing)
+
+def _assign_phases(scenes: list, analysis: dict, total: int) -> None:
+    """Phase 3: assign each scene a STORY-PHASE, preferring LLM data when available.
+
+    LLM data (analysis["phases"]) wins when ≥80% of beats have entries — coverage above
+    this threshold means the LLM understood the script well enough to trust. Below it, we
+    fall back to position-based phase for ALL scenes (no half-trust mixing). Single source
+    of truth = scenes[].phase; scenes[].phase_source = "llm" | "position-fallback".
+    """
+    raw_phases = (analysis or {}).get("phases") or []
+    llm_phases = {p.get("beat"): p.get("phase")
+                  for p in raw_phases
+                  if p.get("phase") in PHASE_SET}
+    act_breaks = set((analysis or {}).get("act_breaks") or [])
+    climax_beat = (analysis or {}).get("climax_beat", -1)
+    coverage = len(llm_phases) / max(1, total)
+    use_llm = coverage >= PHASE_COVERAGE_THRESHOLD
+
+    n_llm = n_fb = 0
+    for s in scenes:
+        beat = s.get("beat_index", s["i"])
+        if use_llm and beat in llm_phases:
+            s["phase"] = llm_phases[beat]
+            s["phase_source"] = "llm"
+            s["is_phase_break"] = (beat in act_breaks)
+            s["is_climax"] = (beat == climax_beat)
+            s["act_index"] = PHASE_TO_ACT[s["phase"]]
+            n_llm += 1
+        else:
+            s["phase"] = story_phase(s["i"], total)
+            s["phase_source"] = "position-fallback"
+            s["is_phase_break"] = False
+            s["is_climax"] = False
+            s["act_index"] = min(3, (s["i"] * 4 // max(1, total)))
+            n_fb += 1
+    print(f"  [Phase] {n_llm}/{total} LLM, {n_fb}/{total} fallback "
+          f"(coverage={coverage*100:.0f}%, hysteresis={'ON' if use_llm else 'OFF'})", flush=True)
 
 VIDEO_PROMPT_MIN_LEN    = 280  # chars — forces setting/light/camera to be spelled out, not just a mood word
 
@@ -2514,7 +2583,7 @@ def _plan_generate_worker(cid: str, vid: str, text: str, wpm: float, sec: float)
             s["prompt"] = pr["prompt"]; s["concrete_entity"] = pr["concrete_entity"]; s["file"] = None
             s["status"] = "geplant"; s["t"] = fmt_t(s["start"])
             s["video_prompt"] = ""
-            s["phase"] = story_phase(s["i"], len(scenes))
+        _assign_phases(scenes, analysis, len(scenes))
         out_data = {"scenes": scenes, "wpm": wpm, "sec": sec, "characters": analysis.get("characters", [])}
         json.dump(out_data, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
 
@@ -3454,7 +3523,7 @@ def _transcribe_generate_worker(cid: str, vid: str, sec: float) -> dict:
     # video_prompt stays empty — only generated on demand per scene, see /api/plan comment
     for s in scenes:
         s["video_prompt"] = ""
-        s["phase"] = story_phase(s["i"], len(scenes))
+    _assign_phases(scenes, analysis, len(scenes))
     tx(4, f"Fertig — {len(scenes)} Szenen bereit ✓")
 
     out = {

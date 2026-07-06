@@ -105,6 +105,17 @@
   .meta{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px;flex-wrap:wrap}
   .tag{background:var(--surface-2);border:1px solid var(--border);border-radius:20px;padding:2px 9px;color:var(--mut);font-weight:500}
   .tag.audio{border-color:var(--acc);color:var(--acc);background:var(--acc-soft)}
+  /* Story-Phase-Engine (Phase 3) — phase-pill per scene, color-coded */
+  .phase-pill{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;border-radius:20px;padding:2px 8px;margin-left:auto;border:1px solid}
+  .phase-pill-OPENING       {color:var(--mut); border-color:var(--border); background:var(--surface-2)}
+  .phase-pill-RISING_ACTION {color:#1e6bd6; border-color:#1e6bd6; background:#e8f1fc}
+  .phase-pill-CLIMAX        {color:#c13838; border-color:#c13838; background:#fce8e8}
+  .phase-pill-RESOLUTION    {color:#1f8a4a; border-color:#1f8a4a; background:#e6f5ec}
+  /* Climax-Szene: subtiler goldener Ring um die ganze Karte */
+  .scene.is-climax{outline:2px solid #d4a02c;outline-offset:-2px;box-shadow:0 0 0 3px #d4a02c20 inset}
+  /* Phase-Break: vertikale Trennlinie links neben der Karte (zusätzlich zur Seq-Linie) */
+  .scene.is-phase-break{border-left:3px solid #6b3fa0 !important}
+  .scene.is-phase-break.has-seq{border-left-width:6px !important}
   .st{margin-left:auto;font-weight:600;font-size:12px}
   .st.geplant{color:var(--mut)} .st.läuft{color:var(--warn)} .st.fertig{color:var(--ok)} .st.fehler{color:var(--danger)}
   .scene .beat{font-size:12px;color:var(--mut);margin:0 0 6px;font-style:italic}
@@ -1379,6 +1390,10 @@ function renderScenes(source){
     const hasSeq   = s.seq_id != null;
     const seqColor = hasSeq ? SEQ_COLORS[s.seq_id % SEQ_COLORS.length] : null;
     if(hasSeq) d.style.borderLeft = `3px solid ${seqColor}`;
+    // Phase 3 — Story-Phase-Engine: phase-pill + climax/phase-break markers
+    if(s.is_climax)   d.classList.add('is-climax');
+    if(s.is_phase_break) d.classList.add('is-phase-break');
+    if(hasSeq) d.classList.add('has-seq');
 
     const vidPromptVal = (s.video_prompt||'').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     const slotsHtml = isVideo ? `
@@ -1442,6 +1457,7 @@ function renderScenes(source){
         <span class="${tagClass}">${s.t}</span>
         <span class="tag">~${s.dur}s</span>
         ${hasSeq ? `<span class="tag" style="border-color:${seqColor};color:${seqColor}">⛓ Seq ${s.seq_id} · ${s.seq_pos+1}</span>` : ''}
+        ${s.phase ? `<span class="phase-pill phase-pill-${s.phase}">${s.phase === 'RISING_ACTION' ? 'RISING' : s.phase}</span>` : ''}
         <span class="st ${s.status}" id="st${s.i}">${s.status}</span>
       </div>
       ${slotsHtml}
