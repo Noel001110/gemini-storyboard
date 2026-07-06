@@ -1183,6 +1183,10 @@ PHASE_VOLUME = {
 # voice without breaking compat). TwelveLabs' speech engine reacts to:
 #   - THREE-DOT "..." — natural short pause between phrases
 #   - SINGLE-LINE BREAK (newline) — slightly stronger pause / scene-change hint
+# TTS_PAUSE_BEFORE_CLIMAX, TTS_PAUSE_AFTER_PHASE_BREAK — siehe engine_elevenlabs.py
+# (Single Source of Truth seit Phase-J-Refactor). Die Duplikate unten sind Dead Code;
+# aus dem Dashboard hier entfernt, die einzigen Quellen sind jetzt die __all__-Imports
+# aus engine_elevenlabs. Belassen mit historischem Hinweis.
 #   - DOUBLE-LINE BREAK — full paragraph pause
 #   - EXCLAMATION "!" + ALL-CAPS word — emphasis on the word (probability, not guarantee)
 # The enricher is conservative — it only ADDS markers, never removes existing text.
@@ -1193,9 +1197,11 @@ TTS_PAUSE_MARKERS = {
     ";": ".",      # semicolon as soft period
     ",": ",",
 }
-TTS_PAUSE_AFTER_SENTENCE = " ... "       # inject between sentences (subtle breath)
-TTS_PAUSE_BEFORE_CLIMAX = "... "         # extra emphasis before is_climax scenes
-TTS_PAUSE_AFTER_PHASE_BREAK = "\n\n"      # strong pause between acts
+# TTS_PAUSE_AFTER_SENTENCE / TTS_PAUSE_BEFORE_CLIMAX / TTS_PAUSE_AFTER_PHASE_BREAK
+# waren hier als Dead-Code-Definitionen (keinerlei Referenz im Codebase). Sie leben
+# jetzt NUR in engine_elevenlabs.py als __all__-Exports. Diese Notiz dokumentiert
+# die Migration; die ursprüngliche Definition wurde 2026-07 entfernt (Phase-J-clean-up).
+# AUF KEINEN FALL neue Definitionen hier hinzufügen — siehe engine_elevenlabs.py.
 
 def _assign_phases(scenes: list, analysis: dict, total: int) -> None:
     """Phase 3: assign each scene a STORY-PHASE, preferring LLM data when available.
@@ -2410,9 +2416,16 @@ def _phase_modulate_music(music_path: str, scenes: list, out_path: str) -> None:
     **inclusive-start, exclusive-end** semantics, which avoids the staircase peak
     at scene boundaries that `between(t,a,b)*vol` introduces (ffmpeg's `between`
     is inclusive at BOTH ends, so adjacent scenes' overlap at one frame causes a
-    1-frame volume spike = sum of both volumes at the boundary). For non-overlapping
+    1-frame peak = sum of both volumes at the boundary). For non-overlapping
     adjacent scenes this gives a clean staircase: scene A plays at vol_A, then at
     exactly t=A_end the expression drops A and starts B at vol_B.
+
+    End-of-interval EN: prefer `end_aligned` (post-trim audio end) over the
+    planned `start_aligned + dur`. Whisper's pause-trim may have shortened the scene,
+    so the volume envelope should expire at the actual audio end — not the planned
+    one. Without this fix, the music bed's phase-Volume extends beyond the actual
+    scene audio (silently masked by sidechaincompress today, but conceptually
+    wrong — and would cause real artifacts when Pixabay stems ship in Phase G.2).
 
     Falls back to a plain copy if no scene has a phase (legacy plans) or ffmpeg
     returns non-zero (malformed expression)."""
@@ -2423,7 +2436,7 @@ def _phase_modulate_music(music_path: str, scenes: list, out_path: str) -> None:
             continue
         vol = PHASE_VOLUME[ph]
         st = s.get("start_aligned") or s.get("start", 0.0)
-        en = st + max(0.1, s.get("dur", 5.0))
+        en = s.get("end_aligned") or (st + max(0.1, s.get("dur", 5.0)))
         # Exclusive-end inclusive-start interval: 1 only when st <= t < en.
         # ffmpeg syntax: gte(a,b)=1 if a>=b, lt(a,b)=1 if a<b. AND-multiplied.
         parts.append(f"(if(gte(t,{st:.3f}),1,0))*(if(lt(t,{en:.3f}),{vol:.2f},0))")

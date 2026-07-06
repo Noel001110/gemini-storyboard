@@ -1045,6 +1045,12 @@ Initial-Implementation nutzte `between(t,start,end)*vol` pro Scene — das verur
 
 Getestet in `tests/test_cinematic_e2e.py` (`t_phase_g_volume_no_boundary_peak`): drei Phasen back-to-back, alle Boundary-Werte manuell mit der ffmpeg-Semantik evaluiert. Regression-Guard: Source-grep prüft dass die alte `between(t,{st:.3f},{en:.3f})`-Zeile nicht zurück kommt.
 
+### 29.3 End-of-Interval aus `end_aligned` (Round-4 Fix-2)
+
+Initial-Implementation verwendete `en = st + max(0.1, s.get("dur", 5.0))` — also `start_aligned + planned_dur`. Whisper's Pause-Trim kann die Szene gekürzt haben (effektive Dauer kürzer als geplant), wodurch die Volume-Envelope über das tatsächliche Audio-Ende hinausläuft. **Sidechaincompress verdeckt das** heute (musik wird eh durch voice geduückt), aber **semantisch falsch** — und sobald Phase G.2 Pixabay-Stems einbringt, würden Stems in leere Stille-Bereiche hineinragen.
+
+**Fix:** `en = s.get("end_aligned") or (st + max(0.1, s.get("dur", 5.0)))`. Volume-Envelope schließt jetzt am tatsächlichen Audio-Ende. Getestet in `tests/test_cinematic_e2e.py` (`t_phase_g_volume_uses_end_aligned`).
+
 ### 29.3 Hook in `_build_final_audio`
 
 Reihenfolge beim Sound-Design (geändert mit Phase G):
@@ -1139,6 +1145,12 @@ Erste Teil-Aufspaltung von `dashboard.py` in fokussiertere Module. Pattern: Pure
   - API-Call + Orchestration: `_elevenlabs_call_with_retry`, `elevenlabs_generate`, `_elevenlabs_persist_and_schedule`
   - TTS-Preprocessing: `_enrich_for_tts`, `TTS_PAUSE_BEFORE_CLIMAX`, `TTS_PAUSE_AFTER_PHASE_BREAK`
 - **Phase-Engine Constants** (Phasen B-G): `PHASE_SET`, `PHASE_TO_ACT`, `PHASE_PROMPT_ADDITIONS`, `PHASE_COLOR_FILTER`, `PHASE_VOLUME`, `PHASE_ACCENT`
+
+### 32.1a TTS-Konstanten-Duplikate entfernt (Round-4 Fix-4)
+
+Vorher: `dashboard.py:1196-1198` definierte `TTS_PAUSE_AFTER_SENTENCE`, `TTS_PAUSE_BEFORE_CLIMAX`, `TTS_PAUSE_AFTER_PHASE_BREAK` — drei identische Konstanten zusätzlich zu denen in `engine_elevenlabs.py:237-238`. Zwei Quellen der Wahrheit für die Marker-Strings: Refactor-Risiko.
+
+**Fix:** Konstante komplett aus `dashboard.py` entfernt. Ersetzt durch historische Kommentar-Markierung. **Single Source of Truth**: nur `engine_elevenlabs.py`. Regression-Guard in `tests/test_cinematic_e2e.py` (`t_phase_j_no_duplicate_tts_constants_in_dashboard`): ein Regex-grep gegen `dashboard.py` schlägt fehl wenn jemand die Konstante zurück-portiert.
 
 ### 32.2 Import-Pattern
 

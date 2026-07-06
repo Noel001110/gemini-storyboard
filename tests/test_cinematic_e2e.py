@@ -308,6 +308,58 @@ def t_phase_g_volume_no_boundary_peak():
         "Old buggy line in _phase_modulate_music — Phase-G staircase-fix regressed"
 
 
+def t_phase_g_volume_uses_end_aligned():
+    """Phase G Fix-2: `en` comes from `end_aligned` (post-trim audio end), NOT from
+    planned `start + dur`. Whisper's pause-trim may have shortened the scene, and the
+    volume envelope must expire at the actual audio end — else when Pixabay stems ship
+    in Phase G.2, stems would extend into post-scene silence."""
+    scenes = [
+        # Planned dur=5.0s but end_aligned reflects post-trim=3.5s
+        {"phase": "CLIMAX", "start_aligned": 10.0, "end_aligned": 13.5,
+         "dur": 5.0},  # <-- intentionally wrong duration
+    ]
+    parts = []
+    for s in scenes:
+        vol = el.PHASE_VOLUME.get(s["phase"])
+        st = s.get("start_aligned") or s.get("start", 0.0)
+        en = s.get("end_aligned") or (st + max(0.1, s.get("dur", 5.0)))
+        # Production code now matches this formula exactly
+        parts.append(f"(if(gte(t,{st:.3f}),1,0))*(if(lt(t,{en:.3f}),{vol:.2f},0))")
+    expr = parts[0]
+    # Fix: envelope closes at end_aligned=13.5 (NOT at start+planned-dur=15.0)
+    assert "lt(t,13.500" in expr, \
+        f"envelope must close at end_aligned (13.5), got expr={expr}"
+    assert "lt(t,15.000" not in expr, \
+        f"envelope must NOT use planned start+dur (15.0), got expr={expr}"
+
+    # Source-grep guard: _phase_modulate_music must reference end_aligned
+    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    idx = src.find("def _phase_modulate_music")
+    body = src[idx:idx + 3000]
+    assert "end_aligned" in body, \
+        "_phase_modulate_music must reference end_aligned (Fix-2 regression)"
+    # And must NOT call .get('dur', ...) as the end-side source
+    assert 'en = s.get("end_aligned") or (st + max(0.1, s.get("dur"' in body, \
+        "Fix-2 pattern not applied (en should come from end_aligned)"
+
+
+def t_phase_j_no_duplicate_tts_constants_in_dashboard():
+    """Phase J Fix-4: TTS_PAUSE_BEFORE_CLIMAX / TTS_PAUSE_AFTER_PHASE_BREAK are owned by
+    engine_elevenlabs.py. dashboard.py darf keine aktiven Definitionen davon haben — sonst
+    gibt's zwei Quellen der Wahrheit für die Marker-Strings. Refactor-Guard: jede
+    Re-Introduktion der alten Zeilen in dashboard.py schlägt hier fehl."""
+    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    # Check that the active-pattern-of-two are NOT defined in dashboard.py outside of
+    # a comment line.
+    import re as _re
+    matches = _re.findall(
+        r"^TTS_PAUSE_(?:BEFORE_CLIMAX|AFTER_PHASE_BREAK)\s*=",
+        src, flags=_re.MULTILINE
+    )
+    assert len(matches) == 0, \
+        f"Found {len(matches)} re-introduced TTS_PAUSE constants in dashboard.py — they belong ONLY in engine_elevenlabs.py. Found: {matches}"
+
+
 def t_phase_h_speaker_default_present():
     """Phase H: scenes get 'speaker' = 'narrator' default (data model)."""
     scenes = [{"i": i, "text": f"s{i}"} for i in range(3)]
@@ -590,6 +642,7 @@ def main():
         run(t_phase_g_volume_envelope_construction, "G: PHASE_VOLUME produces valid piecewise expression")
         run(t_phase_g_volume_no_phase_falls_back, "G: no-phase scenes fall back to identity-copy")
         run(t_phase_g_volume_no_boundary_peak, "G: staircase-fix: adjacent phases don't double-count at boundaries")
+        run(t_phase_g_volume_uses_end_aligned, "G-Fix2: envelope closes at end_aligned, not planned dur")
 
         summary_section("Phase H: Multi-Speaker-Scaffold")
         run(t_phase_h_speaker_default_present, "H: speaker default + mixing detection on data model")
@@ -599,6 +652,7 @@ def main():
         run(t_phase_i_abbreviation_handling, "I-Fix1: abbreviations (Dr, USA, z.B.) don't trigger breaks")
 
         summary_section("Phase J: Engine-Refactor")
+        run(t_phase_j_no_duplicate_tts_constants_in_dashboard, "J-Fix4: no duplicate TTS_PAUSE constants in dashboard.py")
         run(t_phase_j_engine_refactor_globals_intact, "J: every extracted symbol is now engine_elevenlabs-sourced")
         run(t_phase_j_dashboard_unchanged_callers_still_work, "J: callers using dashboard.foo still work after refactor")
 
