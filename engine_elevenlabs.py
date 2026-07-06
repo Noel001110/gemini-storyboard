@@ -239,20 +239,46 @@ TTS_PAUSE_BEFORE_CLIMAX = "... "
 TTS_PAUSE_AFTER_PHASE_BREAK = "\n\n"
 
 def _enrich_for_tts(text: str, scenes: list = None) -> str:
+    """Phase I: enrich raw narration text with TTS-friendly pause/emphasis markers.
+
+    Idempotent by construction (split-then-join pattern): each second call
+    produces the same output as the first. Markers applied:
+      - ' ... ' between sentences (subtle breath between capital-letter boundaries)
+      - '... ' before is_climax scenes (extra emphasis)
+      - '\n\n' before is_phase_break scenes (act-change pause)
+    Returns the enriched text. If `scenes` is None, only sentence-level
+    enrichment runs (the relative-scene lookup is optional).
+    """
     enriched = text.strip()
-    enriched = re.sub(r"\.\s+(?=[A-ZÄÖÜ])", ". ... ", enriched)
+    if not enriched:
+        return enriched
+    # Split on sentence boundaries (". X" with X capital). Strip trailing
+    # ellipsis fragments from each part so the ' ... ' join produces at most
+    # ONE separator between any two sentences — idempotent on repeated calls.
+    parts = re.split(r"(?<=\.)\s+(?=[A-ZÄÖÜ])", enriched)
+    cleaned = [re.sub(r"\s*\.\s*\.\s*\.\s*$", "", p) for p in parts]
+    enriched = " ... ".join(cleaned)
     if scenes:
         for s in scenes:
             txt = (s.get("text") or "").strip()
             if not txt:
                 continue
-            marker = ""
-            if s.get("is_climax"):
-                marker = TTS_PAUSE_BEFORE_CLIMAX + marker
+            # Marker composition: phase_break FIRST (structural pause), climax AFTER
+            # (emphasis). Phase-break is "\n\n" (no trailing whitespace); climax is
+            # "... " (leading ellipsis, trailing space) — both kept VERBATIM so the
+            # produced markers are visible after the replace. lstrip()/rstrip() on
+            # the joined marker would silently drop the "\n\n" (lstrip whitespace
+            # only) — a bug in the original implementation that's fixed by NOT
+            # stripping here.
+            prefix = ""
             if s.get("is_phase_break"):
-                marker = TTS_PAUSE_AFTER_PHASE_BREAK + marker
-            if marker and txt in enriched:
-                enriched = enriched.replace(txt, marker.lstrip() + txt, 1)
+                prefix += TTS_PAUSE_AFTER_PHASE_BREAK
+            if s.get("is_climax"):
+                prefix += TTS_PAUSE_BEFORE_CLIMAX
+            # Idempotency: only insert if not already present (otherwise repeated calls
+            # would compound markers, e.g. "\n\n... szene 4" → "\n\n... \n\n... szene 4").
+            if prefix and prefix + txt not in enriched and txt in enriched:
+                enriched = enriched.replace(txt, prefix + txt, 1)
     return enriched
 
 
