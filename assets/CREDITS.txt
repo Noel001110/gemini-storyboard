@@ -1,0 +1,25 @@
+Sound-Asset-Herkunft und Lizenzen
+==================================
+
+WICHTIG: Die aktuell in music/ und sfx/ liegenden Dateien sind SYNTHETISCHE
+PLATZHALTER (per ffmpeg lavfi erzeugt, z.B. sine/anoisesrc), KEINE echten
+lizenzierten Sounds. Sie dienen nur dazu, die Render-Pipeline (Ducking,
+SFX-Platzierung, loudnorm) testbar zu machen, bevor echte Assets vorliegen.
+Vor echtem Gebrauch ersetzen und hier jeweils einen Eintrag ergänzen.
+
+Empfohlene Quellen (kostenlos, kommerziell nutzbar, dauerhaft):
+- Pixabay (Musik + SFX) — Pixabay-Lizenz, keine Attribution nötig
+- Freesound — NUR auf CC0 gefiltert (andere Lizenzen dort sind CC-BY, brauchen
+  Attribution und sind für einen automatisierten Pool unpraktisch)
+- Mixkit — eigene Lizenz, kommerziell ok, Attribution optional
+
+Format pro Datei (einen Block je Datei anhängen):
+
+Dateiname:      music/neutral_bed.mp3
+Quelle-URL:     https://...
+Lizenz:         CC0 / Pixabay-Lizenz / Mixkit-Lizenz
+Autor:          (falls angegeben)
+Heruntergeladen: JJJJ-MM-TT
+
+---
+Aktuell keine echten Einträge — siehe Platzhalter-Hinweis oben.

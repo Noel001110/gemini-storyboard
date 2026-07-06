@@ -2,8 +2,8 @@
 """Localhost-Dashboard für die Storyboard-Bildgenerierung.
 Nur Python-Standardlib. Start: python3 dashboard.py [--port 8000]
 """
-import os, re, sys, json, time, base64, zipfile, io, threading
-import urllib.request, urllib.error
+import os, re, sys, json, time, base64, zipfile, io, threading, concurrent.futures, collections
+import urllib.request, urllib.error, subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import shutil
@@ -24,15 +24,23 @@ JOBS: dict = {}
 ACTIVE_SCENE_JOBS: dict = {}
 _ACTIVE_SCENE_JOBS_LOCK = threading.Lock()
 
-# GLOBAL cap on concurrent KIE image generations, regardless of source. The batch loop
-# ("Alle Bilder generieren") is already fully sequential on its own, but individual
-# "Bild generieren" clicks on different scenes were never restricted — rapid-clicking
-# several of those (e.g. many scenes at once, as actually happened live) submits that
-# many KIE tasks simultaneously with nothing else in the system to stop it. This
-# semaphore is acquired right before every KIE image submission (batch or individual)
-# and released once that job fully finishes, so no more than MAX_CONCURRENT_IMAGE_GENS
-# are ever in flight at once no matter how many requests come in or from where.
-MAX_CONCURRENT_IMAGE_GENS = 2
+# Guards every read-modify-write of a plan.json file. With concurrent scene generation
+# (multiple scenes finishing at nearly the same moment) two threads doing bare
+# "read plan.json -> modify one scene -> write plan.json" without a lock can race: thread
+# B reads its snapshot before thread A's write lands, then B's write overwrites A's
+# update with a stale copy that doesn't have A's scene marked done — the image is
+# correctly generated and downloaded to disk, but the plan.json entry for it silently
+# reverts to "not done", making that scene look skipped/never generated. One process-wide
+# lock is enough here since each read+write is a few milliseconds against a small file.
+_PLAN_WRITE_LOCK = threading.Lock()
+
+# GLOBAL cap on concurrent KIE image generations, regardless of source. Per KIE's actual
+# documented limits: up to 20 new task submissions per 10s, generally supporting 100+
+# concurrently RUNNING tasks account-wide. 8 is a comfortable margin under both — fast
+# enough to meaningfully parallelize "Alle Bilder generieren" (was previously fully
+# sequential, one scene at a time, which was far more conservative than KIE actually
+# requires) while leaving headroom for individual clicks and thumbnails on top.
+MAX_CONCURRENT_IMAGE_GENS = 8
 IMAGE_GEN_SEMAPHORE = threading.Semaphore(MAX_CONCURRENT_IMAGE_GENS)
 
 # "Alle Bilder generieren" runs server-side now, not driven by the browser tab — it
@@ -41,9 +49,26 @@ IMAGE_GEN_SEMAPHORE = threading.Semaphore(MAX_CONCURRENT_IMAGE_GENS)
 # repeated duplicate-generation bugs: the old client-driven loop died on every reload,
 # and a second click/tab created a second independent loop with its own stale scene list).
 # {(cid, vid): {"running": bool, "stop_requested": bool, "done": int, "total": int,
-#               "current_i": int|None, "error": str|None}}
+#               "current_i": list[int] (scene indices currently in flight), "error": str|None}}
 BATCH_JOBS: dict = {}
 _BATCH_JOBS_LOCK = threading.Lock()
+
+# Script -> plan (analysis + prompt-chunk generation) also runs server-side for the same
+# reason as BATCH_JOBS above: it used to be a single blocking HTTP request, so closing
+# the tab mid-generation looked like nothing happened, and re-clicking "Plan erstellen"
+# started a second, fully independent LLM run on the same script — observed live
+# duplicating every analysis + chunk call for a 167-scene script.
+# {(cid, vid): {"running": bool, "step": str, "error": str|None, "done": bool}}
+PLAN_JOBS: dict = {}
+_PLAN_JOBS_LOCK = threading.Lock()
+
+# Auto-rendering (images -> Ken Burns clips -> concat -> audio mux -> final.mp4) —
+# same server-side-job pattern as BATCH_JOBS/PLAN_JOBS above, for the same reason:
+# survives reloads, a second start call is refused while one is already running.
+# {(cid, vid): {"running": bool, "stop_requested": bool, "stage": str, "done": int,
+#               "total": int, "error": str|None, "file": str|None}}
+RENDER_JOBS: dict = {}
+_RENDER_JOBS_LOCK = threading.Lock()
 
 # ── Per-channel path helpers (channel = brand/style, holds N videos) ──────────
 def ch_dir(cid):        return os.path.join(CHANNELS_DIR, cid)
@@ -51,18 +76,6 @@ def ch_master(cid):     return os.path.join(ch_dir(cid), "master_prompt.txt")
 def ch_vid_master(cid): return os.path.join(ch_dir(cid), "video_master_prompt.txt")
 def ch_sheets(cid):     return os.path.join(ch_dir(cid), "charsheets")
 def ch_videos_file(cid):return os.path.join(ch_dir(cid), "videos.json")
-def ch_image_model_file(cid): return os.path.join(ch_dir(cid), "image_model.txt")
-
-def get_channel_image_model(cid: str) -> str:
-    try:
-        m = open(ch_image_model_file(cid)).read().strip()
-        return m if m in VALID_IMAGE_MODELS else "nano-banana-2"
-    except: return "nano-banana-2"
-
-def set_channel_image_model(cid: str, model: str):
-    if model not in VALID_IMAGE_MODELS: model = "nano-banana-2"
-    open(ch_image_model_file(cid), "w").write(model)
-
 def get_channel_char_ref(cid: str) -> str:
     p = os.path.join(ch_dir(cid), "char_ref_url.txt")
     try:    return open(p).read().strip()
@@ -75,6 +88,10 @@ def v_plan(cid, vid):    return os.path.join(v_out(cid, vid), "plan.json")
 def v_uploads(cid, vid): return os.path.join(v_dir(cid, vid), "uploads")
 def v_audio(cid, vid):   return os.path.join(v_uploads(cid, vid), "audio_meta.json")
 def v_meta(cid, vid):    return os.path.join(v_dir(cid, vid), "meta.json")  # titles, thumbnail prompt
+# Deliberately separate from v_out()/generated/ — the render worker rmtree()s this
+# directory after a successful render, and that must NEVER be able to reach the folder
+# holding the actual generated images/videos.
+def v_render_tmp(cid, vid): return os.path.join(v_dir(cid, vid), "render_tmp")
 
 def load_v_meta(cid, vid):
     try:    return json.load(open(v_meta(cid, vid)))
@@ -82,6 +99,20 @@ def load_v_meta(cid, vid):
 
 def save_v_meta(cid, vid, meta):
     json.dump(meta, open(v_meta(cid, vid), "w"), ensure_ascii=False, indent=1)
+
+def get_video_image_model(cid: str, vid: str) -> str:
+    """Image model choice (nano-banana-2 vs -lite) is per-VIDEO, not per-channel — a
+    channel's style/character stays fixed, but different videos may want the cheaper
+    lite model to save credits while others want full quality."""
+    m = load_v_meta(cid, vid).get("image_model", "")
+    return m if m in VALID_IMAGE_MODELS else "nano-banana-2"
+
+def set_video_image_model(cid: str, vid: str, model: str):
+    if model not in VALID_IMAGE_MODELS:
+        model = "nano-banana-2"
+    meta = load_v_meta(cid, vid)
+    meta["image_model"] = model
+    save_v_meta(cid, vid, meta)
 
 def ensure_channel(cid):
     os.makedirs(ch_dir(cid), exist_ok=True)
@@ -535,26 +566,164 @@ def split_units(text):
                     out.append(part.strip())
     return out
 
-def segment(text, wpm, sec_per_img):
-    target = max(3, round(wpm / 60.0 * sec_per_img))
-    units = split_units(text)
-    segs, cur = [], []
-    for u in units:
-        cur.append(u)
-        if len(" ".join(cur).split()) >= target:
-            segs.append(" ".join(cur)); cur = []
-    if cur:
-        if segs and len(" ".join(cur).split()) < target * 0.5:
-            segs[-1] += " " + " ".join(cur)
-        else:
+MAX_SCENE_SEC = 6.0          # hard cap — no scene may hold longer than this, regardless of pacing label
+PACING_TARGET_SEC = {"calm": 5.0, "punchy": 1.1}   # "normal" target comes from the user's own sec-per-image input
+PACING_WARN_THRESHOLD = 0.30  # if >30% of units come back "punchy", the classifier likely over-fired on drama
+                               # rather than found real reveals/cliffhangers — warn instead of silently
+                               # exploding the scene (and KIE credit) count.
+
+def segment_by_pacing(units: list, pacing: list, wpm: float, normal_sec: float,
+                       sequences: list = None) -> list:
+    """Groups atomic text units (from split_units) into scenes using a per-unit pacing
+    label ("calm"/"normal"/"punchy") that analyze_script() already assigned in the SAME
+    pass it used to read the emotional arc — so pacing can't drift from what the model
+    already decided is the climax vs. the setup (two independent judgments of "how
+    important is this moment" would eventually disagree with each other).
+
+    calm beats can be grouped together and held up to MAX_SCENE_SEC; punchy beats are
+    never merged with neighbors and get compressed to ~1s each (occasionally split into
+    two rapid images for a "gut punch"); normal beats use the user's own sec-per-image
+    dial. Missing/unparseable pacing data (e.g. analyze_script failed) defaults every
+    unit to "normal", which reproduces the old fixed-interval behavior exactly — same
+    resilience pattern as the rest of the pipeline's LLM-call fallbacks.
+
+    `sequences` (optional): analyze_script()'s "visual_sequences" list, same index space
+    as `pacing` (unit indices, NOT final scene indices — units get grouped/split below,
+    so a unit's position and a scene's position are not 1:1 here, unlike the audio-
+    transcription path where scenes already equal beats before analyze_script runs). A
+    sequence boundary forces a scene cut exactly like a pacing-label change already does,
+    so a "calm" merge can never silently span across two different sequences. seq_pos is
+    NOT taken from the LLM's per-unit value — it's reassigned 0,1,2... per seq_id AFTER
+    grouping, since one scene can now represent multiple original units (calm merge) or
+    one unit can become two scenes (punchy split), so the raw per-unit position no longer
+    lines up with the final scene count."""
+    label_by_i = {p.get("beat"): p.get("label", "normal") for p in (pacing or []) if isinstance(p, dict)}
+    seq_by_i = {}
+    for seq in (sequences or []):
+        if not isinstance(seq, dict):
+            continue
+        sid = seq.get("seq_id")
+        for beat_i in seq.get("beats", []) or []:
+            if sid is not None:
+                seq_by_i[beat_i] = sid
+    targets = {"calm": PACING_TARGET_SEC["calm"],
+               "normal": max(1.5, min(normal_sec, 4.0)),
+               "punchy": PACING_TARGET_SEC["punchy"]}
+    hard_cap_words = max(3, round(MAX_SCENE_SEC * wpm / 60.0))
+
+    n_punchy = sum(1 for i in range(len(units)) if label_by_i.get(i, "normal") == "punchy")
+    if units and n_punchy / len(units) > PACING_WARN_THRESHOLD:
+        print(f"  [Plan] WARNUNG: {n_punchy}/{len(units)} Einheiten als 'punchy' eingestuft "
+              f"({n_punchy/len(units)*100:.0f}%) — ungewöhnlich hoch, ggf. Fehlklassifizierung", flush=True)
+
+    segs, seg_seq_ids, seg_labels, cur, cur_label, cur_seq = [], [], [], [], None, None
+    def flush():
+        nonlocal cur, cur_seq
+        if cur:
             segs.append(" ".join(cur))
-    # Zeiten schätzen
+            seg_seq_ids.append(cur_seq)
+            seg_labels.append(cur_label)
+            cur = []
+            cur_seq = None
+
+    for i, u in enumerate(units):
+        label = label_by_i.get(i, "normal")
+        if label not in targets:
+            label = "normal"
+        seq_id = seq_by_i.get(i)
+        words = u.split()
+        target_words = max(2, round(targets[label] * wpm / 60.0))
+
+        if label == "punchy":
+            # Never merged with neighbors. If the unit is long enough to naturally carry
+            # two quick hits, split it into two punchy-length pieces instead of one
+            # longer one — the "two rapid images" gut-punch effect. Falls back to
+            # hard-cap-sized chunks instead if it's so long that even halving it would
+            # still blow MAX_SCENE_SEC (rare, but a single scene must never exceed it).
+            # Every resulting piece inherits this unit's seq_id (if any) — splitting a
+            # unit never breaks it out of its sequence.
+            flush()
+            if len(words) > hard_cap_words * 2:
+                for j in range(0, len(words), hard_cap_words):
+                    segs.append(" ".join(words[j:j+hard_cap_words])); seg_seq_ids.append(seq_id); seg_labels.append(label)
+            elif len(words) > target_words * 1.8:
+                mid = len(words) // 2
+                segs.append(" ".join(words[:mid])); seg_seq_ids.append(seq_id); seg_labels.append(label)
+                segs.append(" ".join(words[mid:])); seg_seq_ids.append(seq_id); seg_labels.append(label)
+            else:
+                segs.append(u); seg_seq_ids.append(seq_id); seg_labels.append(label)
+            cur_label = None
+            continue
+
+        # A single unit can itself be longer than the hard cap (e.g. one long calm
+        # sentence) — split it on its own before any merging logic runs, otherwise it
+        # becomes one indivisible scene that blows past MAX_SCENE_SEC no matter what
+        # target/label says (the exact bug class fixed once already for the old
+        # fixed-interval segment(), reappearing here for the same underlying reason).
+        if len(words) > hard_cap_words:
+            flush()
+            for j in range(0, len(words), hard_cap_words):
+                segs.append(" ".join(words[j:j+hard_cap_words])); seg_seq_ids.append(seq_id); seg_labels.append(label)
+            cur_label = None
+            continue
+
+        # calm/normal: keep grouping with the running buffer as long as the label AND
+        # sequence membership match, and doing so doesn't blow the hard MAX_SCENE_SEC
+        # cap; otherwise start fresh. A sequence boundary is treated exactly like a
+        # label change — both force a cut.
+        if cur and (cur_label != label or cur_seq != seq_id or len(cur) + len(words) > hard_cap_words):
+            flush()
+        cur.extend(words)
+        cur_label = label
+        cur_seq = seq_id
+        if len(cur) >= target_words:
+            flush()
+            cur_label = None
+    flush()
+
     scenes, t = [], 0.0
     for i, seg in enumerate(segs):
         dur = len(seg.split()) / (wpm / 60.0)
-        scenes.append({"i": i, "start": round(t, 1), "dur": round(dur, 1), "text": seg})
+        scene = {"i": i, "start": round(t, 1), "dur": round(dur, 1), "text": seg,
+                 "pacing": seg_labels[i] or "normal"}
+        if seg_seq_ids[i] is not None:
+            scene["seq_id"] = seg_seq_ids[i]
+        scenes.append(scene)
         t += dur
+
+    _renumber_seq_pos(scenes)
     return scenes
+
+def _renumber_seq_pos(scenes: list) -> None:
+    """Assigns seq_pos 0,1,2... per seq_id in final scene order, in-place. Used by both
+    segmentation paths: the manual-script path (where merging/splitting means the LLM's
+    raw per-unit position no longer lines up with final scenes) and the audio-
+    transcription path (where it's defensive — the LLM's "beats" list should already be
+    in order, but trusting our own recount instead of the raw value costs nothing and
+    guards against an out-of-order response)."""
+    seq_counters = {}
+    for scene in scenes:
+        sid = scene.get("seq_id")
+        if sid is None:
+            continue
+        scene["seq_pos"] = seq_counters.get(sid, 0)
+        seq_counters[sid] = scene["seq_pos"] + 1
+
+def _apply_visual_sequences_direct(scenes: list, sequences: list) -> None:
+    """Audio-transcription path only: scenes are already 1:1 with the beats given to
+    analyze_script() (no grouping/splitting happens for this path), so seq_id can be
+    assigned by direct index instead of tracked through segmentation like the manual
+    path needs (see segment_by_pacing's `sequences` handling)."""
+    for seq in (sequences or []):
+        if not isinstance(seq, dict):
+            continue
+        sid = seq.get("seq_id")
+        if sid is None:
+            continue
+        for beat_i in seq.get("beats", []) or []:
+            if isinstance(beat_i, int) and 0 <= beat_i < len(scenes):
+                scenes[beat_i]["seq_id"] = sid
+    _renumber_seq_pos(scenes)
 
 def fmt_t(s):
     return f"{int(s)//60}:{int(s)%60:02d}"
@@ -580,11 +749,32 @@ def analyze_script(beats):
         '  "recurring_symbols": [{"id": "sym_01", "object": string, "meaning": string, '
         '"beats": [N, N]}],\n'
         '  "emotional_arc": {"opening": "ONE word", "midpoint": "ONE word", "resolution": "ONE word"},\n'
-        '  "callbacks": [{"from_beat": N, "to_beat": M, "shared_element": string}]\n'
+        '  "callbacks": [{"from_beat": N, "to_beat": M, "shared_element": string}],\n'
+        '  "pacing": [{"beat": N, "label": "calm" | "normal" | "punchy"}],\n'
+        '  "visual_sequences": [{"seq_id": N, "beats": [N, N, N], "reason": string, '
+        '"camera": "slow push-in" | "pan" | "static series"}]\n'
         "}\n\n"
         'Rule: set "anonymize": true for every real, identifiable named person (public '
         "figures, named victims/individuals) — these get depicted later only as a "
         "silhouette or symbolic stand-in, never named or shown photorealistically.\n\n"
+        "PACING — provide exactly one entry per beat (0-indexed, same count as BEATS), "
+        "judged by its narrative WEIGHT WITHIN THE ARC you just identified above, not the "
+        "sentence in isolation:\n"
+        '- "calm": background/context/setup — the viewer needs time to absorb it, this '
+        "beat can hold on screen for 4-6 seconds.\n"
+        '- "normal": default pacing, neither calm setup nor a dramatic spike.\n'
+        '- "punchy": emotional peaks, reveals, shocking numbers, or cliffhangers — moments '
+        "that should be slammed through fast, under 1.5 seconds, sometimes even meriting "
+        "two rapid consecutive images for a 'gut punch'. A beat sitting near the "
+        "emotional_arc's midpoint/resolution should be MORE likely punchy even if its "
+        "literal wording sounds mild — judge by position in the story, not just word choice.\n\n"
+        "VISUAL_SEQUENCES — group beats into a sequence ONLY when ≥2 CONSECUTIVE beats "
+        "describe the SAME concrete location/subject continuously, as if it were one "
+        "unbroken shot (e.g. a scene that lingers on the same room/object/person across "
+        "several sentences). When in doubt, do NOT form a sequence — independent single "
+        "images are the safe default; most beats belong to no sequence at all. 'beats' "
+        "are 0-indexed positions into the SAME BEATS array given below (identical index "
+        "space to PACING above), listed in order.\n\n"
         "BEATS:\n" + json.dumps(beats, ensure_ascii=False)
     )
     for attempt in (1, 2):
@@ -720,8 +910,12 @@ def visual_prompts(scenes, analysis=None):
     adapted for stills (no story-phase/camera-move logic, explicit character-consistency
     field instead since there's no chain-extend anchor between separate images).
 
-    Returns list of prompt strings, one per scene, same order as scenes. Style (master
-    prompt) is NOT included here — it's appended separately in _build_image_prompt().
+    Returns list of {"prompt": str, "concrete_entity": str} dicts, one per scene, same
+    order as scenes. concrete_entity is already computed per entry for validation
+    purposes below — it used to be discarded after that; now it's returned too so
+    callers can persist it onto the scene (used for conditional character-reference
+    attachment, see _batch_generate_worker). Style (master prompt) is NOT included in
+    the prompt text — it's appended separately in _build_image_prompt().
     """
     beats = [s["text"] for s in scenes]
     total = len(beats)
@@ -763,7 +957,10 @@ def visual_prompts(scenes, analysis=None):
             if not _validate_image_prompt_entry(entry, anon_words):
                 print(f"  [Plan] Szene {beat_i} zu kurz/generisch — Einzel-Retry …", flush=True)
                 entry = _image_prompt_single_retry(beats[beat_i], beat_i, total, analysis_ctx)
-            prompts.append(str(entry.get("image_prompt") or f"Scene illustrating: {beats[beat_i][:80]}."))
+            prompts.append({
+                "prompt": str(entry.get("image_prompt") or f"Scene illustrating: {beats[beat_i][:80]}."),
+                "concrete_entity": str(entry.get("concrete_entity") or ""),
+            })
         offset += len(chunk)
 
     return prompts
@@ -1057,6 +1254,30 @@ def _build_video_prompt(scene_prompt: str, vid_master: str) -> str:
 
 VALID_IMAGE_MODELS = ("nano-banana-2", "nano-banana-2-lite")
 
+# KIE's real documented limit is 20 submissions per 10s account-wide. Concurrent batch
+# dispatch (MAX_CONCURRENT_IMAGE_GENS) has no natural pacing of its own — if several
+# scenes finish or fail in quick succession, the freed slots all resubmit near-instantly,
+# which live testing showed can burst past 20/10s and trigger KIE's "call frequency too
+# high" error for a whole cascade of scenes at once. This tracks recent submission
+# timestamps process-wide and makes every submitter wait its turn, capped comfortably
+# under the real ceiling.
+_KIE_SUBMIT_TIMES = collections.deque()
+_KIE_SUBMIT_LOCK = threading.Lock()
+KIE_SUBMIT_RATE_LIMIT = 12
+KIE_SUBMIT_RATE_WINDOW = 10.0
+
+def _kie_rate_limit_wait():
+    while True:
+        with _KIE_SUBMIT_LOCK:
+            now = time.time()
+            while _KIE_SUBMIT_TIMES and now - _KIE_SUBMIT_TIMES[0] > KIE_SUBMIT_RATE_WINDOW:
+                _KIE_SUBMIT_TIMES.popleft()
+            if len(_KIE_SUBMIT_TIMES) < KIE_SUBMIT_RATE_LIMIT:
+                _KIE_SUBMIT_TIMES.append(now)
+                return
+            wait_for = KIE_SUBMIT_RATE_WINDOW - (now - _KIE_SUBMIT_TIMES[0]) + 0.05
+        time.sleep(max(wait_for, 0.05))
+
 def _kie_submit_image(full_prompt: str, model: str = "nano-banana-2", ref_urls: list = None) -> str:
     """Submit image task to KIE, return task_id.
 
@@ -1078,15 +1299,30 @@ def _kie_submit_image(full_prompt: str, model: str = "nano-banana-2", ref_urls: 
         ref_field = "image_input" if model == "nano-banana-2" else "image_urls"
         input_body[ref_field] = ref_urls[:14 if model == "nano-banana-2" else 10]
     body = {"model": model, "input": input_body}
-    req = urllib.request.Request(f"{KIE_API}/createTask", data=json.dumps(body).encode(), headers=hdrs)
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            resp = json.load(r)
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"KIE HTTP {e.code}: {e.read().decode()[:200]}")
-    if resp.get("code") != 200:
-        raise RuntimeError(f"KIE: {resp.get('msg', str(resp))}")
-    return resp["data"]["taskId"]
+    req_data = json.dumps(body).encode()
+
+    last_err = None
+    for attempt in range(4):
+        _kie_rate_limit_wait()
+        req = urllib.request.Request(f"{KIE_API}/createTask", data=req_data, headers=hdrs)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                resp = json.load(r)
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(f"KIE HTTP {e.code}: {e.read().decode()[:200]}")
+        if resp.get("code") == 200:
+            return resp["data"]["taskId"]
+        msg = resp.get("msg", str(resp))
+        last_err = msg
+        # "Your call frequency is too high" is transient and self-inflicted by our own
+        # burst — worth a short backoff + retry instead of giving up the whole scene.
+        # Anything else (e.g. insufficient credits) is not transient, fail immediately.
+        if "frequency" in msg.lower() and attempt < 3:
+            print(f"  [KIE] Rate-Limit getroffen, warte {2*(attempt+1)}s und versuche erneut …", flush=True)
+            time.sleep(2 * (attempt + 1))
+            continue
+        raise RuntimeError(f"KIE: {msg}")
+    raise RuntimeError(f"KIE: {last_err}")
 
 
 IMAGE_JOB_MAX_POLLS = 50  # 50 * 3s = 150s. 90s (30 polls) turned out too aggressive in
@@ -1113,13 +1349,14 @@ def _mark_scene_error(plan_path: str, scene_i: int):
     """Persist a failed/timed-out generation into plan.json too, not just the in-memory
     JOBS dict — otherwise a scene a browser reloaded away from stays stuck showing
     'läuft' forever, since nothing on reload can tell it actually failed."""
-    try:
-        plan = json.load(open(plan_path))
-        for s in plan["scenes"]:
-            if s["i"] == scene_i and s.get("status") == "läuft":
-                s["status"] = "fehler"
-        json.dump(plan, open(plan_path, "w"), ensure_ascii=False, indent=1)
-    except: pass
+    with _PLAN_WRITE_LOCK:
+        try:
+            plan = json.load(open(plan_path))
+            for s in plan["scenes"]:
+                if s["i"] == scene_i and s.get("status") == "läuft":
+                    s["status"] = "fehler"
+            json.dump(plan, open(plan_path, "w"), ensure_ascii=False, indent=1)
+        except: pass
 
 def _image_job_worker_inner(job_id: str, task_id: str, out_path: str, plan_path: str, scene_i: int):
     poll_url  = f"{KIE_API}/recordInfo?taskId={task_id}"
@@ -1158,14 +1395,15 @@ def _image_job_worker_inner(job_id: str, task_id: str, out_path: str, plan_path:
             fn = os.path.basename(out_path)
             JOBS[job_id] = {"status": "done", "progress": 100,
                             "file": fn, "source_url": urls[0], "ts": int(time.time()), "error": None}
-            try:
-                plan = json.load(open(plan_path))
-                for s in plan["scenes"]:
-                    if s["i"] == scene_i:
-                        s["status"] = "fertig"; s["file"] = fn
-                        s["source_url"] = urls[0]; s["source_url_ts"] = int(time.time())
-                json.dump(plan, open(plan_path, "w"), ensure_ascii=False, indent=1)
-            except: pass
+            with _PLAN_WRITE_LOCK:
+                try:
+                    plan = json.load(open(plan_path))
+                    for s in plan["scenes"]:
+                        if s["i"] == scene_i:
+                            s["status"] = "fertig"; s["file"] = fn
+                            s["source_url"] = urls[0]; s["source_url_ts"] = int(time.time())
+                    json.dump(plan, open(plan_path, "w"), ensure_ascii=False, indent=1)
+                except: pass
             return
         if state == "fail":
             JOBS[job_id] = {"status": "error", "progress": 0,
@@ -1177,10 +1415,65 @@ def _image_job_worker_inner(job_id: str, task_id: str, out_path: str, plan_path:
     _mark_scene_error(plan_path, scene_i)
 
 
+def _wait_for_chain_scene(plan_path: str, seq_id, target_pos: int, timeout: float = 170.0) -> dict:
+    """Blocks until the scene at (seq_id, target_pos) in plan.json has a source_url, has
+    failed, or the timeout elapses. Necessary because the batch worker dispatches up to
+    MAX_CONCURRENT_IMAGE_GENS scenes at once (ThreadPoolExecutor, not the strictly
+    sequential loop this feature was originally designed against) — an anchor (seq_pos 0)
+    and its first continuation (seq_pos 1) can land in the SAME concurrent batch, so the
+    continuation must not read plan.json before the anchor's image actually finished
+    uploading. Returns the scene dict (possibly without source_url if it failed or timed
+    out) rather than raising — the caller falls back to no chain ref in that case."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            plan = json.load(open(plan_path))
+            match = next((s for s in plan["scenes"]
+                          if s.get("seq_id") == seq_id and s.get("seq_pos") == target_pos), None)
+            if match and (match.get("source_url") or match.get("status") == "fehler"):
+                return match
+        except Exception:
+            pass
+        time.sleep(2)
+    try:
+        plan = json.load(open(plan_path))
+        return next((s for s in plan["scenes"]
+                     if s.get("seq_id") == seq_id and s.get("seq_pos") == target_pos), {})
+    except Exception:
+        return {}
+
+
+def _resolve_chain_refs(plan_path: str, scene: dict) -> tuple:
+    """Returns (ref_urls, debug_info) for a scene that's part of a visual sequence
+    (seq_id/seq_pos set by segment_by_pacing or _apply_visual_sequences_direct). seq_pos
+    0 is the anchor shot — no chain reference needed, just the normal channel character
+    reference. seq_pos >= 1 references BOTH the sequence's anchor image AND its immediate
+    predecessor (deduplicated when they're the same image, i.e. seq_pos == 1) — a single
+    fixed foundation image is what keeps nano-banana-2 visually consistent; chaining only
+    off the immediate predecessor would accumulate drift with every new generation."""
+    if scene.get("seq_id") is None or scene.get("seq_pos", 0) == 0:
+        return [], {}
+    seq_id, pos = scene["seq_id"], scene["seq_pos"]
+    anchor = _wait_for_chain_scene(plan_path, seq_id, 0)
+    prev = anchor if pos - 1 == 0 else _wait_for_chain_scene(plan_path, seq_id, pos - 1)
+    refs, debug = [], {}
+    if anchor.get("source_url"):
+        refs.append(anchor["source_url"]); debug["chain_anchor_file"] = anchor.get("file")
+    if prev.get("source_url") and prev.get("file") != anchor.get("file"):
+        refs.append(prev["source_url"]); debug["chain_prev_file"] = prev.get("file")
+    return refs, debug
+
+
 def _batch_generate_worker(cid: str, vid: str):
     """Runs 'Alle Bilder generieren' entirely server-side — survives page reloads and
-    tab closes. Sequential by design (matches the earlier rate-limit-safety requirement):
-    each scene is fully submitted, polled, and downloaded before the next one starts."""
+    tab closes. Dispatches up to MAX_CONCURRENT_IMAGE_GENS scenes at once (KIE's real
+    limits support 100+ concurrent tasks, see IMAGE_GEN_SEMAPHORE) instead of one at a
+    time. Image scenes have no ordering dependency on each other — each is built fresh
+    from the channel's fixed master prompt + character reference/description, never from
+    another scene's generated output — so dispatch order doesn't matter for correctness.
+    (Sequential, order-dependent continuity — e.g. a Veo clip extending the previous
+    scene's last frame — is a completely separate, still fully-sequential per-click code
+    path around MAX_CHAIN_LENGTH; this function never touches it.)"""
     key = (cid, vid)
     plan_path = v_plan(cid, vid)
     try:
@@ -1188,7 +1481,7 @@ def _batch_generate_worker(cid: str, vid: str):
     except Exception as e:
         with _BATCH_JOBS_LOCK:
             BATCH_JOBS[key] = {"running": False, "stop_requested": False, "done": 0,
-                                "total": 0, "current_i": None, "error": f"Plan lesen: {e}"}
+                                "total": 0, "current_i": [], "error": f"Plan lesen: {e}"}
         return
 
     scenes = plan["scenes"]
@@ -1197,87 +1490,173 @@ def _batch_generate_worker(cid: str, vid: str):
     with _BATCH_JOBS_LOCK:
         BATCH_JOBS[key] = {"running": True, "stop_requested": False,
                             "done": total - len(todo), "total": total,
-                            "current_i": None, "error": None}
-    print(f"  [BatchGen] {cid}/{vid}: {len(todo)} von {total} Szenen offen", flush=True)
+                            "current_i": [], "error": None}
+    print(f"  [BatchGen] {cid}/{vid}: {len(todo)} von {total} Szenen offen "
+          f"(bis zu {MAX_CONCURRENT_IMAGE_GENS} parallel)", flush=True)
 
     master = read_master(cid)
     char_refs = load_char_refs(cid)
-    image_model = get_channel_image_model(cid)
+    image_model = get_video_image_model(cid, vid)
     char_ref_url = get_channel_char_ref(cid)
 
-    for scene in todo:
+    def process_scene(scene):
+        i = scene["i"]
         with _BATCH_JOBS_LOCK:
             if BATCH_JOBS[key]["stop_requested"]:
-                print(f"  [BatchGen] {cid}/{vid}: gestoppt", flush=True)
-                BATCH_JOBS[key]["running"] = False
+                # Stop halts NEW dispatches only — scenes already in flight when Stop
+                # was pressed keep running to completion (KIE tasks can't be cancelled
+                # mid-flight, and killing the poll loop would just orphan the task).
                 return
-            BATCH_JOBS[key]["current_i"] = scene["i"]
-
-        i = scene["i"]
-        # Re-read the plan fresh in case a manual single-scene click already filled this
-        # scene in while the batch was working on earlier ones.
+            BATCH_JOBS[key]["current_i"].append(i)
         try:
-            fresh_plan = json.load(open(plan_path))
-            fresh_scene = next((s for s in fresh_plan["scenes"] if s["i"] == i), None)
-            if fresh_scene and fresh_scene.get("file"):
-                with _BATCH_JOBS_LOCK:
-                    BATCH_JOBS[key]["done"] += 1
-                continue
-        except Exception:
-            pass
-
-        scene_key = (cid, vid, i)
-        fn = f"{i:03d}.jpg"
-        out_path = os.path.join(v_out(cid, vid), fn)
-
-        with _ACTIVE_SCENE_JOBS_LOCK:
-            existing_job_id = ACTIVE_SCENE_JOBS.get(scene_key)
-            already_running = bool(existing_job_id and JOBS.get(existing_job_id, {}).get("status") == "running")
-            if not already_running:
-                full_prompt = _build_image_prompt(scene.get("prompt", ""), master, char_refs)
-
-        if already_running:
-            # A manual click is already generating this exact scene — poll for it to
-            # finish instead of submitting a second KIE task for the same scene.
-            while JOBS.get(existing_job_id, {}).get("status") == "running":
-                time.sleep(2)
-        else:
-            # Shares the same global cap as individual clicks (see IMAGE_GEN_SEMAPHORE) —
-            # the batch is already sequential on its own, but this makes sure a burst of
-            # manual clicks elsewhere can't add unlimited extra KIE submissions on top.
-            IMAGE_GEN_SEMAPHORE.acquire()
+            # Re-read the plan fresh in case a manual single-scene click already filled
+            # this scene in while other scenes were being worked on.
             try:
-                task_id = _kie_submit_image(full_prompt, model=image_model,
-                                             ref_urls=[char_ref_url] if char_ref_url else None)
-            except Exception as e:
-                IMAGE_GEN_SEMAPHORE.release()
-                print(f"  [BatchGen] Szene {i} Submit-Fehler: {e}", flush=True)
-                _mark_scene_error(plan_path, i)
-                with _BATCH_JOBS_LOCK:
-                    BATCH_JOBS[key]["done"] += 1
-                continue
-            job_id = f"{cid}_{vid}_{i}_{int(time.time())}"
-            JOBS[job_id] = {"status": "running", "progress": 0, "file": None,
-                            "source_url": None, "ts": None, "error": None}
+                fresh_plan = json.load(open(plan_path))
+                fresh_scene = next((s for s in fresh_plan["scenes"] if s["i"] == i), None)
+                if fresh_scene and fresh_scene.get("file"):
+                    return
+            except Exception:
+                pass
+
+            scene_key = (cid, vid, i)
+            fn = f"{i:03d}.jpg"
+            out_path = os.path.join(v_out(cid, vid), fn)
+
             with _ACTIVE_SCENE_JOBS_LOCK:
-                ACTIVE_SCENE_JOBS[scene_key] = job_id
-            try:
-                # Blocks until this scene resolves — fully sequential, one KIE task in
-                # flight at a time, matching the original rate-limit-safety requirement.
-                _image_job_worker_inner(job_id, task_id, out_path, plan_path, i)
-            finally:
-                IMAGE_GEN_SEMAPHORE.release()
-                with _ACTIVE_SCENE_JOBS_LOCK:
-                    if ACTIVE_SCENE_JOBS.get(scene_key) == job_id:
-                        del ACTIVE_SCENE_JOBS[scene_key]
+                existing_job_id = ACTIVE_SCENE_JOBS.get(scene_key)
+                already_running = bool(existing_job_id and JOBS.get(existing_job_id, {}).get("status") == "running")
 
-        with _BATCH_JOBS_LOCK:
-            BATCH_JOBS[key]["done"] += 1
+            if already_running:
+                # A manual click is already generating this exact scene — poll for it to
+                # finish instead of submitting a second KIE task for the same scene.
+                while JOBS.get(existing_job_id, {}).get("status") == "running":
+                    time.sleep(2)
+            else:
+                # Chain-refs resolution can BLOCK (waiting on a sibling sequence scene,
+                # see _wait_for_chain_scene) — deliberately done here, outside any lock,
+                # so a waiting scene never holds _ACTIVE_SCENE_JOBS_LOCK/_BATCH_JOBS_LOCK
+                # and doesn't block unrelated scenes from registering/checking in.
+                chain_refs, chain_debug = _resolve_chain_refs(plan_path, scene)
+                # Conditional character reference (not blindly attached to every scene):
+                # only when this scene's chosen concrete_entity actually IS a character
+                # from the analysis — pure landscape/symbol scenes skip it, saving KIE
+                # tokens and avoiding mis-conditioning a scene with no character in it.
+                entity = str(scene.get("concrete_entity", ""))
+                use_char_ref = bool(char_ref_url) and entity.startswith("char_") and \
+                    any(c.get("id") == entity for c in plan.get("characters", []))
+                refs = chain_refs + ([char_ref_url] if use_char_ref else [])
+                full_prompt = _build_image_prompt(scene.get("prompt", ""), master, char_refs)
+                if scene.get("seq_id") is not None and scene.get("seq_pos", 0) >= 1:
+                    # Positive constraints only — negated instructions ("do NOT redesign")
+                    # are weighted weaker by instruction-following image models and can
+                    # even be misread as a focus cue ("pink elephant effect").
+                    full_prompt += (
+                        "\n\nCONTINUITY (STRICT): This is a continuation of the exact same "
+                        "shot as the reference image(s). You MUST perfectly match the "
+                        "identity, outfit, and background environment shown in the "
+                        "references. Change ONLY the camera angle/framing or the specific "
+                        "action described above.")
+                print(f"  [BatchGen] Szene {i}: char_ref {'angehängt' if use_char_ref else 'NICHT angehängt'} "
+                      f"(concrete_entity={entity!r}), Ketten-Refs: {len(chain_refs)}", flush=True)
+
+                # Global cap shared with individual clicks (see IMAGE_GEN_SEMAPHORE) —
+                # bounds how many scenes (from here or elsewhere) are ever in flight with
+                # KIE at once, regardless of how many scenes this batch tries to dispatch.
+                IMAGE_GEN_SEMAPHORE.acquire()
+                try:
+                    task_id = _kie_submit_image(full_prompt, model=image_model, ref_urls=refs or None)
+                except Exception as e:
+                    IMAGE_GEN_SEMAPHORE.release()
+                    err_text = str(e).lower()
+                    retried = False
+                    if refs and "credit" not in err_text and "balance" not in err_text and "frequency" not in err_text:
+                        # A chain/character reference URL may have expired (KIE's public
+                        # temp-hosting isn't permanent) — re-upload the local files fresh
+                        # and retry once before giving up the scene over a stale URL.
+                        print(f"  [BatchGen] Szene {i}: Submit mit Referenzen fehlgeschlagen ({e}) "
+                              f"— lade Referenzen neu hoch und versuche erneut …", flush=True)
+                        try:
+                            fresh_refs = []
+                            for ref_file in (chain_debug.get("chain_anchor_file"), chain_debug.get("chain_prev_file")):
+                                if ref_file:
+                                    local_path = os.path.join(v_out(cid, vid), ref_file)
+                                    if os.path.exists(local_path):
+                                        fresh_refs.append(upload_image_public(local_path))
+                            if use_char_ref:
+                                fresh_refs.append(char_ref_url)
+                            IMAGE_GEN_SEMAPHORE.acquire()
+                            try:
+                                task_id = _kie_submit_image(full_prompt, model=image_model, ref_urls=fresh_refs or None)
+                                retried = True
+                            except Exception as e2:
+                                IMAGE_GEN_SEMAPHORE.release()
+                                print(f"  [BatchGen] Szene {i} Submit-Fehler (nach Referenz-Retry): {e2}", flush=True)
+                        except Exception as e2:
+                            print(f"  [BatchGen] Szene {i}: Referenz-Neu-Upload fehlgeschlagen: {e2}", flush=True)
+                    if not retried:
+                        print(f"  [BatchGen] Szene {i} Submit-Fehler: {e}", flush=True)
+                        _mark_scene_error(plan_path, i)
+                        if "credit" in err_text or "balance" in err_text:
+                            # Not a per-scene problem — the account is out of KIE credits,
+                            # so every remaining scene would fail identically. Stop
+                            # dispatching NEW scenes immediately instead of burning
+                            # through the rest of the queue with the same fatal error.
+                            with _BATCH_JOBS_LOCK:
+                                BATCH_JOBS[key]["stop_requested"] = True
+                                BATCH_JOBS[key]["error"] = str(e)
+                        return
+                job_id = f"{cid}_{vid}_{i}_{int(time.time())}"
+                JOBS[job_id] = {"status": "running", "progress": 0, "file": None,
+                                "source_url": None, "ts": None, "error": None}
+                with _ACTIVE_SCENE_JOBS_LOCK:
+                    ACTIVE_SCENE_JOBS[scene_key] = job_id
+                # Mark "läuft" in plan.json so the individual scene tiles show "Wird
+                # generiert …" while the batch is running, not just for scenes started
+                # via a manual single-scene click (that already did this on its own).
+                # Also persist the chain/char-ref debug fields (Review-Auflage: sichtbar
+                # nachvollziehbar, welche Szenen ohne Charakter-Referenz liefen).
+                with _PLAN_WRITE_LOCK:
+                    try:
+                        p2 = json.load(open(plan_path))
+                        for s in p2["scenes"]:
+                            if s["i"] == i:
+                                s["status"] = "läuft"
+                                s["char_ref_applied"] = use_char_ref
+                                if chain_debug.get("chain_anchor_file"):
+                                    s["chain_anchor_file"] = chain_debug["chain_anchor_file"]
+                                if chain_debug.get("chain_prev_file"):
+                                    s["chain_prev_file"] = chain_debug["chain_prev_file"]
+                        json.dump(p2, open(plan_path, "w"), ensure_ascii=False, indent=1)
+                    except: pass
+                try:
+                    _image_job_worker_inner(job_id, task_id, out_path, plan_path, i)
+                finally:
+                    IMAGE_GEN_SEMAPHORE.release()
+                    with _ACTIVE_SCENE_JOBS_LOCK:
+                        if ACTIVE_SCENE_JOBS.get(scene_key) == job_id:
+                            del ACTIVE_SCENE_JOBS[scene_key]
+        finally:
+            with _BATCH_JOBS_LOCK:
+                BATCH_JOBS[key]["done"] += 1
+                if i in BATCH_JOBS[key]["current_i"]:
+                    BATCH_JOBS[key]["current_i"].remove(i)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_IMAGE_GENS) as pool:
+        futures = []
+        for scene in todo:
+            with _BATCH_JOBS_LOCK:
+                if BATCH_JOBS[key]["stop_requested"]:
+                    break
+            futures.append(pool.submit(process_scene, scene))
+        for f in futures:
+            f.result()
 
     with _BATCH_JOBS_LOCK:
+        stopped = BATCH_JOBS[key]["stop_requested"]
         BATCH_JOBS[key]["running"] = False
-        BATCH_JOBS[key]["current_i"] = None
-    print(f"  [BatchGen] {cid}/{vid}: fertig", flush=True)
+        BATCH_JOBS[key]["current_i"] = []
+    print(f"  [BatchGen] {cid}/{vid}: {'gestoppt' if stopped else 'fertig'}", flush=True)
 
 
 def _veo_job_worker(job_id: str, task_id: str, scene: dict,
@@ -1332,22 +1711,544 @@ def _veo_job_worker(job_id: str, task_id: str, scene: dict,
         os.replace(fn_silent, out_path)
 
     # Update plan
-    try:
-        plan = json.load(open(plan_path))
-        for s in plan["scenes"]:
-            if s["i"] == i:
-                s["video_file"] = fn_final
-                s["video_prompt"] = video_prompt
-                s["veo_task_id"] = task_id
-                s["chain_len"] = chain_len
-        json.dump(plan, open(plan_path, "w"), ensure_ascii=False, indent=1)
-    except Exception as e:
-        print(f"  [Veo] Plan-Update-Fehler: {e}", flush=True)
+    with _PLAN_WRITE_LOCK:
+        try:
+            plan = json.load(open(plan_path))
+            for s in plan["scenes"]:
+                if s["i"] == i:
+                    s["video_file"] = fn_final
+                    s["video_prompt"] = video_prompt
+                    s["veo_task_id"] = task_id
+                    s["chain_len"] = chain_len
+            json.dump(plan, open(plan_path, "w"), ensure_ascii=False, indent=1)
+        except Exception as e:
+            print(f"  [Veo] Plan-Update-Fehler: {e}", flush=True)
 
     JOBS[job_id] = {"status": "done", "progress": 100,
                     "file": fn_final, "video_prompt": video_prompt,
                     "ts": int(time.time()), "error": None}
     print(f"  [Veo] Szene {i} fertig → {fn_final} (audio={'ja' if has_audio else 'nein'})", flush=True)
+
+
+# ---------- Auto-Rendering (reines FFmpeg — kein MoviePy/Remotion/Node) ----------
+# Bild-Modus only: nimmt die bereits generierten Standbilder (generated/NNN.jpg) und
+# schneidet sie mit Ken-Burns-Bewegung zu einem fertigen Video mit durchgehendem
+# Voiceover zusammen. Bewegtbild-Erzeugung (Veo/Grok) bleibt komplett unangetastet —
+# dieser Renderer arbeitet ausschließlich auf bereits fertigen Standbildern.
+
+RENDER_FPS = 30
+RENDER_WIDTH = 1920
+RENDER_HEIGHT = 1080
+RENDER_SUPERSAMPLE_WIDTH = 3840  # scale-up before zoompan — without this, zoompan's
+# per-frame rounding to whole pixels is visible as jitter on a slow zoom. 4K is enough
+# to make that invisible at the zoom intensities used here (capped well under 1.2x)
+# while costing only ~1/4 the memory/CPU of 8K supersampling.
+
+_VIDEO_ENCODER = None
+def _probe_video_encoder() -> tuple:
+    """Returns (encoder_name, extra_ffmpeg_args). Checked once, cached — h264_videotoolbox
+    (Apple Silicon hardware encoder) is roughly 4x faster than libx264 and only lightly
+    loads the CPU, important since the Python server runs alongside during a render. It
+    needs an explicit quality flag or the default output is visibly soft. Falls back to
+    libx264 if videotoolbox isn't available on this machine."""
+    global _VIDEO_ENCODER
+    if _VIDEO_ENCODER is not None:
+        return _VIDEO_ENCODER
+    try:
+        out = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
+                              capture_output=True, text=True, timeout=10)
+        if "h264_videotoolbox" in out.stdout:
+            _VIDEO_ENCODER = ("h264_videotoolbox", ["-q:v", "65"])
+        else:
+            _VIDEO_ENCODER = ("libx264", ["-preset", "medium", "-crf", "20"])
+    except Exception:
+        _VIDEO_ENCODER = ("libx264", ["-preset", "medium", "-crf", "20"])
+    print(f"  [Render] Video-Encoder: {_VIDEO_ENCODER[0]}", flush=True)
+    return _VIDEO_ENCODER
+
+
+def _apply_sync_invariant(scenes: list, audio_duration: float, fps: int) -> list:
+    """Two sequential steps — the second does NOT replace the first, both always run:
+
+    1) Linear normalization (seconds, float): scale every scene's `dur` so their sum
+       matches the real audio_duration exactly. Spreads the usually-small WPM-estimate
+       error invisibly across all scenes.
+    2) Integer-frame rounding (frames, int): converts the now-normalized durations to
+       exact frame counts, with the LAST scene absorbing the rounding remainder, so
+       sum(frames) == round(audio_duration * fps) EXACTLY. This is what actually
+       prevents the tail-clipping/drift bug class (MoneyPrinterTurbo issue #985: a bare
+       `if video_duration >= audio_duration` float comparison breaks on minor FFmpeg
+       rounding and cuts off early) — no code downstream ever compares durations as
+       floats again, only these integer frame counts are treated as ground truth.
+
+    Returns a list of per-scene frame counts, same order/length as `scenes`."""
+    total_dur = sum(s.get("dur", 0) for s in scenes) or 1.0
+    factor = audio_duration / total_dur
+    normalized = [max(0.1, s.get("dur", 0) * factor) for s in scenes]
+
+    audio_frames = round(audio_duration * fps)
+    frames = [round(d * fps) for d in normalized]
+    if frames:
+        frames[-1] += audio_frames - sum(frames)
+        frames[-1] = max(1, frames[-1])
+    return frames
+
+
+def _motion_for_scene(scene: dict, prev_scene: dict) -> dict:
+    """Rule-based Ken Burns recipe — no LLM call, no external easing library. Very short
+    (punchy) scenes stay nearly static, since a moving camera on a sub-1.5s cut reads as
+    jitter, not cinematic movement. Sequence continuations (seq_pos >= 1) keep the SAME
+    zoom direction as their sequence's previous scene, so several images belonging to one
+    visual sequence read as one continuous camera move instead of independent shots each
+    'breathing' on their own. Intensity scales with duration — a long calm scene gets a
+    slower, larger overall zoom; a short one barely moves."""
+    dur = scene.get("dur", 3.0)
+    if dur < 1.5:
+        return {"type": "static", "z_end": 1.02, "focus": [0.5, 0.5]}
+
+    if (scene.get("seq_id") is not None and scene.get("seq_pos", 0) >= 1
+            and prev_scene and prev_scene.get("motion")):
+        zoom_type = prev_scene["motion"].get("type", "zoom_in")
+    else:
+        zoom_type = "zoom_in" if scene.get("i", 0) % 2 == 0 else "zoom_out"
+
+    intensity = min(0.06 + dur * 0.015, 0.18)
+    return {"type": zoom_type, "z_end": round(1.0 + intensity, 3), "focus": [0.5, 0.45]}
+
+
+def _render_clip(img_path: str, scene: dict, out_path: str, fps: int = RENDER_FPS) -> None:
+    """Renders one scene's still image into a short Ken-Burns clip. Resume-safe: skips
+    entirely if out_path already exists and is non-empty — same pattern as
+    _batch_generate_worker's `todo = [s for s in scenes if not s.get("file")]`, so a
+    crashed/restarted render only redoes the clips actually missing, not everything."""
+    if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+        return
+    motion = scene.get("motion") or {"type": "static", "z_end": 1.02, "focus": [0.5, 0.5]}
+    frames = max(1, scene.get("_frames") or round(scene.get("dur", 3.0) * fps))
+    z0, z1 = (1.0, motion["z_end"]) if motion["type"] != "zoom_out" else (motion["z_end"], 1.0)
+    fx, fy = motion.get("focus", [0.5, 0.5])
+
+    # Smoothstep easing (3t²-2t³), built purely from the frame index `on`/`frames` — NOT
+    # from zoompan's internal `zoom` variable (which holds the clamped previous-frame
+    # value and would accumulate rounding drift). This alone fixes the mechanical
+    # "robot camera" look of a plain linear zoom expression, at zero extra runtime cost.
+    z_expr = f"{z0}+({z1}-{z0})*(3*pow(on/{frames},2)-2*pow(on/{frames},3))"
+    x_expr = f"(iw*{fx})-(iw/zoom/2)"
+    y_expr = f"(ih*{fy})-(ih/zoom/2)"
+
+    encoder, encoder_args = _probe_video_encoder()
+    cmd = [
+        "ffmpeg", "-y", "-loop", "1", "-i", img_path,
+        "-t", str(frames / fps), "-r", str(fps),
+        "-filter_complex",
+        f"scale={RENDER_SUPERSAMPLE_WIDTH}:-2,"
+        f"zoompan=z='{z_expr}':d={frames}:x='{x_expr}':y='{y_expr}':"
+        f"s={RENDER_WIDTH}x{RENDER_HEIGHT}:fps={fps},setsar=1",
+        "-c:v", encoder, *encoder_args,
+        "-pix_fmt", "yuv420p", "-video_track_timescale", "90000",
+        out_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, timeout=120)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg Clip-Render fehlgeschlagen ({os.path.basename(img_path)}): "
+                            f"{result.stderr.decode(errors='replace')[-300:]}")
+
+
+def _assemble_clips(clip_paths: list, out_path: str) -> None:
+    """concat-demuxer, hard cuts only (V1 decision — crossfades are later polish, need
+    a full filter_complex re-encode instead of a lossless -c copy). Requires all clips
+    to share codec/resolution/fps/timescale, which _render_clip's fixed recipe guarantees."""
+    list_path = out_path + ".txt"
+    with open(list_path, "w") as f:
+        for p in clip_paths:
+            f.write(f"file '{os.path.abspath(p)}'\n")
+    try:
+        cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", out_path]
+        result = subprocess.run(cmd, capture_output=True, timeout=180)
+    finally:
+        os.remove(list_path)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg Zusammenschnitt fehlgeschlagen: {result.stderr.decode(errors='replace')[-300:]}")
+
+
+def _mux_audio(silent_path: str, audio_path: str, out_path: str) -> None:
+    """Final mux: one continuous voiceover track over the assembled silent video.
+    -af apad pads the audio with a small buffer if it's a touch shorter than the video —
+    a safety net ON TOP of the integer-frame sync invariant (_apply_sync_invariant), not
+    a replacement for it; if there's still a residual mismatch, the audio gets padded
+    rather than the video getting truncated. -movflags +faststart moves the MP4 metadata
+    to the front so the <video> preview can start playing before the whole file has
+    downloaded — without it the browser waits for the complete file first."""
+    cmd = ["ffmpeg", "-y", "-i", silent_path, "-i", audio_path,
+           "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+           "-af", "apad=pad_dur=0.3", "-shortest", "-movflags", "+faststart", out_path]
+    result = subprocess.run(cmd, capture_output=True, timeout=180)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg Audio-Mux fehlgeschlagen: {result.stderr.decode(errors='replace')[-300:]}")
+
+
+def _render_selfcheck(final_path: str, expected_audio_duration: float) -> dict:
+    """Post-render ffprobe checks, same philosophy as _validate_image_prompt_entry: a
+    silent success that's actually broken (truncated video, no audio track) must not be
+    reported as done. One level higher up — on the finished video instead of a prompt."""
+    checks = {"duration_ok": False, "audio_ok": False, "frames_ok": False}
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                               "-of", "csv=p=0", final_path], capture_output=True, text=True, timeout=15)
+        video_dur = float(out.stdout.strip())
+        checks["duration_ok"] = abs(video_dur - expected_audio_duration) < 0.5
+    except Exception:
+        pass
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0",
+                               "-show_entries", "stream=codec_type", "-of", "csv=p=0", final_path],
+                              capture_output=True, text=True, timeout=15)
+        checks["audio_ok"] = "audio" in out.stdout
+    except Exception:
+        pass
+    checks["frames_ok"] = os.path.exists(final_path) and os.path.getsize(final_path) > 0
+    return checks
+
+
+# ---------- Übergänge (Phase 4, Teil 1) — Crossfade NUR an echten Sequenz-/Szenen- ----
+# wechseln, alles andere bleibt harter Schnitt über den verlustfreien concat-Demuxer.
+TRANSITION_DURATION_SEC = 0.5
+TRANSITION_TYPE = "fade"  # ffmpeg xfade-Übergangsname — einfache Überblendung
+
+def _has_transition_before(scenes: list, idx: int) -> bool:
+    """Identische Regel wie das Whoosh-SFX-Ereignis (_build_sfx_events) — bewusst so:
+    Bild-Übergang und Whoosh-Sound müssen auf demselben Schnitt sitzen. True, wenn diese
+    Szene der Anker (seq_pos==0) einer Sequenz ist UND die unmittelbar vorherige Szene
+    einer anderen (oder gar keiner) Sequenz angehört — ein echter visueller Wechsel,
+    nicht nur die erste Szene im Video."""
+    if idx == 0:
+        return False
+    s, prev = scenes[idx], scenes[idx - 1]
+    return s.get("seq_id") is not None and s.get("seq_pos", 0) == 0 and prev.get("seq_id") != s.get("seq_id")
+
+
+def _clip_duration_sec(path: str) -> float:
+    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                           "-of", "csv=p=0", path], capture_output=True, text=True, timeout=15)
+    return float(out.stdout.strip())
+
+
+def _crossfade_clips(clip_a: str, clip_b: str, out_path: str, duration: float) -> None:
+    """Merges two already-rendered clips into one with a crossfade at the boundary.
+    `clip_a` MUST have been rendered with `duration` extra seconds of Ken-Burns motion
+    tacked onto its planned length beforehand (see _render_worker's transition_frames
+    compensation) — the crossfade consumes exactly that overlap, so the merged clip's
+    total duration still equals the ORIGINAL uncompensated sum of both scenes' planned
+    durations. That's what keeps the frame-exact audio sync invariant (_apply_sync_
+    invariant) intact even though a crossfade inherently overlaps two clips in time."""
+    dur_a = _clip_duration_sec(clip_a)
+    offset = max(0.0, dur_a - duration)
+    encoder, encoder_args = _probe_video_encoder()
+    cmd = ["ffmpeg", "-y", "-i", clip_a, "-i", clip_b,
+           "-filter_complex", f"[0:v][1:v]xfade=transition={TRANSITION_TYPE}:duration={duration}:offset={offset}[v]",
+           "-map", "[v]", "-c:v", encoder, *encoder_args,
+           "-pix_fmt", "yuv420p", "-video_track_timescale", "90000", out_path]
+    result = subprocess.run(cmd, capture_output=True, timeout=120)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg Übergang fehlgeschlagen: {result.stderr.decode(errors='replace')[-300:]}")
+
+
+# ---------- Sound-Design (Phase 2.5) — Musikbett + SFX, alles reines FFmpeg ----------
+# Kein Live-API-Abruf, kein neues Paket: ein einmal kuratierter, lokaler Asset-Pool unter
+# assets/ (projektweit, nicht pro Kanal — Sounds sind stiluniversell). Fehlen die Dateien
+# (z.B. frischer Checkout ohne echte Assets), fällt der Renderer sauber auf reines
+# Voiceover zurück (Phase-2-Verhalten) statt zu crashen — siehe _build_final_audio.
+SOUND_ASSETS_DIR = os.path.join(HERE, "assets")
+MUSIC_BED_FILE = os.path.join(SOUND_ASSETS_DIR, "music", "neutral_bed.mp3")
+SFX_FILES = {
+    "whoosh": os.path.join(SOUND_ASSETS_DIR, "sfx", "whoosh_01.wav"),
+    "impact": os.path.join(SOUND_ASSETS_DIR, "sfx", "impact_01.wav"),
+    "riser":  os.path.join(SOUND_ASSETS_DIR, "sfx", "riser_01.wav"),
+}
+
+
+def _build_sfx_events(scenes: list) -> list:
+    """Rule-based SFX timing — no LLM call. 'whoosh' fires at a real sequence/scene
+    change: a scene that's the anchor (seq_pos == 0) of a sequence, whose immediately
+    preceding scene belongs to a DIFFERENT sequence (or none) — i.e. an actual visual
+    transition, not just the first scene of the video. 'impact' fires at every scene
+    analyze_script's pacing labeled 'punchy' (emotional peaks/reveals/cliffhangers) —
+    the closest available proxy for "strongest emotional_arc transitions" from the plan,
+    since this codebase's scene model has no explicit chapter markers to key off of."""
+    events = []
+    for idx, s in enumerate(scenes):
+        if idx == 0:
+            continue
+        prev = scenes[idx - 1]
+        if s.get("seq_id") is not None and s.get("seq_pos", 0) == 0 and prev.get("seq_id") != s.get("seq_id"):
+            events.append({"start": s.get("start", 0), "sfx": "whoosh"})
+        if s.get("pacing") == "punchy":
+            events.append({"start": s.get("start", 0), "sfx": "riser"})
+    return events
+
+
+def _duck_music_under_voice(voice_path: str, music_path: str, out_path: str) -> None:
+    """Music bed ducked under the voiceover via sidechaincompress — volume drops
+    automatically whenever the voice is present, rises back up in gaps. `-stream_loop -1`
+    on the music input loops the (typically much shorter) bed file for the whole video;
+    `amix=duration=first` then trims the result to the voice track's exact length."""
+    cmd = ["ffmpeg", "-y", "-i", voice_path, "-stream_loop", "-1", "-i", music_path,
+           "-filter_complex",
+           "[0:a]asplit=2[voice][sc];"
+           "[1:a][sc]sidechaincompress=threshold=0.02:ratio=10:attack=50:release=500[ducked];"
+           "[voice][ducked]amix=inputs=2:duration=first[a]",
+           "-map", "[a]", out_path]
+    result = subprocess.run(cmd, capture_output=True, timeout=180)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg Ducking fehlgeschlagen: {result.stderr.decode(errors='replace')[-300:]}")
+
+
+def _place_sfx(narration_path: str, sfx_events: list, out_path: str) -> None:
+    """Layers SFX files onto the (already ducked) narration track at specific
+    timestamps via adelay, then amix + loudnorm for one consistent final loudness.
+    Silently skips any event whose asset file doesn't exist — a missing single SFX
+    file must not fail the whole render."""
+    inputs = ["-i", narration_path]
+    filter_parts, labels = [], []
+    for ev in sfx_events:
+        sfx_path = SFX_FILES.get(ev["sfx"])
+        if not sfx_path or not os.path.exists(sfx_path):
+            continue
+        inputs += ["-i", sfx_path]
+        delay_ms = max(0, round(ev["start"] * 1000))
+        label = f"s{len(labels)}"
+        filter_parts.append(f"[{len(labels)+1}:a]adelay={delay_ms}|{delay_ms},volume=0.7[{label}]")
+        labels.append(label)
+
+    if not labels:
+        # Nothing to place — just loudnorm-normalize the narration/music mix alone.
+        cmd = ["ffmpeg", "-y", "-i", narration_path, "-af", "loudnorm", out_path]
+    else:
+        mix_inputs = "[0:a]" + "".join(f"[{l}]" for l in labels)
+        filter_complex = ";".join(filter_parts) + f";{mix_inputs}amix=inputs={len(labels)+1}:duration=first,loudnorm[a]"
+        cmd = ["ffmpeg", "-y", *inputs, "-filter_complex", filter_complex, "-map", "[a]", out_path]
+    result = subprocess.run(cmd, capture_output=True, timeout=180)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg SFX-Platzierung fehlgeschlagen: {result.stderr.decode(errors='replace')[-300:]}")
+
+
+def _build_final_audio(voice_path: str, scenes: list, render_dir: str) -> str:
+    """Builds the final audio track for muxing: voiceover + ducked music bed + rule-
+    based SFX, loudnorm-normalized. Falls back to the raw voiceover unchanged if the
+    music bed asset is missing (e.g. a fresh checkout before real assets are added) —
+    same resilience pattern as everywhere else in this codebase: missing optional data
+    degrades gracefully instead of failing the whole render."""
+    if not os.path.exists(MUSIC_BED_FILE):
+        print("  [Render] Kein Musikbett gefunden (assets/music/neutral_bed.mp3) — "
+              "rendere ohne Sound-Design, nur Voiceover.", flush=True)
+        return voice_path
+    try:
+        ducked_path = os.path.join(render_dir, "_ducked.mp3")
+        _duck_music_under_voice(voice_path, MUSIC_BED_FILE, ducked_path)
+        sfx_events = _build_sfx_events(scenes)
+        final_audio_path = os.path.join(render_dir, "_final_audio.mp3")
+        _place_sfx(ducked_path, sfx_events, final_audio_path)
+        print(f"  [Render] Sound-Design: Musikbett gedückt + {len(sfx_events)} SFX-Ereignisse platziert", flush=True)
+        return final_audio_path
+    except Exception as e:
+        print(f"  [Render] Sound-Design fehlgeschlagen ({e}) — falle zurück auf reines Voiceover.", flush=True)
+        return voice_path
+
+
+def _render_worker(cid: str, vid: str):
+    """Orchestrates: prepare (sync invariant) -> motion -> clips (one Ken Burns clip per
+    scene, resume-safe) -> assemble (concat) -> audio (mux) -> review (ffprobe checks).
+    Sequential — one ffmpeg process at a time, no thread pool over rendering (that would
+    oversubscribe the CPU well beyond what the images' 8-way concurrency already does)."""
+    key = (cid, vid)
+    plan_path = v_plan(cid, vid)
+    render_dir = v_render_tmp(cid, vid)
+    os.makedirs(render_dir, exist_ok=True)
+
+    def stage(name, done=0, total=0):
+        with _RENDER_JOBS_LOCK:
+            if key in RENDER_JOBS:
+                RENDER_JOBS[key].update(stage=name, done=done, total=total)
+
+    def stop_requested():
+        with _RENDER_JOBS_LOCK:
+            return RENDER_JOBS.get(key, {}).get("stop_requested", False)
+
+    try:
+        try:
+            plan = json.load(open(plan_path))
+        except Exception as e:
+            raise RuntimeError(f"Plan lesen: {e}")
+
+        scenes = [s for s in plan["scenes"] if s.get("file")]
+        if not scenes:
+            raise RuntimeError("Keine generierten Bilder vorhanden — erst Bilder generieren.")
+
+        stage("prepare")
+        try:
+            audio_meta = json.load(open(v_audio(cid, vid)))
+            audio_path = audio_meta.get("path", "")
+        except Exception:
+            audio_path = ""
+        if not audio_path or not os.path.exists(audio_path):
+            raise RuntimeError("Kein hochgeladenes Voice-over gefunden — Rendern braucht eine durchgehende Audiospur.")
+
+        probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                                 "-of", "csv=p=0", audio_path], capture_output=True, text=True, timeout=15)
+        audio_duration = float(probe.stdout.strip())
+
+        frames = _apply_sync_invariant(scenes, audio_duration, RENDER_FPS)
+        for s, f in zip(scenes, frames):
+            s["_frames"] = f
+
+        stage("motion")
+        for idx, s in enumerate(scenes):
+            if not s.get("motion"):
+                s["motion"] = _motion_for_scene(s, scenes[idx - 1] if idx > 0 else None)
+
+        # Transition points (same rule as the whoosh SFX event) get their PRECEDING
+        # scene's clip rendered with extra frames — exactly the crossfade duration —
+        # tacked on. The crossfade then consumes exactly that overlap, so the merged
+        # clip's total duration still equals the original, uncompensated sum of both
+        # scenes' planned durations, keeping the frame-exact sync invariant intact.
+        transition_frames = round(TRANSITION_DURATION_SEC * RENDER_FPS)
+        transition_at = [idx for idx in range(len(scenes)) if _has_transition_before(scenes, idx)]
+        for idx in transition_at:
+            prev = scenes[idx - 1]
+            prev["_frames"] = (prev.get("_frames") or round(prev["dur"] * RENDER_FPS)) + transition_frames
+
+        stage("clips", 0, len(scenes))
+        clip_paths = []
+        for idx, s in enumerate(scenes):
+            if stop_requested():
+                raise RuntimeError("Abgebrochen (Stop angefordert)")
+            clip_path = os.path.join(render_dir, f"{s['i']:03d}.mp4")
+            img_path = os.path.join(v_out(cid, vid), s["file"])
+            _render_clip(img_path, s, clip_path, fps=RENDER_FPS)
+            clip_paths.append(clip_path)
+            s["clip_file"] = os.path.basename(clip_path)
+            stage("clips", idx + 1, len(scenes))
+
+        # Merge in crossfades ONLY at the identified transition points — every other
+        # cut stays a hard cut via the lossless concat demuxer below. Each merge
+        # replaces the last entry of the growing output list (which may itself already
+        # be a merge from a previous transition), so back-to-back transitions chain
+        # correctly instead of referencing an already-consumed clip.
+        stage("transitions", 0, len(transition_at))
+        merged_paths = []
+        transitions_done = 0
+        for idx, s in enumerate(scenes):
+            path = clip_paths[idx]
+            if idx in transition_at and merged_paths:
+                merged_path = os.path.join(render_dir, f"xfade_{s['i']:03d}.mp4")
+                _crossfade_clips(merged_paths[-1], path, merged_path, TRANSITION_DURATION_SEC)
+                merged_paths[-1] = merged_path
+                transitions_done += 1
+                stage("transitions", transitions_done, len(transition_at))
+            else:
+                merged_paths.append(path)
+        clip_paths = merged_paths
+
+        stage("assemble")
+        silent_path = os.path.join(render_dir, "silent.mp4")
+        _assemble_clips(clip_paths, silent_path)
+
+        stage("audio")
+        final_path = os.path.join(v_out(cid, vid), "final.mp4")
+        # Sound-design layer (Phase 2.5) — ducked music bed + rule-based SFX, or just the
+        # raw voiceover unchanged if no music asset is present (see _build_final_audio).
+        mixed_audio_path = _build_final_audio(audio_path, scenes, render_dir)
+        _mux_audio(silent_path, mixed_audio_path, final_path)
+
+        stage("review")
+        checks = _render_selfcheck(final_path, audio_duration)
+        if not all(checks.values()):
+            raise RuntimeError(f"Selbstprüfung fehlgeschlagen: {checks}")
+
+        with _PLAN_WRITE_LOCK:
+            fresh_plan = json.load(open(plan_path))
+            by_i = {s["i"]: s for s in fresh_plan["scenes"]}
+            for s in scenes:
+                if s["i"] in by_i:
+                    by_i[s["i"]]["motion"] = s["motion"]
+                    by_i[s["i"]]["clip_file"] = s["clip_file"]
+            fresh_plan["audio_duration"] = audio_duration
+            fresh_plan["render"] = {"file": "final.mp4", "ts": int(time.time()), "checks": checks}
+            json.dump(fresh_plan, open(plan_path, "w"), ensure_ascii=False, indent=1)
+
+        # Only delete render_tmp after mux + selfcheck succeeded, and only this
+        # directory — v_render_tmp() is deliberately separate from v_out()/generated/,
+        # never the same path, so this can never touch the actual generated images.
+        shutil.rmtree(render_dir, ignore_errors=True)
+
+        with _RENDER_JOBS_LOCK:
+            RENDER_JOBS[key] = {"running": False, "stop_requested": False, "stage": "fertig",
+                                 "done": len(scenes), "total": len(scenes), "error": None, "file": "final.mp4"}
+        print(f"  [Render] {cid}/{vid}: fertig → final.mp4", flush=True)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        with _RENDER_JOBS_LOCK:
+            prev = RENDER_JOBS.get(key, {})
+            RENDER_JOBS[key] = {"running": False, "stop_requested": False, "stage": "error",
+                                 "done": prev.get("done", 0), "total": prev.get("total", 0),
+                                 "error": str(e), "file": None}
+        print(f"  [Render] {cid}/{vid}: Fehler: {e}", flush=True)
+
+
+def _plan_generate_worker(cid: str, vid: str, text: str, wpm: float, sec: float):
+    """Runs script -> scenes -> analysis -> image prompts server-side, the same reason
+    as _batch_generate_worker: this used to be one blocking HTTP request, so closing the
+    tab mid-run looked like nothing happened and re-clicking started a second, fully
+    independent LLM pass over the same script."""
+    key = (cid, vid)
+    try:
+        ensure_video(cid, vid)
+        out = v_out(cid, vid)
+        for f in os.listdir(out):
+            if f.endswith((".jpg", ".png", ".mp4")):
+                try:
+                    os.remove(os.path.join(out, f))
+                    print(f"  [Plan] Gelösche alte Datei: {f}", flush=True)
+                except: pass
+
+        with _PLAN_JOBS_LOCK:
+            PLAN_JOBS[key]["step"] = "Zerlege Skript in Einheiten …"
+        units = split_units(text)
+
+        # Analysis runs on the raw atomic units (not pre-grouped scenes) BEFORE
+        # segmentation now, because it also assigns the per-unit pacing label (calm/
+        # normal/punchy) used to decide scene cuts below — the same LLM pass that reads
+        # the emotional arc decides pacing, so cuts land on "a complete thought" instead
+        # of a mechanical time interval, and pacing can't drift from what the model
+        # already decided is the climax vs. the setup.
+        with _PLAN_JOBS_LOCK:
+            PLAN_JOBS[key]["step"] = f"Analysiere {len(units)} Einheiten (Story-Bogen + Pacing) …"
+        analysis = analyze_script(units)
+
+        with _PLAN_JOBS_LOCK:
+            PLAN_JOBS[key]["step"] = "Gruppiere Szenen nach Pacing …"
+        scenes = segment_by_pacing(units, analysis.get("pacing", []), wpm, sec,
+                                    sequences=analysis.get("visual_sequences", []))
+
+        with _PLAN_JOBS_LOCK:
+            PLAN_JOBS[key]["step"] = f"Schreibe Bild-Prompts für {len(scenes)} Szenen …"
+        prompts = visual_prompts(scenes, analysis)
+
+        for s, pr in zip(scenes, prompts):
+            s["prompt"] = pr["prompt"]; s["concrete_entity"] = pr["concrete_entity"]; s["file"] = None
+            s["status"] = "geplant"; s["t"] = fmt_t(s["start"])
+            s["video_prompt"] = ""
+            s["phase"] = story_phase(s["i"], len(scenes))
+        out_data = {"scenes": scenes, "wpm": wpm, "sec": sec, "characters": analysis.get("characters", [])}
+        json.dump(out_data, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
+
+        with _PLAN_JOBS_LOCK:
+            PLAN_JOBS[key] = {"running": False, "step": "Fertig", "error": None, "done": True}
+        print(f"  [Plan] {cid}/{vid}: fertig, {len(scenes)} Szenen", flush=True)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        with _PLAN_JOBS_LOCK:
+            PLAN_JOBS[key] = {"running": False, "step": "Fehler", "error": str(e), "done": False}
 
 
 def gen_image(scene_prompt, master, out_path, char_refs=None):
@@ -1817,6 +2718,10 @@ class H(BaseHTTPRequestHandler):
             with _BATCH_JOBS_LOCK:
                 state = BATCH_JOBS.get((cid, vid))
             return self._send(200, state or {"running": False})
+        if p == "/api/render_status":
+            with _RENDER_JOBS_LOCK:
+                state = RENDER_JOBS.get((cid, vid))
+            return self._send(200, state or {"running": False})
         if p == "/api/video_meta":
             meta = load_v_meta(cid, vid)
             meta["has_thumbnail"] = os.path.exists(os.path.join(v_out(cid, vid), "thumbnail.jpg"))
@@ -1826,10 +2731,14 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/master":
             return self._send(200, {"master": read_master(cid)})
         if p == "/api/image_model":
-            return self._send(200, {"model": get_channel_image_model(cid), "options": list(VALID_IMAGE_MODELS)})
+            return self._send(200, {"model": get_video_image_model(cid, vid), "options": list(VALID_IMAGE_MODELS)})
         if p == "/api/plan":
             try:    return self._send(200, json.load(open(v_plan(cid, vid))))
             except: return self._send(200, {"scenes": []})
+        if p == "/api/plan_status":
+            with _PLAN_JOBS_LOCK:
+                state = PLAN_JOBS.get((cid, vid))
+            return self._send(200, state or {"running": False})
         if p == "/api/download":
             ts_map = {}
             try:
@@ -1933,7 +2842,8 @@ class H(BaseHTTPRequestHandler):
             write_master(cid, d.get("master", ""))
             return self._send(200, {"ok": True})
         if p == "/api/image_model":
-            set_channel_image_model(cid, d.get("model", "nano-banana-2"))
+            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
+            set_video_image_model(cid, vid, d.get("model", "nano-banana-2"))
             return self._send(200, {"ok": True})
 
         # ── Script generator (global, no channel needed) ──────────────────────
@@ -1998,7 +2908,7 @@ class H(BaseHTTPRequestHandler):
             char_ref_url = get_channel_char_ref(cid)
             try:
                 res = gen_thumbnail_image(prompt, master_style, os.path.join(v_out(cid, vid), "thumbnail.jpg"),
-                                           model=get_channel_image_model(cid),
+                                           model=get_video_image_model(cid, vid),
                                            ref_urls=[char_ref_url] if char_ref_url else None)
             finally:
                 IMAGE_GEN_SEMAPHORE.release()
@@ -2017,30 +2927,20 @@ class H(BaseHTTPRequestHandler):
             text = clean_script(d.get("script", ""))
             if not text: return self._send(200, {"scenes": []})
             if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
-            ensure_video(cid, vid)
-            # Clear old generated files when loading new script
-            out = v_out(cid, vid)
-            for f in os.listdir(out):
-                if f.endswith((".jpg", ".png", ".mp4")):
-                    try:
-                        os.remove(os.path.join(out, f))
-                        print(f"  [Plan] Gelösche alte Datei: {f}", flush=True)
-                    except: pass
-            scenes = segment(text, wpm, sec)
-            analysis = analyze_script([s["text"] for s in scenes])
-            prompts  = visual_prompts(scenes, analysis)
-            for s, pr in zip(scenes, prompts):
-                s["prompt"] = pr; s["file"] = None
-                s["status"] = "geplant"; s["t"] = fmt_t(s["start"])
-                # video_prompt stays empty — only generated on demand per scene (see
-                # /api/generate_t2v, /api/preview_t2v_prompt) so switching to video mode
-                # or generating a handful of scenes doesn't cost a full-script Gemini pass
-                # nobody asked for. Core workflow is images first, I2V afterward.
-                s["video_prompt"] = ""
-                s["phase"] = story_phase(s["i"], len(scenes))
-            out = {"scenes": scenes, "wpm": wpm, "sec": sec, "characters": analysis.get("characters", [])}
-            json.dump(out, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
-            return self._send(200, out)
+            key = (cid, vid)
+            with _PLAN_JOBS_LOCK:
+                if PLAN_JOBS.get(key, {}).get("running"):
+                    return self._send(200, {"ok": True, "already_running": True})
+                # Set running=True atomically with the check, before the worker thread
+                # exists — same fix as the image batch job race (see generate_all_start).
+                PLAN_JOBS[key] = {"running": True, "step": "Startet …", "error": None, "done": False}
+            threading.Thread(target=_plan_generate_worker, args=(cid, vid, text, wpm, sec), daemon=True).start()
+            return self._send(200, {"ok": True, "already_running": False})
+
+        if p == "/api/plan_status_reset":
+            with _PLAN_JOBS_LOCK:
+                PLAN_JOBS.pop((cid, vid), None)
+            return self._send(200, {"ok": True})
 
         # ── Mode toggle ───────────────────────────────────────────────────────
         if p == "/api/set_mode":
@@ -2220,9 +3120,17 @@ class H(BaseHTTPRequestHandler):
                                "file": None, "status": "geplant", "prompt": ""})
             tx(3, f"Analysiere Story-Struktur ({len(scenes)} Szenen) …")
             analysis = analyze_script([s["text"] for s in scenes])
+            # This path's scenes are already 1:1 with the beats just analyzed (no
+            # grouping/splitting like the manual-script path) — direct index assignment.
+            _apply_visual_sequences_direct(scenes, analysis.get("visual_sequences", []))
+            pacing_by_i = {p.get("beat"): p.get("label") for p in analysis.get("pacing", [])
+                           if isinstance(p, dict) and p.get("label") in ("calm", "normal", "punchy")}
+            for s in scenes:
+                s["pacing"] = pacing_by_i.get(s["i"], "normal")
             tx(4, "Schreibe Bild-Prompts …")
             prompts = visual_prompts(scenes, analysis)
-            for s, pr in zip(scenes, prompts): s["prompt"] = pr
+            for s, pr in zip(scenes, prompts):
+                s["prompt"] = pr["prompt"]; s["concrete_entity"] = pr["concrete_entity"]
             # video_prompt stays empty — only generated on demand per scene, see /api/plan comment
             for s in scenes:
                 s["video_prompt"] = ""
@@ -2281,7 +3189,7 @@ class H(BaseHTTPRequestHandler):
                 # "not running" and each spin up their own worker, causing multiple
                 # concurrent generation loops hammering KIE in parallel.
                 BATCH_JOBS[key] = {"running": True, "stop_requested": False, "done": 0,
-                                    "total": 0, "current_i": None, "error": None}
+                                    "total": 0, "current_i": [], "error": None}
             threading.Thread(target=_batch_generate_worker, args=(cid, vid), daemon=True).start()
             return self._send(200, {"ok": True, "already_running": False})
 
@@ -2290,6 +3198,28 @@ class H(BaseHTTPRequestHandler):
             with _BATCH_JOBS_LOCK:
                 if key in BATCH_JOBS:
                     BATCH_JOBS[key]["stop_requested"] = True
+            return self._send(200, {"ok": True})
+
+        # ── Auto-rendering (Ken Burns clips -> concat -> audio mux) ─────────────
+        if p == "/api/render_start":
+            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
+            key = (cid, vid)
+            with _RENDER_JOBS_LOCK:
+                if RENDER_JOBS.get(key, {}).get("running"):
+                    return self._send(200, {"ok": True, "already_running": True})
+                # Same atomic "set running=True before the thread exists" fix as
+                # generate_all_start above — avoids two rapid start calls each
+                # spinning up their own render worker on the same video.
+                RENDER_JOBS[key] = {"running": True, "stop_requested": False, "stage": "startet",
+                                     "done": 0, "total": 0, "error": None, "file": None}
+            threading.Thread(target=_render_worker, args=(cid, vid), daemon=True).start()
+            return self._send(200, {"ok": True, "already_running": False})
+
+        if p == "/api/render_stop":
+            key = (cid, vid)
+            with _RENDER_JOBS_LOCK:
+                if key in RENDER_JOBS:
+                    RENDER_JOBS[key]["stop_requested"] = True
             return self._send(200, {"ok": True})
 
         if p == "/api/generate_one":
@@ -2314,7 +3244,7 @@ class H(BaseHTTPRequestHandler):
             IMAGE_GEN_SEMAPHORE.acquire()
             char_ref_url = get_channel_char_ref(cid)
             try:
-                task_id = _kie_submit_image(full_prompt, model=get_channel_image_model(cid),
+                task_id = _kie_submit_image(full_prompt, model=get_video_image_model(cid, vid),
                                              ref_urls=[char_ref_url] if char_ref_url else None)
             except Exception as e:
                 IMAGE_GEN_SEMAPHORE.release()
@@ -2325,13 +3255,14 @@ class H(BaseHTTPRequestHandler):
             with _ACTIVE_SCENE_JOBS_LOCK:
                 ACTIVE_SCENE_JOBS[scene_key] = job_id
             # Mark scene as running in plan
-            try:
-                plan = json.load(open(v_plan(cid, vid)))
-                for s in plan["scenes"]:
-                    if s["i"] == i:
-                        s["prompt"] = prompt; s["status"] = "läuft"
-                json.dump(plan, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
-            except: pass
+            with _PLAN_WRITE_LOCK:
+                try:
+                    plan = json.load(open(v_plan(cid, vid)))
+                    for s in plan["scenes"]:
+                        if s["i"] == i:
+                            s["prompt"] = prompt; s["status"] = "läuft"
+                    json.dump(plan, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
+                except: pass
             threading.Thread(
                 target=_image_job_worker,
                 args=(job_id, task_id, out_path, v_plan(cid, vid), i, scene_key),
@@ -2371,11 +3302,13 @@ class H(BaseHTTPRequestHandler):
                 print(f"  [Video] Lade Szenen-Bild hoch …", flush=True)
                 try:
                     source_url = upload_image_public(local_path)
-                    for s in plan["scenes"]:
-                        if s["i"] == i:
-                            s["source_url"] = source_url
-                            s["source_url_ts"] = int(time.time())
-                    json.dump(plan, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
+                    with _PLAN_WRITE_LOCK:
+                        plan = json.load(open(v_plan(cid, vid)))
+                        for s in plan["scenes"]:
+                            if s["i"] == i:
+                                s["source_url"] = source_url
+                                s["source_url_ts"] = int(time.time())
+                        json.dump(plan, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
                 except Exception as e:
                     return self._send(500, {"error": f"Bild-Upload fehlgeschlagen: {e}"})
 
@@ -2436,14 +3369,17 @@ class H(BaseHTTPRequestHandler):
             if not has_audio:
                 # No audio — just rename silent to final
                 os.replace(silent_path, out_path)
-            # Update plan
-            try:
-                for s in plan["scenes"]:
-                    if s["i"] == i:
-                        s["video_file"] = fn
-                        s["video_prompt"] = video_prompt
-                json.dump(plan, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
-            except: pass
+            # Update plan (re-read fresh under the lock — don't reuse the `plan` object
+            # read earlier in this request, which may now be stale)
+            with _PLAN_WRITE_LOCK:
+                try:
+                    plan = json.load(open(v_plan(cid, vid)))
+                    for s in plan["scenes"]:
+                        if s["i"] == i:
+                            s["video_file"] = fn
+                            s["video_prompt"] = video_prompt
+                    json.dump(plan, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
+                except: pass
             print(f"  [Video] Szene {i} fertig → {fn} (audio={'ja' if has_audio else 'nein'})", flush=True)
             return self._send(200, {"ok": True, "file": fn, "video_prompt": video_prompt, "ts": int(time.time())})
 
@@ -2465,11 +3401,15 @@ class H(BaseHTTPRequestHandler):
             master = ""
             try: master = open(ch_master(cid)).read().strip()
             except: pass
-            # Build a neutral standing-pose prompt
+            # Neutral standing-pose prompt — deliberately does NOT hardcode any style
+            # words (background, line-weight, shading) here. That used to say "pure
+            # white background, no shading", which directly contradicted whatever
+            # style the channel's actual master prompt describes (e.g. Ink Explainer's
+            # "never a white background, flat cel-shading") — the master prompt alone
+            # must own all style decisions, this only specifies the pose.
             char_prompt = (
-                f"{master}\n"
-                "Full body, neutral standing pose, facing forward, arms at sides. "
-                "2D flat line art, thin black strokes, pure white background, no shading."
+                f"Full body, neutral standing pose, facing forward, arms at sides, "
+                f"plain simple setting.\n\n{master}"
             )
             try:
                 task_id = _kie_submit_image(char_prompt)

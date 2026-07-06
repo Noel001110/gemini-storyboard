@@ -388,10 +388,55 @@
         <button onclick="stopGenAll()" id="stopAllBtn" class="ghost" style="display:none;color:var(--danger);border-color:var(--danger)">⏹ Stoppen</button>
         <button class="ghost sm" onclick="downloadZip()">⬇ ZIP</button>
         <span class="hint" id="prog">0 / 0</span>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--mut)">
+          Modell
+          <select id="imageModel" onchange="saveImageModel()" class="sm">
+            <option value="nano-banana-2">nano-banana-2 (volle Qualität)</option>
+            <option value="nano-banana-2-lite">nano-banana-2-lite (günstiger)</option>
+          </select>
+        </label>
         <span class="est" style="margin-left:auto"><span id="srcBadge" class="hint"></span></span>
       </div>
       <div class="bar"><div id="barFill"></div></div>
       <div id="scenes" style="margin-top:14px"></div>
+    </div>
+
+    <!-- Auto-Rendering — its own card below the scene list, not squeezed into the
+         already-busy "Alle generieren" toolbar above: rendering is a NACHGELAGERTER
+         step that only makes sense once images exist, not "one more option among
+         others" in the generation toolbar. -->
+    <div class="card" id="renderCard" style="display:none">
+      <h2>🎬 Video zusammenschneiden</h2>
+      <p class="hint" id="renderHint" style="margin-bottom:10px">Erst Bilder generieren</p>
+
+      <div class="steps" id="renderSteps" style="display:none;flex-wrap:wrap;margin-bottom:10px">
+        <span id="rstage-prepare">Vorbereiten</span>
+        <span style="color:var(--border)">›</span>
+        <span id="rstage-motion">Kamerabewegung</span>
+        <span style="color:var(--border)">›</span>
+        <span id="rstage-clips">Clips</span>
+        <span style="color:var(--border)">›</span>
+        <span id="rstage-transitions">Übergänge</span>
+        <span style="color:var(--border)">›</span>
+        <span id="rstage-assemble">Zusammenschnitt</span>
+        <span style="color:var(--border)">›</span>
+        <span id="rstage-audio">Ton</span>
+        <span style="color:var(--border)">›</span>
+        <span id="rstage-review">Prüfung</span>
+      </div>
+      <div class="bar" id="renderBarWrap" style="display:none"><div id="renderBarFill"></div></div>
+
+      <div class="row" style="margin-top:12px">
+        <button onclick="renderVideo()" id="renderBtn" disabled>🎬 Video rendern</button>
+        <button onclick="stopRender()" id="stopRenderBtn" class="ghost" style="display:none;color:var(--danger);border-color:var(--danger)">⏹ Stoppen</button>
+      </div>
+
+      <div class="slot" id="renderSlot" style="margin-top:12px;max-width:480px;display:none">
+        <div class="slot-empty"><span class="slot-icon">🎬</span><span class="slot-label">Noch kein Video gerendert</span></div>
+      </div>
+      <div class="row" id="renderDlRow" style="display:none;margin-top:8px">
+        <button class="sm ghost" onclick="downloadFinalVideo()">⬇ final.mp4</button>
+      </div>
     </div>
 
   </div><!-- /view-editor -->
@@ -573,6 +618,15 @@ async function openVideo(vid, name){
 
   const modeR = await ch_get('/api/get_mode');
   applyMode(modeR.mode || 'image');
+
+  // If a plan generation is currently running server-side (started before a reload/tab
+  // close), resume showing its progress instead of leaving the page looking idle — that
+  // blank-looking state is exactly what led to double-clicking "Plan erstellen" before.
+  const planSt = await ch_get('/api/plan_status').catch(() => null);
+  if(planSt && planSt.running){
+    startPlanPoll();
+  }
+
   const r = await ch_get('/api/plan');
   if(r.scenes && r.scenes.length){
     SCENES = r.scenes;
@@ -586,8 +640,18 @@ async function openVideo(vid, name){
       _setGenAllUI(false);
       _watchRunningScenes();
     }
+    // Same reload-resume principle as plan/batch jobs above: a render started before a
+    // tab close/reload keeps running server-side — pick the poll back up instead of
+    // showing an idle button that looks like nothing is happening.
+    const renderSt = await ch_get('/api/render_status').catch(() => null);
+    if(renderSt && renderSt.running){
+      startRenderPoll();
+    } else if(r.render && r.render.file){
+      showRenderedVideo(r.render.file);
+    }
   }
   loadVideoMeta();
+  loadImageModel();
 }
 
 // ---- Title & Thumbnail ----
@@ -716,7 +780,7 @@ function _watchRunningScenes(){
 // generation loop lives in the Python process and keeps running even if this tab (or
 // every tab) closes. Polling this is what makes state always correct on load/reload.
 let _batchPollTimer = null;
-function _setGenAllUI(running, currentI){
+function _setGenAllUI(running, currentIs){
   $('genAllBtn').style.display = running ? 'none' : '';
   const stopBtn = $('stopAllBtn');
   stopBtn.style.display = running ? '' : 'none';
@@ -724,11 +788,17 @@ function _setGenAllUI(running, currentI){
   const bar = $('batchStatusBar');
   if(running){
     bar.style.display = 'flex';
-    const scene = SCENES.find(s=>s.i===currentI);
-    const label = scene ? `„${(scene.text||'').slice(0,60)}${(scene.text||'').length>60?'…':''}"` : '';
-    $('batchStatusText').textContent = currentI!=null
-      ? `Generiert gerade Szene #${currentI+1} — ${label}`
-      : 'Generiert gerade …';
+    const list = currentIs || [];
+    if(list.length){
+      const labels = list.map(i => {
+        const scene = SCENES.find(s=>s.i===i);
+        const txt = scene ? (scene.text||'').slice(0,40) + ((scene.text||'').length>40?'…':'') : '';
+        return `#${i+1}${txt ? ` „${txt}"` : ''}`;
+      });
+      $('batchStatusText').textContent = `Generiert gerade ${list.length} Szene(n) parallel — ${labels.join(' · ')}`;
+    } else {
+      $('batchStatusText').textContent = 'Generiert gerade …';
+    }
   } else {
     bar.style.display = 'none';
   }
@@ -736,7 +806,7 @@ function _setGenAllUI(running, currentI){
 function startBatchPoll(){
   if(_batchPollTimer) return;
   if(_watchTimer){ clearInterval(_watchTimer); _watchTimer = null; } // batch supersedes the lone-scene watcher
-  _setGenAllUI(true, null);
+  _setGenAllUI(true, []);
   const poll = async () => {
     const st = await ch_get('/api/generate_all_status').catch(() => null);
     if(!st) return;
@@ -752,6 +822,10 @@ function startBatchPoll(){
       const doneCount = SCENES.filter(s=>s.file).length;
       $('prog').textContent = `${doneCount} / ${SCENES.length}`;
       $('barFill').style.width = (SCENES.length ? doneCount/SCENES.length*100 : 0) + '%';
+      updateRenderCardVisibility();
+      if(st.error){
+        alert('Generierung abgebrochen: ' + st.error);
+      }
     }
   };
   poll(); // immediately, don't wait 3s for the first update
@@ -812,6 +886,14 @@ async function saveVidMaster(){
 async function loadMaster(){ const r=await ch_get('/api/master'); $('master').value=r.master||''; }
 async function saveMaster(){ await ch_api('/api/master',{master:$('master').value}); const n=$('saveNote'); n.style.opacity=1; setTimeout(()=>n.style.opacity=0,1500); }
 
+async function loadImageModel(){
+  const r = await ch_get('/api/image_model').catch(() => null);
+  if(r && $('imageModel')) $('imageModel').value = r.model || 'nano-banana-2';
+}
+async function saveImageModel(){
+  await ch_api('/api/image_model', {model: $('imageModel').value});
+}
+
 // ---- Word estimate ----
 function wordCount(s){ return (s.trim().match(/\S+/g)||[]).length; }
 function estimate(){
@@ -825,13 +907,40 @@ function estimate(){
 }
 
 // ---- Manual plan ----
+// Plan generation runs server-side (see _plan_generate_worker) for the same reason as
+// batch image generation: it survives closing the tab, and the server itself refuses a
+// second concurrent run for the same video instead of silently doubling every LLM call.
+let _planPollTimer = null;
+
 async function makePlan(){
   const btn=$('planBtn'); btn.disabled=true; btn.textContent='Plane…';
   const sec = CURRENT_MODE === 'video' ? +(($('veoDuration')||{}).value||8) : +$('sec').value;
   const r=await ch_api('/api/plan',{script:$('script').value,wpm:+$('wpm').value,sec});
-  SCENES=r.scenes||[]; renderScenes('text'); btn.disabled=false; btn.textContent='Plan aus Skript erstellen';
-  $('planArea').style.display=SCENES.length?'block':'none';
-  if(r.characters) suggestCharsFromPlan(r.characters);
+  if(!r.ok){ alert('Fehler: '+(r.error||'unbekannt')); btn.disabled=false; btn.textContent='Plan aus Skript erstellen'; return; }
+  startPlanPoll();
+}
+
+function startPlanPoll(){
+  if(_planPollTimer) return;
+  const btn=$('planBtn'); btn.disabled=true;
+  const poll = async () => {
+    const st = await ch_get('/api/plan_status').catch(() => null);
+    if(!st) return;
+    if(st.running){
+      btn.textContent = st.step || 'Plane …';
+    } else {
+      clearInterval(_planPollTimer); _planPollTimer = null;
+      btn.disabled=false; btn.textContent='Plan aus Skript erstellen';
+      if(st.error){ alert('Fehler: '+st.error); return; }
+      const r = await ch_get('/api/plan');
+      SCENES = r.scenes || [];
+      renderScenes('text');
+      $('planArea').style.display = SCENES.length ? 'block' : 'none';
+      if(r.characters) suggestCharsFromPlan(r.characters);
+    }
+  };
+  poll();
+  _planPollTimer = setInterval(poll, 2000);
 }
 
 // ---- Audio upload ----
@@ -937,6 +1046,8 @@ async function transcribeAudio(){
 }
 
 // ---- Render scenes ----
+const SEQ_COLORS = ['var(--acc)', 'var(--ok)', 'var(--warn)'];
+
 function renderScenes(source){
   const c=$('scenes'); c.innerHTML='';
   const isAudio = source==='audio';
@@ -947,6 +1058,9 @@ function renderScenes(source){
     const tagClass = isAudio ? 'tag audio' : 'tag';
     const hasImg   = !!s.file;
     const hasVideo = !!s.video_file;
+    const hasSeq   = s.seq_id != null;
+    const seqColor = hasSeq ? SEQ_COLORS[s.seq_id % SEQ_COLORS.length] : null;
+    if(hasSeq) d.style.borderLeft = `3px solid ${seqColor}`;
 
     const vidPromptVal = (s.video_prompt||'').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     const slotsHtml = isVideo ? `
@@ -986,6 +1100,7 @@ function renderScenes(source){
             <button class="sm" onclick="genOne(${s.i})">🖼 Bild generieren</button>
             <button class="sm" id="dl${s.i}" onclick="dlOne(${s.i})" ${hasImg?'':'disabled'}>⬇</button>
           </div>
+          ${s.char_ref_applied === false ? `<div class="hint" style="margin-top:4px">kein Charakter-Ref</div>` : ''}
         </div>
         <div>
           <div class="slot" id="vw${s.i}">
@@ -1008,6 +1123,7 @@ function renderScenes(source){
         <span class="tag">#${s.i+1}</span>
         <span class="${tagClass}">${s.t}</span>
         <span class="tag">~${s.dur}s</span>
+        ${hasSeq ? `<span class="tag" style="border-color:${seqColor};color:${seqColor}">⛓ Seq ${s.seq_id} · ${s.seq_pos+1}</span>` : ''}
         <span class="st ${s.status}" id="st${s.i}">${s.status}</span>
       </div>
       ${slotsHtml}
@@ -1022,6 +1138,7 @@ function renderScenes(source){
   const doneCount = SCENES.filter(s=>s.file).length;
   $('prog').textContent=`${doneCount} / ${SCENES.length}`;
   $('barFill').style.width=(SCENES.length ? doneCount/SCENES.length*100 : 0)+'%';
+  updateRenderCardVisibility();
 }
 
 function setStatus(i,st){ const e=$('st'+i); if(e){e.textContent=st; e.className='st '+st;} }
@@ -1279,6 +1396,109 @@ async function stopGenAll(){
   const btn = $('stopAllBtn');
   btn.disabled = true; btn.textContent = '⏳ Stoppt nach aktueller Szene …';
   await ch_api('/api/generate_all_stop', {});
+}
+
+// ---- Auto-Rendering (Ken Burns clips -> concat -> audio mux -> final.mp4) ----
+// Only makes sense in image mode, once at least one scene has a generated image —
+// updateRenderCardVisibility() keeps the card's enabled/disabled state and hint text
+// in sync with SCENES, called from renderScenes() and after every batch/plan refresh.
+const RENDER_STAGE_LABELS = {
+  prepare: 'Vorbereiten', motion: 'Kamerabewegung', clips: 'Clips', transitions: 'Übergänge',
+  assemble: 'Zusammenschnitt', audio: 'Ton', review: 'Prüfung',
+};
+const RENDER_STAGE_ORDER = ['prepare', 'motion', 'clips', 'transitions', 'assemble', 'audio', 'review'];
+
+function updateRenderCardVisibility(){
+  const card = $('renderCard');
+  if(!card) return;
+  const isVideo = CURRENT_MODE === 'video';
+  card.style.display = (isVideo || !SCENES.length) ? 'none' : '';
+  if(isVideo || !SCENES.length) return;
+  const doneCount = SCENES.filter(s=>s.file).length;
+  const btn = $('renderBtn');
+  if(_renderPollTimer) return; // don't clobber state while a render is in progress/polling
+  if(doneCount === 0){
+    btn.disabled = true;
+    $('renderHint').textContent = 'Erst Bilder generieren';
+  } else {
+    btn.disabled = false;
+    $('renderHint').textContent = `${doneCount} / ${SCENES.length} Szenen haben ein Bild — bereit zum Rendern`;
+  }
+}
+
+function _setRenderStageUI(stage){
+  RENDER_STAGE_ORDER.forEach((s, idx) => {
+    const el = $('rstage-'+s);
+    if(!el) return;
+    const curIdx = RENDER_STAGE_ORDER.indexOf(stage);
+    el.className = idx < curIdx ? 'done' : idx === curIdx ? 'active' : '';
+  });
+}
+
+async function renderVideo(){
+  const r = await ch_api('/api/render_start', {});
+  if(!r.ok){ alert('Fehler: '+(r.error||'unbekannt')); return; }
+  startRenderPoll();
+}
+
+async function stopRender(){
+  const btn = $('stopRenderBtn');
+  btn.disabled = true; btn.textContent = '⏳ Stoppt nach aktuellem Clip …';
+  await ch_api('/api/render_stop', {});
+}
+
+let _renderPollTimer = null;
+function startRenderPoll(){
+  if(_renderPollTimer) return;
+  $('renderBtn').style.display = 'none';
+  $('stopRenderBtn').style.display = '';
+  $('stopRenderBtn').disabled = false; $('stopRenderBtn').textContent = '⏹ Stoppen';
+  $('renderSteps').style.display = 'flex';
+  $('renderHint').textContent = 'Rendert …';
+  const poll = async () => {
+    const st = await ch_get('/api/render_status').catch(() => null);
+    if(!st) return;
+    if(st.running){
+      _setRenderStageUI(st.stage);
+      if(st.stage === 'clips' || st.stage === 'transitions'){
+        $('renderBarWrap').style.display = '';
+        $('renderBarFill').style.width = (st.total ? st.done/st.total*100 : 0) + '%';
+        const label = st.stage === 'clips' ? 'Clips' : 'Übergänge';
+        $('renderHint').textContent = `${label}: ${st.done} / ${st.total}`;
+      } else {
+        $('renderBarWrap').style.display = 'none';
+        $('renderHint').textContent = RENDER_STAGE_LABELS[st.stage] || 'Rendert …';
+      }
+    } else {
+      clearInterval(_renderPollTimer); _renderPollTimer = null;
+      $('renderBtn').style.display = ''; $('stopRenderBtn').style.display = 'none';
+      $('renderSteps').style.display = 'none'; $('renderBarWrap').style.display = 'none';
+      if(st.error){
+        alert('Rendern fehlgeschlagen: ' + st.error);
+        updateRenderCardVisibility();
+      } else if(st.file){
+        showRenderedVideo(st.file);
+        $('renderHint').textContent = 'Fertig ✓';
+      } else {
+        updateRenderCardVisibility();
+      }
+    }
+  };
+  poll();
+  _renderPollTimer = setInterval(poll, 2000);
+}
+
+function showRenderedVideo(file){
+  const slot = $('renderSlot');
+  slot.style.display = '';
+  slot.innerHTML = `<video controls src="/generated/${file}?channel=${ACTIVE_CHANNEL}&video=${ACTIVE_VIDEO}&t=${Date.now()}"></video>`;
+  $('renderDlRow').style.display = '';
+}
+
+function downloadFinalVideo(){
+  const a = document.createElement('a');
+  a.href = `/generated/final.mp4?channel=${ACTIVE_CHANNEL}&video=${ACTIVE_VIDEO}`;
+  a.download = 'final.mp4'; a.click();
 }
 
 // ---- Character sheets (channel-scoped) ----
