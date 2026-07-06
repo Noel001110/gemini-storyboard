@@ -14,6 +14,13 @@ KIE_KEY_FILE  = os.path.expanduser("~/.kie_key")
 CHANNELS_DIR  = os.path.join(HERE, "channels")
 CHANNELS_FILE = os.path.join(CHANNELS_DIR, "channels.json")
 
+# ── Phase J: Engine-Refactor — engine_*.py modules ─────────────────────────────
+# ElevenLabs-Integration (Phase 1) + Phase-Engine-Constants (Phasen B-H-I) leben in
+# engine_elevenlabs.py. Wildcard-Import für backward-compat: alle bisher direkt
+# referenzierten Namen (elevenlabs_key, _elevenlabs_persist_and_schedule, etc.)
+# bleiben global erreichbar.
+from engine_elevenlabs import *  # noqa: F401,F403
+
 # ── Background job tracking ───────────────────────────────────────────────────
 # {job_id: {status:"running"|"done"|"error", progress:0-100, file, source_url, error}}
 JOBS: dict = {}
@@ -347,13 +354,8 @@ KIE_CHAT_URL = "https://api.kie.ai/gemini-2.5-flash/v1/chat/completions"
 # later items in a batch. Verified working 2026-07-02 against the real API.
 GEMINI_NATIVE_URL = "https://api.kie.ai/gemini/v1/models/{model}:generateContent"
 
-# ElevenLabs — Phase 1 voiceover with word-timestamps (single source of truth for scene
-# timing when this source is used). Falls back to the existing Gemini-transcription path
-# (Option A) for user-uploaded audio. Whisper-alignment in _render_worker keeps the
-# timing correction loop unchanged for both paths.
-ELEVENLABS_API           = "https://api.elevenlabs.io/v1"
-ELEVENLABS_DEFAULT_MODEL = "eleven_multilingual_v2"
-ELEVENLABS_KEY_FILE      = os.path.expanduser("~/.elevenlabs_key")
+# ElevenLabs — moved to engine_elevenlabs.py (Phase J engine refactor). Wildcard-
+# import weiter oben in dashboard.py macht die Symbole global verfügbar.
 
 # Shared transcription status (thread-safe via GIL for simple dict ops)
 TX_STATUS = {"step": 0, "total": 4, "msg": "Bereit", "running": False, "error": ""}
@@ -365,86 +367,6 @@ def tx(step, msg):
 
 def kie_key():
     return open(KIE_KEY_FILE).read().strip()
-
-# ── ElevenLabs voiceover (Phase 1) ────────────────────────────────────────────
-# voice_id.txt is plain text (one line) for easy editing; voice_settings.json carries
-# the structured controls the API expects in voice_settings. Both are channel-scoped and
-# optional — load_voice_settings() falls back to env/defaults when either is missing so
-# the user can ship a non-empty ~/.elevenlabs_key without ever touching a settings file.
-ELEVENLABS_VOICE_SETTINGS_DEFAULT = {
-    "voice_id": "",
-    "model_id": ELEVENLABS_DEFAULT_MODEL,
-    "stability": 0.5,
-    "similarity_boost": 0.75,
-    "style": 0.0,
-    "use_speaker_boost": True,
-    # "output_format" lives outside voice_settings in the ElevenLabs API body, but
-    # recording it here makes the persisted snapshot round-trip-able — the generate call
-    # reads it explicitly.
-    "output_format": "mp3_44100_128",
-}
-
-def elevenlabs_key() -> str:
-    """Returns the ElevenLabs API key from ~/.elevenlabs_key. Raises with a clear
-    message when missing so the user can self-service the setup (matches the kie_key()
-    style: simple KeyError-style fail, no implicit config fallback)."""
-    p = ELEVENLABS_KEY_FILE
-    if not os.path.exists(p):
-        raise RuntimeError(
-            f"ElevenLabs-Key fehlt: {p} — bitte `echo \"$ELEVENLABS_API_KEY\" > {p} && "
-            f"chmod 600 {p}` einmalig ausführen."
-        )
-    return open(p).read().strip()
-
-def _resolve_voice_id(cid: str, override: str = "") -> str:
-    """Resolution order: explicit override → channels/<cid>/voice_id.txt →
-    ELEVENLABS_VOICE_DEFAULT env. Empty string means 'no voice configured'."""
-    if override:
-        return override.strip()
-    p = ch_voice_id(cid)
-    if os.path.exists(p):
-        v = open(p).read().strip()
-        if v:
-            return v
-    return os.environ.get("ELEVENLABS_VOICE_DEFAULT", "").strip()
-
-def load_voice_settings(cid: str, override_voice_id: str = "") -> dict:
-    """Returns the merged settings for `cid`. Caller may pass `override_voice_id` from
-    the HTTP request to make a per-call choice (used by /api/voiceover_preview to test
-    a voice that isn't yet the channel default). All other knobs come from
-    channels/<cid>/voice_settings.json when present, else ELEVENLABS_VOICE_SETTINGS_DEFAULT.
-    The returned dict always carries every key — never partially populated — so the
-    ElevenLabs API call can splat it directly into the request body."""
-    s = dict(ELEVENLABS_VOICE_SETTINGS_DEFAULT)
-    sp = ch_voice_settings(cid)
-    if os.path.exists(sp):
-        try:
-            saved = json.load(open(sp))
-            if isinstance(saved, dict):
-                s.update({k: v for k, v in saved.items() if v != "" or k == "voice_id"})
-        except Exception as e:
-            print(f"  [ElevenLabs] voice_settings.json unlesbar ({e}) — nutze Defaults", flush=True)
-    s["voice_id"] = _resolve_voice_id(cid, override_voice_id)
-    return s
-
-def save_voice_settings(cid: str, settings: dict) -> None:
-    """Persists channels/<cid>/voice_settings.json + voice_id.txt. Drops unknown keys,
-    coerces bools, clamps floats to [0,1] where the API expects it."""
-    clean = dict(ELEVENLABS_VOICE_SETTINGS_DEFAULT)
-    clean.update({k: settings[k] for k in settings if k in clean and k != "voice_id"})
-    # numeric clamp for the four sliders
-    for k in ("stability", "similarity_boost", "style"):
-        try:    clean[k] = max(0.0, min(1.0, float(clean[k])))
-        except Exception: clean[k] = ELEVENLABS_VOICE_SETTINGS_DEFAULT[k]
-    clean["use_speaker_boost"] = bool(settings.get("use_speaker_boost", True))
-    if settings.get("model_id"):
-        clean["model_id"] = str(settings["model_id"])
-    # separate voice_id.txt (so it can be `cat`-ed and edited without JSON parsing)
-    vid = str(settings.get("voice_id", "")).strip()
-    if vid:
-        with open(ch_voice_id(cid), "w") as f:
-            f.write(vid + "\n")
-    json.dump(clean, open(ch_voice_settings(cid), "w"), ensure_ascii=False, indent=1)
 
 def post_kie_text(messages, json_mode=False, temp=0.7):
     """KIE.ai OpenAI-compatible chat completions (Gemini 2.5 Flash)."""
@@ -1225,32 +1147,12 @@ def story_phase(i: int, total: int) -> str:
 # that lets you grep `"phase_source": "position-fallback"` in any plan.json to find which
 # scenes fell back to position-based. Hysterese: partial-LLM-coverage is treated as
 # schema-drift → full fallback instead of mixing reliable fallback with uncertain LLM data.
-PHASE_SET = {"OPENING", "RISING_ACTION", "CLIMAX", "RESOLUTION"}
-PHASE_TO_ACT = {"OPENING": 0, "RISING_ACTION": 1, "CLIMAX": 2, "RESOLUTION": 3}
+# PHASE_SET / PHASE_TO_ACT / PHASE_PROMPT_ADDITIONS / PHASE_COLOR_FILTER / PHASE_VOLUME /
+# PHASE_ACCENT moved to engine_elevenlabs.py (Phase J engine refactor).
 PHASE_COVERAGE_THRESHOLD = 0.8  # <80% LLM coverage → full fallback (no mixing)
 
-# Phase-aware image-prompt additions (Phase C, Juli 2026). Injected per-line into the
-# image-prompt chunk so the visual model gets narrative-position cues alongside the text.
-# Default "" for unknown phases means no bias applied — backward-compat with legacy
-# scenes that don't have s["phase"] yet (kept by _assign_phases fallback).
-PHASE_PROMPT_ADDITIONS = {
-    "OPENING":       "STYLE: slow, deliberate composition; establish setting; neutral color palette; static-feeling even if motion comes later.",
-    "RISING_ACTION": "STYLE: building tension; tighter framing; movement toward subject; contrast slightly elevated.",
-    "CLIMAX":        "STYLE: maximum visual impact; high contrast; dynamic angle; subject dominates frame; emotional saturation.",
-    "RESOLUTION":    "STYLE: wind-down; wider framing; softer palette; contemplative stillness.",
-}
 def _phase_prompt_addition(phase: str) -> str:
     return PHASE_PROMPT_ADDITIONS.get(phase, "")
-
-# Phase D color-grading: ffmpeg `eq=contrast:saturation:brightness` filter per phase.
-# Identity ("") for unknown phases preserves the legacy uncolored look. Difference values
-# are subtle — anything stronger reads as "distorted" rather than "cinematic contrast".
-PHASE_COLOR_FILTER = {
-    "OPENING":       "eq=contrast=1.0:saturation=0.9:brightness=0.0",
-    "RISING_ACTION": "eq=contrast=1.1:saturation=1.05:brightness=0.0",
-    "CLIMAX":        "eq=contrast=1.3:saturation=1.2:brightness=-0.02",
-    "RESOLUTION":    "eq=contrast=0.95:saturation=0.85:brightness=0.03",
-}
 
 # Phase G: per-phase music-bed volume. OPENING / RESOLUTION get a quieter bed (the
 # narration carries the moment), CLIMAX gets the loudest (cinematic swell). These
@@ -2446,45 +2348,6 @@ def _place_sfx(narration_path: str, sfx_events: list, out_path: str) -> None:
         raise RuntimeError(f"ffmpeg SFX-Platzierung fehlgeschlagen: {result.stderr.decode(errors='replace')[-300:]}")
 
 
-def _enrich_for_tts(text: str, scenes: list = None) -> str:
-    """Phase I: enrich raw narration text with TTS-friendly pause/emphasis markers
-    before sending to ElevenLabs (or any TTS provider). Pure text transformation —
-    no schema-drift risk, no LLM call, idempotent on already-enriched text.
-
-    Markers applied:
-    - "..." between sentences (subtle breath)
-    - "..." before is_climax scenes from the scenes list (extra emphasis)
-    - "\n\n" before is_phase_break scenes (act-change pause)
-    - Emphasis preservation: leaves ALL-CAPS / "!" runs alone (ElevenLabs already
-      uses these naturally — explicit SSML `<emphasis>` would be ignored).
-    Returns the enriched text. If `scenes` is None, only sentence-level enrichment
-    runs (the relative-scene lookup is optional)."""
-    enriched = text.strip()
-    # Step 1: ensure a triple-dot exists between adjacent sentences if they don't already
-    # have one — but ONLY where the gap is already >0. We do NOT inject any noise
-    # inside a single sentence. Conservative: replace ". " before capital letter with
-    # ". ... " only if no triple-dot is already there.
-    import re as _re
-    enriched = _re.sub(r"\.\s+(?=[A-ZÄÖÜ])", ". ... ", enriched)
-    # Step 2: scene-level emphasis (if scenes passed)
-    if scenes:
-        # Find scene boundaries: split text by sentence-end (rough — TTS doesn't need exact)
-        # and inject markers before scenes that are climax/phase_breaks.
-        # We do this naively: each scene's first ~30 chars get a marker prefix.
-        for s in scenes:
-            txt = (s.get("text") or "").strip()
-            if not txt:
-                continue
-            marker = ""
-            if s.get("is_climax"):
-                marker = TTS_PAUSE_BEFORE_CLIMAX + marker
-            if s.get("is_phase_break"):
-                marker = TTS_PAUSE_AFTER_PHASE_BREAK + marker
-            if marker and txt in enriched:
-                enriched = enriched.replace(txt, marker.lstrip() + txt, 1)
-    return enriched
-
-
 def _phase_modulate_music(music_path: str, scenes: list, out_path: str) -> None:
     """Phase G: pre-modulate music volume per scene's phase BEFORE sidechaincompress.
     The expression is piecewise: each scene contributes
@@ -3421,232 +3284,7 @@ def render_title_card_png_via_venv(out_path: str, width: int, height: int,
     result = subprocess.run(args, capture_output=True, text=True, timeout=90)
     if result.returncode != 0:
         raise RuntimeError(f"Title-Card-Rendering fehlgeschlagen: {result.stderr[-500:]}")
-
-
-# ── ElevenLabs voiceover (Phase 1) ────────────────────────────────────────────
-# ElevenLabs is the only service in this stack that returns word timestamps DIRECTLY
-# from the generator, eliminating the Whisper-pass we still need for user-uploaded
-# audio. The /v1/text-to-speech/{voice_id}/with-timestamps endpoint gives back both
-# base64-encoded audio and a per-word `alignment.words` array with start/end floats —
-# making this the determinstic, provider-side "single source of truth" for scene
-# timing (instead of an LLM hallucinating beats like KIE.transcribe_and_segment does).
-#
-# Retry policy: 429/5xx → backoff 5s, 10s, 20s (max 3 attempts). Anything else
-# (incl. auth 401, validation 422, schema-drift 200-but-no-alignment) raises immediately
-# — we do NOT silently fall back to Whisper. The user must see the error and decide
-# (ARCHITECTURE.md §6.1: "stillschweigende Fallbacks sind verboten").
-EL_BACKOFF_SEC = [5, 10, 20]
-
-def _elevenlabs_call_with_retry(url: str, body: dict, headers: dict) -> dict:
-    """POST → parse JSON, retrying 429/5xx with backoff. All other failures raise."""
-    last_err = None
-    for attempt, wait in enumerate([0] + EL_BACKOFF_SEC):
-        if wait:
-            print(f"  [ElevenLabs] Retry {attempt}/{len(EL_BACKOFF_SEC)} in {wait}s …", flush=True)
-            time.sleep(wait)
-        req = urllib.request.Request(url, data=json.dumps(body).encode(),
-            headers={**headers, "Content-Type": "application/json"}, method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=120) as r:
-                return json.load(r)
-        except urllib.error.HTTPError as e:
-            # Read response body for the error message — ElevenLabs returns JSON for
-            # 422 validation errors with a `detail` field that's actually useful.
-            try:    err_body = json.loads(e.read() or b"{}")
-            except: err_body = {}
-            detail = (err_body.get("detail") if isinstance(err_body, dict) else None) or e.reason
-            last_err = RuntimeError(f"ElevenLabs HTTP {e.code}: {detail}")
-            if e.code not in (408, 425, 429) and e.code < 500:
-                # 4xx other than 408/425/429 — not retriable (auth/validation/schema errors)
-                raise last_err
-        except (urllib.error.URLError, TimeoutError) as e:
-            last_err = RuntimeError(f"ElevenLabs Netzwerkfehler: {e}")
-        except Exception as e:
-            last_err = RuntimeError(f"ElevenLabs Fehler: {e}")
-    # All retries exhausted
-    raise last_err or RuntimeError("ElevenLabs: retries exhausted")
-
-def elevenlabs_generate(text: str, settings: dict) -> dict:
-    """Generates TTS from `text` using merged channel settings. Returns the parsed
-    ElevenLabs response (audio_base64, alignment.words, task_id-ish id).
-
-    Raises RuntimeError on any failure — including the 'partial response' case where
-    ElevenLabs returned audio but no alignment.words, since that's the single thing
-    this whole feature exists to deliver and we cannot degrade to Whisper silently."""
-    voice_id = settings.get("voice_id") or ""
-    if not voice_id:
-        raise RuntimeError("Keine voice_id konfiguriert: ~/.elevenlabs_key oder channels/<cid>/voice_id.txt befüllen.")
-    key = elevenlabs_key()
-    url = f"{ELEVENLABS_API}/text-to-speech/{voice_id}/with-timestamps"
-    body = {
-        "text": text,
-        "model_id": settings.get("model_id") or ELEVENLABS_DEFAULT_MODEL,
-        "voice_settings": {
-            "stability": float(settings.get("stability", 0.5)),
-            "similarity_boost": float(settings.get("similarity_boost", 0.75)),
-            "style": float(settings.get("style", 0.0)),
-            "use_speaker_boost": bool(settings.get("use_speaker_boost", True)),
-        },
-        "output_format": settings.get("output_format") or "mp3_44100_128",
-    }
-    headers = {"xi-api-key": key, "Accept": "application/json"}
-    resp = _elevenlabs_call_with_retry(url, body, headers)
-
-    # ElevenLabs returns 200 even for some failure modes — guard the response shape
-    # explicitly (cf. user-feedback point 2 / Test 6: partial response must raise, not
-    # silently fall back to Whisper).
-    if not isinstance(resp, dict):
-        raise RuntimeError(f"ElevenLabs-Antwort ist kein JSON-Objekt: {type(resp).__name__}")
-    if not resp.get("audio_base64"):
-        raise RuntimeError("ElevenLabs antwortete ohne audio_base64 — bitte erneut versuchen.")
-    alignment = resp.get("alignment") or {}
-    words = alignment.get("words") if isinstance(alignment, dict) else None
-    if not isinstance(words, list) or not words:
-        raise RuntimeError(
-            "ElevenLabs antwortete ohne alignment.words — bitte erneut versuchen "
-            "(Provider-Schema-Drift oder leerer Text?)."
-        )
-    # Normalize word list: [{word, start, end}, ...]
-    norm = []
-    for w in words:
-        if not isinstance(w, dict):
-            continue
-        txt = (w.get("text") or w.get("word") or "").strip()
-        if not txt:
-            continue
-        try:
-            s = float(w.get("start", 0.0)); e = float(w.get("end", s + 0.01))
-        except (TypeError, ValueError):
-            continue
-        norm.append({"word": txt, "start": max(0.0, s), "end": max(s + 0.01, e)})
-    if not norm:
-        raise RuntimeError("ElevenLabs-alignment.words enthielt keine verwertbaren Wörter.")
-    return {
-        "audio_base64": resp["audio_base64"],
-        "words": norm,
-        # ElevenLabs doesn't return an explicit task id here; synthesize one from the
-        # voice_id + first/last word + utc so /api/voiceover_status has something stable
-        # to display and logging/reproducibility is reasonable.
-        "task_id": f"el_{voice_id[:8]}_{int(time.time())}",
-    }
-
-def _elevenlabs_persist_and_schedule(cid: str, vid: str, text: str,
-                                     settings: dict | None = None,
-                                     override_voice_id: str = "") -> dict:
-    """Synchronous wrapper around elevenlabs_generate() that handles idempotent
-    persistence of voiceover.mp3 + audio_meta.json (atomic write — see Test 7) and
-    schedules _transcribe_generate_worker in the background to derive scene plan.json
-    from the captured word timestamps. Falls into the existing orchestrator code path
-    instead of being its own worker — same resume-safety, same stage tracking.
-
-    Returns the persisted info so the HTTP handler can echo a status response without
-    re-reading state. Raises with a clear message on every failure mode (no partial
-    persistence)."""
-    if not vid:
-        raise RuntimeError("Kein Video ausgewählt.")
-    ensure_video(cid, vid)
-
-    # 1. Settings + idempotency check — pause-trimmed audio is also invalidated
-    # whenever a fresh voiceover is requested, mirroring /api/upload_audio.
-    final_settings = load_voice_settings(cid, override_voice_id=override_voice_id)
-    if settings:
-        for k, v in settings.items():
-            if k in final_settings:
-                final_settings[k] = v
-    voiceover_mp3 = os.path.join(v_uploads(cid, vid), "voiceover.mp3")
-    trimmed_path  = os.path.join(v_uploads(cid, vid), "voiceover_trimmed.wav")
-    if os.path.exists(trimmed_path):
-        try:    os.remove(trimmed_path)
-        except Exception: pass
-
-    # 2. ElevenLabs call — raises on partial response (user-feedback point 2 / Test 6)
-    raw = elevenlabs_generate(text, final_settings)
-    audio_bytes = base64.b64decode(raw["audio_base64"])
-    words       = raw["words"]
-    task_id     = raw["task_id"]
-    char_count  = len(text)
-
-    # 3. Atomic write — MP3 first, then meta. If meta fails we delete the MP3; we do
-    # NOT want voiceover.mp3 without audio_meta.json lying around (Test 7).
-    meta_written = False
-    try:
-        # write mp3 (overwrite if exists — fresh voiceover replaces old recording)
-        with open(voiceover_mp3, "wb") as f:
-            f.write(audio_bytes)
-        # write meta (this is the canonical resume-marker: if meta is gone but mp3 exists,
-        # the next call re-runs ElevenLabs and clobbers both — no half-state survives).
-        meta = {
-            "path": voiceover_mp3,
-            "mime": "audio/mpeg",
-            "name": "voiceover.mp3",
-            "voiceover_source": "elevenlabs",
-            "voiceover_task_id": task_id,
-            "voiceover_chars": char_count,
-            "voiceover_word_timestamps": words,
-            "voiceover_settings_used": {
-                "voice_id":         final_settings.get("voice_id", ""),
-                "model_id":         final_settings.get("model_id", ELEVENLABS_DEFAULT_MODEL),
-                "stability":        final_settings.get("stability"),
-                "similarity_boost": final_settings.get("similarity_boost"),
-                "style":            final_settings.get("style"),
-                "use_speaker_boost": final_settings.get("use_speaker_boost"),
-            },
-        }
-        json.dump(meta, open(v_audio(cid, vid), "w"), ensure_ascii=False, indent=1)
-        meta_written = True
-    finally:
-        if not meta_written and os.path.exists(voiceover_mp3):
-            try:    os.remove(voiceover_mp3)
-            except Exception: pass
-
-    # 4. Update plan.json's already-existing scenes by clearing old aligned timestamps.
-    # _render_worker will redo alignment from the new word list next time it runs.
-    with _PLAN_WRITE_LOCK:
-        try:
-            plan = json.load(open(v_plan(cid, vid)))
-            for s in plan.get("scenes", []):
-                s.pop("start_aligned", None)
-                s.pop("end_aligned", None)
-            json.dump(plan, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
-        except Exception:
-            pass
-
-    # 5. Schedule the existing _transcribe_generate_worker — that worker is now
-    # voiceover_source-aware (Phase 1.D below) and will skip the Gemini-transcribe step
-    # because meta["voiceover_source"] == "elevenlabs" + meta["voiceover_word_timestamps"]
-    # are already populated.
-    plan_thread_sec = float(settings.get("sec", 5.5)) if isinstance(settings, dict) else 5.5
-    def _run():
-        try:
-            _transcribe_generate_worker(cid, vid, plan_thread_sec)
-        except Exception as e:
-            import traceback; traceback.print_exc()
-            print(f"  [ElevenLabs→Plan] Fehler in _transcribe_generate_worker: {e}", flush=True)
-    threading.Thread(target=_run, daemon=True).start()
-
-    # 6. Mark the VOICE_JOBS entry as done — the actual stage progression is observed
-    # via /api/plan_status + /api/produce_status (orchestrator), this dict only carries
-    # the ElevenLabs-specific state.
-    with _VOICE_JOBS_LOCK:
-        VOICE_JOBS[(cid, vid)] = {
-            "running": False,
-            "stage": "fertig",
-            "error": None,
-            "voiceover_source": "elevenlabs",
-            "voiceover_task_id": task_id,
-            "voiceover_chars": char_count,
-            "ts": time.time(),
-            "resume": False,
-        }
-    print(f"  [ElevenLabs] {cid}/{vid}: voiceover.mp3 ({len(audio_bytes)//1024} KB, "
-          f"{len(words)} Wörter, chars={char_count}) — Plan-Worker gestartet", flush=True)
-    return {
-        "ok": True,
-        "task_id": task_id,
-        "audio_kb": len(audio_bytes) // 1024,
-        "n_words": len(words),
-        "chars": char_count,
-    }
+# ElevenLabs-Code (Phase 1 + Phase I + Phase H): siehe engine_elevenlabs.py
 
 def transcribe_and_segment(local_path, mime_type, sec_per_img):
     """Transcribe audio via KIE.ai Gemini 2.5 Flash (inline base64 data URI)."""
