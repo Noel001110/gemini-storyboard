@@ -535,3 +535,56 @@ Während des End-to-End-Tests blieb der Render minutenlang in der `"timing"`-Sta
 ### 19.4 End-to-End verifiziert (Juli 2026)
 
 Synthetisches 3-Satz-Voiceover mit zwei fest eingefügten 2-Sekunden-Stille-Abschnitten zwischen den Sätzen (11.93s Gesamtlänge) über die echte Render-API verarbeitet: Whisper erkannte beide Pausen (~1.9s effektiv, TTS-Grenzeffekte eingerechnet) klar über der 0.3s-Schwelle, `voiceover_trimmed.wav` landet bei 8.74s (-3.19s), `final.mp4` exakt 8.73s (nicht die ursprünglichen 11.93s) — alle drei Szenen zeigen lückenlos aneinander anschließende `start_aligned`/`end_aligned`-Werte statt der ursprünglichen Lücken. Selbstprüfung grün.
+
+## 20. Motion-Vokabular + variable Übergangsdauer (auf Nutzer-Feedback nach einem echten Produktions-Render)
+
+Nutzer lieferte ein echtes Voiceover für `sidequerst` (53s ElevenLabs-Aufnahme, "Alex - Business Book Narrator") und ließ real rendern — danach konkrete Kritik am fertigen Video: Schnitt wirkt monoton (immer nur rein-/rauszoomen), keine sichtbaren Übergänge, keine hörbare Musik/SFX, Clip-Längen wirken unnatürlich kurz/unruhig.
+
+### 20.1 Diagnose — vier Ursachen, alle am echten Video/Plan verifiziert, nicht vermutet
+
+1. **Zoom-Monotonie**: `_motion_for_scene` kannte bis dahin NUR `zoom_in`/`zoom_out`/`static`, praktisch immer derselbe Fokuspunkt `[0.5,0.45]`, fast dieselbe Intensität (~1.09) — bestätigt durch Auslesen aller 31 `scene["motion"]`-Werte aus dem echten Plan.
+2. **Keine Übergänge**: `sidequerst`s Plan wurde gebaut, bevor die Sequenz-Erkennung existierte — alle 31 Szenen hatten `seq_id: null`. `_has_transition_before` (Abschnitt 15) feuert nur an Sequenzgrenzen — ohne `seq_id` kann das nie passieren. Kein Bug, fehlende Datengrundlage.
+3. **Keine hörbare Musik/SFX**: `assets/music/neutral_bed.mp3` + `assets/sfx/*.wav` sind, wie in `CREDITS.txt` selbst dokumentiert, synthetische Sinuston/Rauschen-Platzhalter — unter der Stimme geduckt praktisch unhörbar. Zusätzlich verhinderte Punkt 2 (kein `seq_id`/`pacing`), dass Whoosh/Riser/Impact überhaupt auslösen konnten.
+4. **Clip-Längen "unruhig"**: 31 Szenen waren für ~4s/Bild geplant (~124s), das echte Voiceover ist aber nur 47s lang (schneller Business-Narrator-Sprechstil) — die Sync-Invariante komprimiert korrekt auf die echte Länge, Ergebnis Ø 1.5s/Szene, mehrere unter 1s (kürzeste: 0.22s). Bei <1.2s bleibt die Kamera bewusst fast statisch (siehe `_motion_for_scene`s Kommentar) — das erzeugt bei so vielen kurzen Szenen den hektischen Rhythmus.
+
+### 20.2 Fix 1 — Motion-Vokabular (`MOTION_LIBRARY`, dashboard.py nahe `_motion_for_scene`)
+
+Generalisierung statt neuer Spezialfälle: **ein** Motion-Eintrag ist ein Zoom-Verlauf (`z0`→`z1`) UND ein Fokuspunkt-Verlauf (`focus0`→`focus1`), beide über dieselbe Smoothstep-Kurve interpoliert, die schon fürs Ken-Burns-Easing existierte (Abschnitt 13). Ein reiner Pan ist einfach `z0==z1` mit wanderndem Fokuspunkt — kein neuer ffmpeg-Filter, nur ein verallgemeinerter `zoompan`-Ausdruck (`x`/`y` interpolieren jetzt genau wie `z` schon immer). ~10 Einträge: `zoom_in`/`zoom_out` (bestehend), `pan_left`/`pan_right`, `tilt_up`/`tilt_down`, `dolly_in`/`dolly_out`, `diagonal_glide`, `snap_zoom_in`, `static`. Pan/Tilt/Dolly/Diagonal brauchen alle einen leichten Zoom-Puffer (>1.0) über den ganzen Verlauf, sonst liefe der Crop-Ausschnitt beim Wandern über den Bildrand hinaus.
+
+**Auswahl** (`_motion_for_scene`, weiterhin regelbasiert, kein Zufall): nach `pacing` (heute verfügbar) — `calm`→Pan/Tilt/Dolly-out-Kandidaten, `normal`→Zoom/Dolly-in/Pan, `punchy`→Snap-Zoom/Diagonal/Static. Bereits vorbereitet für die (noch nicht gebaute) Story-Phase-Engine: `scene.get("phase")` wird zuerst geprüft, `_PHASE_MOTION_CANDIDATES` greift automatisch, sobald dieses Feld existiert, ohne Codeänderung. Intensität skaliert weiterhin mit der Szenendauer (`_build_motion(name, intensity_scale)`, skaliert Zoom- UND Fokus-Delta ums eigene Mittel — `intensity_scale=1.0` reproduziert exakt das Basis-Rezept).
+
+**Rückwärtskompatibilität**: `_normalize_motion()` akzeptiert sowohl die alte Form (`{"type","z_end","focus"}`, aus jedem bereits gerenderten Plan) als auch die neue (`{"name","z0","z1","focus0","focus1"}`) und gibt immer Letztere zurück — alte Pläne mit bereits gesetztem `scene["motion"]` laden ohne Migration weiter (ARCHITECTURE §11-Regel).
+
+**Isoliert getestet** vor der Integration: Testbild + `pan_left`-Rezept gerendert, Start-/End-Frame verglichen — ein fester Bildpunkt wandert sichtbar von rechts nach links im Frame (Kamera schwenkt links, Inhalt driftet rechts — genau die reale Schwenk-Physik), keine Skalierungsänderung erkennbar.
+
+### 20.3 Fix 2 — variable Übergangsdauer (`TRANSITION_LIBRARY`, Vorstufe zur Phase-Engine)
+
+`TRANSITION_DURATION_SEC` war eine globale Konstante (0.5s für jeden Übergang). Jetzt pro Familie: `fade`→0.8s ("linger", ruhige Szene darf sich Zeit lassen), `wipe`→0.3s ("snappy", ein 0.8s-Wipe wirkt behäbig), `smooth`→0.5s (unverändert). `_transition_for_scene()` gibt jetzt `(transition_type, sfx, duration)` zurück statt nur zwei Werte — beide Aufrufstellen (Kompensations-Berechnung VOR dem Clip-Rendern, tatsächlicher `_crossfade_clips()`-Aufruf im Merge-Loop) nutzen dieselbe Funktion für dieselbe Entscheidung, damit Kompensation und tatsächlicher Crossfade nie auseinanderlaufen können.
+
+### 20.4 Fix 3 — `sidequerst` nachträglich analysiert (kein Code, ein einmaliger Daten-Fix)
+
+Statt eines neuen Features: `analyze_script()` einmalig auf den 31 bereits bestehenden, bereits mit Bildern verknüpften Szenen-Texten erneut aufgerufen (dieselbe Funktion, die auch beim ersten Plan-Erstellen läuft) — die 31 Szenen sind dabei die "Beats" für diesen Analyse-Durchlauf, also direkte Index-Zuordnung wie beim Audio-Pfad (`_apply_visual_sequences_direct`). Ergebnis: 3 `visual_sequences`, 3 `callouts` (`"2013"`, `"$9B"`, `"2003"`), `pacing` auf allen 31 Szenen — alles nachträglich in `plan.json` geschrieben, OHNE die Bilder oder die Szenen-Struktur anzufassen. `motion`/`clip_file`/`transition_type` explizit gelöscht, damit der nächste Render sie mit der neuen, pacing-bewussten Engine frisch berechnet; `start_aligned`/`end_aligned` (Whisper+Pausen-Kürzung) blieben unangetastet, da unabhängig von dieser Analyse gültig.
+
+### 20.5 End-to-End verifiziert (Juli 2026) — echtes Produktions-Video, nicht nur Testdaten
+
+Nach beiden Fixes + Nachanalyse erneut über die echte Render-API gerendert: **Motion-Vielfalt bestätigt** (u.a. `pan_right`, `zoom_in`, `dolly_in`, `static`, `diagonal_glide`, `snap_zoom_in`, `tilt_up`, `dolly_out`, `pan_left` über die 31 Szenen verteilt, nicht mehr nur Zoom). **2 echte Übergänge** ausgelöst (`smoothright` an einem `normal`-Sequenzwechsel, `fade` an einem `calm`-Sequenzwechsel — der dritte Sequenz-Anker ist Szene 0, die per Definition keinen Übergang vor sich hat). **13 SFX-Ereignisse** platziert, exakt wie erwartet nachgerechnet: 1× Whoosh (Übergang mit `sfx≠None`) + 6× Riser (alle `punchy`-Szenen) + 6× Impact (`punchy`-Szenen, die KEIN Übergangspunkt sind) = 13. Selbstprüfung grün, `final.mp4` unverändert 47.2s.
+
+## 21. JOBS-Memory-Cleanup (Phase 0 des "Cinematic Studio"-Erweiterungsplans)
+
+Vorbereitender Schritt vor der ElevenLabs-Integration (Phase 1): `JOBS`, `BATCH_JOBS`, `PLAN_JOBS`, `RENDER_JOBS` und `PRODUCE_JOBS` (Abschnitt 6.1) wuchsen bis dahin für die gesamte Prozesslaufzeit nur — kein Eintrag wurde je proaktiv entfernt. Am gravierendsten bei `JOBS`: ein neuer Eintrag pro Bild-/Veo-Klick, nicht pro Video wie bei den anderen vier (die sind durch ihren `(cid, vid)`-Schlüssel ohnehin auf einen Eintrag pro Video gedeckelt).
+
+### 21.1 `_cleanup_stale_jobs(max_age_hours=MAX_AGE_JOBS_HOURS)` (dashboard.py, direkt nach `RENDER_JOBS`/`_RENDER_JOBS_LOCK`)
+
+`MAX_AGE_JOBS_HOURS = 2.0`. Läuft alle 30 Minuten über einen Daemon-Thread (`_start_job_cleanup_daemon()`, gestartet in `main()` vor `srv.serve_forever()`). Ein Eintrag wird nur gelöscht, wenn er **sowohl** nicht mehr läuft **als auch** älter als die Schwelle ist — ein laufender Job darf nie verschwinden, sonst würde der Client weiter auf einen dem Server unbekannten `job_id`/`(cid,vid)` pollen.
+
+Zwei unterschiedliche "läuft noch"-Prädikate, weil die fünf Dicts unterschiedliche Schemata haben (kein einheitliches `running`-Feld über alle Dicts, wie ein naiver Copy-Paste-Ansatz angenommen hätte):
+- **`JOBS`** hat kein `running`-Bool, sondern `status: "running"|"done"|"error"` — das Prädikat ist `status == "running"`.
+- **`BATCH_JOBS`/`PLAN_JOBS`/`RENDER_JOBS`/`PRODUCE_JOBS`** haben alle ein echtes `running`-Bool — das Prädikat ist `entry.get("running")`.
+
+### 21.2 `ts`-Feld an jeder Schreibstelle
+
+Jede der ~25 Schreibstellen der fünf Dicts (jeder `XXX_JOBS[key] = {...}`-Literal sowie die In-Place-Mutation, die `BATCH_JOBS[key]["running"]` auf `False` setzt) bekam ein `"ts": time.time()` ergänzt — bei `JOBS` waren bereits zwei Stellen (`done`-Status bei Bild- und Veo-Jobs) mit `"ts": int(time.time())` vorhanden, dort unverändert gelassen; die übrigen (alle `error`-Stellen sowie beide `running`-Start-Stellen) waren bis dahin ohne `ts`.
+
+### 21.3 End-to-End verifiziert (Juli 2026) — synthetischer Stresstest, nicht nur Unit-Logik
+
+1000 synthetische `JOBS`-Einträge eingefügt (250× `running`, 250× `done`+alt, 250× `error`+alt, 250× `done`+frisch) sowie je drei Einträge (`running`+alt, `done`+alt, `done`+frisch) in allen vier übrigen Dicts, dann `_cleanup_stale_jobs()` aufgerufen: exakt die 500 alten, nicht-laufenden `JOBS`-Einträge entfernt (250 verbleiben unverändert, da `running`, + 250 verbleiben, da frisch), in jedem der vier anderen Dicts genau der eine alte-und-nicht-laufende Eintrag entfernt, `running`- und `fresh`-Einträge in allen fünf Dicts unangetastet. Server danach neu gestartet (zuvor über alle vier `_status`-Endpunkte für `sidequerst` geprüft: keine aktive Job — sicherer Neustart-Zeitpunkt, etablierte Regel dieser Session), Daemon läuft.

@@ -70,6 +70,50 @@ _PLAN_JOBS_LOCK = threading.Lock()
 RENDER_JOBS: dict = {}
 _RENDER_JOBS_LOCK = threading.Lock()
 
+# Every one of the job dicts above is only ever ADDED to, never proactively pruned —
+# a long-lived server process accumulates one entry per image/veo/batch/plan/render job
+# forever. JOBS is the worst offender (one entry per scene per click, unlike the other
+# four which are capped at one entry per (cid,vid)). _cleanup_stale_jobs() runs on a
+# 30-minute daemon and removes only entries that are BOTH finished AND older than
+# MAX_AGE_JOBS_HOURS — an entry still running must never be deleted, or the client's
+# polling loop would silently orphan (poll a job_id the server has forgotten about).
+MAX_AGE_JOBS_HOURS = 2.0
+
+def _cleanup_stale_jobs(max_age_hours: float = MAX_AGE_JOBS_HOURS):
+    cutoff = time.time() - max_age_hours * 3600
+    removed = 0
+    # JOBS has no "running" bool — its schema is {"status": "running"|"done"|"error", ...}.
+    with _ACTIVE_SCENE_JOBS_LOCK:
+        for job_id in list(JOBS.keys()):
+            entry = JOBS[job_id]
+            if entry.get("status") == "running":
+                continue
+            if entry.get("ts") and entry["ts"] < cutoff:
+                del JOBS[job_id]
+                removed += 1
+    for d, lock in ((BATCH_JOBS, _BATCH_JOBS_LOCK), (PLAN_JOBS, _PLAN_JOBS_LOCK),
+                    (RENDER_JOBS, _RENDER_JOBS_LOCK), (PRODUCE_JOBS, _PRODUCE_JOBS_LOCK)):
+        with lock:
+            for key in list(d.keys()):
+                entry = d[key]
+                if entry.get("running"):
+                    continue
+                if entry.get("ts") and entry["ts"] < cutoff:
+                    del d[key]
+                    removed += 1
+    if removed:
+        print(f"  [Cleanup] {removed} veraltete Job-Einträge entfernt (>{max_age_hours}h, abgeschlossen)", flush=True)
+
+def _start_job_cleanup_daemon():
+    def loop():
+        while True:
+            time.sleep(1800)  # 30 Minuten
+            try:
+                _cleanup_stale_jobs()
+            except Exception as e:
+                print(f"  [Cleanup] Fehler: {e}", flush=True)
+    threading.Thread(target=loop, daemon=True).start()
+
 # ── Per-channel path helpers (channel = brand/style, holds N videos) ──────────
 def ch_dir(cid):        return os.path.join(CHANNELS_DIR, cid)
 def ch_master(cid):     return os.path.join(ch_dir(cid), "master_prompt.txt")
@@ -1224,7 +1268,7 @@ def _image_job_worker_inner(job_id: str, task_id: str, out_path: str, plan_path:
             try:    urls = json.loads(info.get("resultJson", "{}")).get("resultUrls", [])
             except: urls = []
             if not urls:
-                JOBS[job_id] = {"status": "error", "progress": 0, "error": "Kein Bild in resultUrls"}
+                JOBS[job_id] = {"status": "error", "progress": 0, "error": "Kein Bild in resultUrls", "ts": time.time()}
                 _mark_scene_error(plan_path, scene_i)
                 return
             try:
@@ -1233,7 +1277,7 @@ def _image_job_worker_inner(job_id: str, task_id: str, out_path: str, plan_path:
                 with urllib.request.urlopen(dl_req, timeout=60) as img_r:
                     open(out_path, "wb").write(img_r.read())
             except Exception as e:
-                JOBS[job_id] = {"status": "error", "progress": 0, "error": f"Bild-Download fehlgeschlagen: {e}"}
+                JOBS[job_id] = {"status": "error", "progress": 0, "error": f"Bild-Download fehlgeschlagen: {e}", "ts": time.time()}
                 _mark_scene_error(plan_path, scene_i)
                 return
             fn = os.path.basename(out_path)
@@ -1251,11 +1295,11 @@ def _image_job_worker_inner(job_id: str, task_id: str, out_path: str, plan_path:
             return
         if state == "fail":
             JOBS[job_id] = {"status": "error", "progress": 0,
-                            "error": f"KIE fehlgeschlagen: {info.get('failMsg','unbekannt')}"}
+                            "error": f"KIE fehlgeschlagen: {info.get('failMsg','unbekannt')}", "ts": time.time()}
             _mark_scene_error(plan_path, scene_i)
             return
     print(f"  [KIE] {job_id} Timeout nach {IMAGE_JOB_MAX_POLLS*3}s — gebe auf", flush=True)
-    JOBS[job_id] = {"status": "error", "progress": 0, "error": f"KIE Timeout (>{IMAGE_JOB_MAX_POLLS*3}s)"}
+    JOBS[job_id] = {"status": "error", "progress": 0, "error": f"KIE Timeout (>{IMAGE_JOB_MAX_POLLS*3}s)", "ts": time.time()}
     _mark_scene_error(plan_path, scene_i)
 
 
@@ -1325,7 +1369,7 @@ def _batch_generate_worker(cid: str, vid: str):
     except Exception as e:
         with _BATCH_JOBS_LOCK:
             BATCH_JOBS[key] = {"running": False, "stop_requested": False, "done": 0,
-                                "total": 0, "current_i": [], "error": f"Plan lesen: {e}"}
+                                "total": 0, "current_i": [], "error": f"Plan lesen: {e}", "ts": time.time()}
         return
 
     scenes = plan["scenes"]
@@ -1500,6 +1544,7 @@ def _batch_generate_worker(cid: str, vid: str):
         stopped = BATCH_JOBS[key]["stop_requested"]
         BATCH_JOBS[key]["running"] = False
         BATCH_JOBS[key]["current_i"] = []
+        BATCH_JOBS[key]["ts"] = time.time()
     print(f"  [BatchGen] {cid}/{vid}: {'gestoppt' if stopped else 'fertig'}", flush=True)
 
 
@@ -1511,7 +1556,7 @@ def _veo_job_worker(job_id: str, task_id: str, scene: dict,
 
     poll = poll_veo(task_id, timeout=600)
     if not poll["ok"]:
-        JOBS[job_id] = {"status": "error", "progress": 0, "error": poll["error"]}
+        JOBS[job_id] = {"status": "error", "progress": 0, "error": poll["error"], "ts": time.time()}
         return
 
     JOBS[job_id]["progress"] = 80
@@ -1527,7 +1572,7 @@ def _veo_job_worker(job_id: str, task_id: str, scene: dict,
         with urllib.request.urlopen(dl_req, timeout=120) as vr:
             open(fn_silent, "wb").write(vr.read())
     except Exception as e:
-        JOBS[job_id] = {"status": "error", "progress": 0, "error": f"Download: {e}"}
+        JOBS[job_id] = {"status": "error", "progress": 0, "error": f"Download: {e}", "ts": time.time()}
         return
 
     # Audio mix
@@ -1648,26 +1693,101 @@ def _apply_sync_invariant(scenes: list, audio_duration: float, fps: int) -> list
     return frames
 
 
+# ---------- Motion-Vokabular (erweitert von reinem Ken-Burns-Zoom) ----------
+# Jeder Eintrag ist EIN generalisierter Zoom+Fokuspunkt-Verlauf: z0->z1 (Skalierung) und
+# focus0->focus1 (welcher Bildpunkt zentriert wird), beide über dieselbe Smoothstep-Kurve
+# interpoliert wie das bisherige Ken-Burns-Easing. Ein reiner Pan/Tilt ist einfach z0==z1
+# (keine Skalierung) mit einem wandernden Fokuspunkt -- kein neuer ffmpeg-Filter, nur eine
+# Verallgemeinerung des bereits vorhandenen zoompan-Ausdrucks. Pan/Tilt/Dolly/Diagonal
+# brauchen alle einen LEICHTEN Zoom-Puffer (>1.0) über den ganzen Verlauf, sonst würde der
+# Crop-Ausschnitt beim Wandern des Fokuspunkts über den Bildrand hinauslaufen.
+MOTION_LIBRARY = {
+    "zoom_in":        {"z0": 1.0,  "z1": 1.12, "focus0": (0.5, 0.45),  "focus1": (0.5, 0.45)},
+    "zoom_out":       {"z0": 1.12, "z1": 1.0,  "focus0": (0.5, 0.45),  "focus1": (0.5, 0.45)},
+    "pan_left":       {"z0": 1.08, "z1": 1.08, "focus0": (0.64, 0.48), "focus1": (0.36, 0.48)},
+    "pan_right":      {"z0": 1.08, "z1": 1.08, "focus0": (0.36, 0.48), "focus1": (0.64, 0.48)},
+    "tilt_up":        {"z0": 1.08, "z1": 1.08, "focus0": (0.5, 0.64),  "focus1": (0.5, 0.36)},
+    "tilt_down":      {"z0": 1.08, "z1": 1.08, "focus0": (0.5, 0.36),  "focus1": (0.5, 0.64)},
+    "dolly_in":       {"z0": 1.0,  "z1": 1.08, "focus0": (0.42, 0.46), "focus1": (0.58, 0.46)},
+    "dolly_out":      {"z0": 1.08, "z1": 1.0,  "focus0": (0.58, 0.46), "focus1": (0.42, 0.46)},
+    "diagonal_glide": {"z0": 1.04, "z1": 1.1,  "focus0": (0.4, 0.4),   "focus1": (0.6, 0.55)},
+    "snap_zoom_in":   {"z0": 1.0,  "z1": 1.25, "focus0": (0.5, 0.45),  "focus1": (0.5, 0.45)},
+    "static":         {"z0": 1.02, "z1": 1.02, "focus0": (0.5, 0.5),   "focus1": (0.5, 0.5)},
+}
+
+# Auswahl-Kandidaten nach `pacing` (heute verfügbar) -- vorbereitet für `phase` (Story-
+# Phase-Engine, noch nicht gebaut): wenn scene.get("phase") künftig gesetzt ist, wird das
+# bevorzugt, sonst fällt die Auswahl auf pacing zurück. Kein Zufall (Resume-Determinismus,
+# siehe ARCHITECTURE §13/§15.1) -- Auswahl über scene["i"] % len(candidates).
+_PACING_MOTION_CANDIDATES = {
+    "calm":   ["pan_left", "pan_right", "tilt_up", "tilt_down", "dolly_out"],
+    "normal": ["zoom_in", "zoom_out", "dolly_in", "pan_left", "pan_right"],
+    "punchy": ["snap_zoom_in", "diagonal_glide", "static"],
+}
+_PHASE_MOTION_CANDIDATES = {
+    "OPENING":       ["pan_right", "pan_left", "tilt_down"],
+    "RISING_ACTION": ["dolly_in", "zoom_in"],
+    "CLIMAX":        ["snap_zoom_in", "diagonal_glide", "static"],
+    "RESOLUTION":    ["dolly_out", "tilt_up", "pan_left"],
+}
+
+
+def _build_motion(name: str, intensity_scale: float = 1.0) -> dict:
+    """Scales a MOTION_LIBRARY recipe's movement AROUND ITS OWN MIDPOINT — intensity_scale
+    == 1.0 reproduces the base recipe exactly, <1 dampens (short scene, subtle), >1
+    amplifies (long scene, fuller movement) — without changing which direction it moves in."""
+    base = MOTION_LIBRARY[name]
+    z_mid = (base["z0"] + base["z1"]) / 2
+    fx_mid = (base["focus0"][0] + base["focus1"][0]) / 2
+    fy_mid = (base["focus0"][1] + base["focus1"][1]) / 2
+    z0 = z_mid + (base["z0"] - z_mid) * intensity_scale
+    z1 = z_mid + (base["z1"] - z_mid) * intensity_scale
+    fx0 = fx_mid + (base["focus0"][0] - fx_mid) * intensity_scale
+    fy0 = fy_mid + (base["focus0"][1] - fy_mid) * intensity_scale
+    fx1 = fx_mid + (base["focus1"][0] - fx_mid) * intensity_scale
+    fy1 = fy_mid + (base["focus1"][1] - fy_mid) * intensity_scale
+    return {"name": name, "z0": round(z0, 4), "z1": round(z1, 4),
+            "focus0": [round(fx0, 4), round(fy0, 4)], "focus1": [round(fx1, 4), round(fy1, 4)]}
+
+
+def _normalize_motion(motion: dict) -> dict:
+    """Accepts either the pre-existing {"type","z_end","focus"} shape (zoom_in/zoom_out/
+    static only, from before the motion vocabulary existed) or the current {"name","z0",
+    "z1","focus0","focus1"} shape, and always returns the current shape. Old plans with
+    already-rendered `scene["motion"]` keep working without a migration step (ARCHITECTURE
+    §11 rule: additive, no schema-version bump)."""
+    if "z0" in motion:
+        return motion
+    z_end = motion.get("z_end", 1.02)
+    mtype = motion.get("type", "static")
+    focus = motion.get("focus", [0.5, 0.5])
+    z0, z1 = (z_end, 1.0) if mtype == "zoom_out" else (1.0, z_end) if mtype == "zoom_in" else (z_end, z_end)
+    return {"name": mtype, "z0": z0, "z1": z1, "focus0": focus, "focus1": focus}
+
+
 def _motion_for_scene(scene: dict, prev_scene: dict) -> dict:
-    """Rule-based Ken Burns recipe — no LLM call, no external easing library. Very short
-    (punchy) scenes stay nearly static, since a moving camera on a sub-1.5s cut reads as
+    """Rule-based motion recipe — no LLM call, no external easing/animation library. Very
+    short scenes stay nearly static, since a moving camera on a sub-1.2s cut reads as
     jitter, not cinematic movement. Sequence continuations (seq_pos >= 1) keep the SAME
-    zoom direction as their sequence's previous scene, so several images belonging to one
-    visual sequence read as one continuous camera move instead of independent shots each
-    'breathing' on their own. Intensity scales with duration — a long calm scene gets a
-    slower, larger overall zoom; a short one barely moves."""
+    motion as their sequence's previous scene, so several images belonging to one visual
+    sequence read as one continuous camera move instead of independent shots each
+    'breathing' on their own. Intensity scales with duration — a long scene gets a fuller
+    movement, a short one stays subtle."""
     dur = scene.get("dur", 3.0)
-    if dur < 1.5:
-        return {"type": "static", "z_end": 1.02, "focus": [0.5, 0.5]}
+    if dur < 1.2:
+        return _build_motion("static", 1.0)
 
     if (scene.get("seq_id") is not None and scene.get("seq_pos", 0) >= 1
             and prev_scene and prev_scene.get("motion")):
-        zoom_type = prev_scene["motion"].get("type", "zoom_in")
+        name = _normalize_motion(prev_scene["motion"]).get("name", "zoom_in")
     else:
-        zoom_type = "zoom_in" if scene.get("i", 0) % 2 == 0 else "zoom_out"
+        phase = scene.get("phase")
+        pacing = scene.get("pacing") if scene.get("pacing") in _PACING_MOTION_CANDIDATES else "normal"
+        candidates = _PHASE_MOTION_CANDIDATES.get(phase) or _PACING_MOTION_CANDIDATES[pacing]
+        name = candidates[scene.get("i", 0) % len(candidates)]
 
-    intensity = min(0.06 + dur * 0.015, 0.18)
-    return {"type": zoom_type, "z_end": round(1.0 + intensity, 3), "focus": [0.5, 0.45]}
+    intensity_scale = min(0.5 + dur * 0.12, 1.4)
+    return _build_motion(name, intensity_scale)
 
 
 def _overlay_specs_for_scene(scene: dict, clip_dur: float, overlay_opts: dict) -> list:
@@ -1699,19 +1819,27 @@ def _render_clip(img_path: str, scene: dict, out_path: str, fps: int = RENDER_FP
     crashed/restarted render only redoes the clips actually missing, not everything."""
     if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
         return
-    motion = scene.get("motion") or {"type": "static", "z_end": 1.02, "focus": [0.5, 0.5]}
+    motion = _normalize_motion(scene.get("motion") or {"type": "static", "z_end": 1.02, "focus": [0.5, 0.5]})
     frames = max(1, scene.get("_frames") or round(scene.get("dur", 3.0) * fps))
-    z0, z1 = (1.0, motion["z_end"]) if motion["type"] != "zoom_out" else (motion["z_end"], 1.0)
-    fx, fy = motion.get("focus", [0.5, 0.5])
+    z0, z1 = motion["z0"], motion["z1"]
+    fx0, fy0 = motion["focus0"]
+    fx1, fy1 = motion["focus1"]
     clip_dur = frames / fps
 
     # Smoothstep easing (3t²-2t³), built purely from the frame index `on`/`frames` — NOT
     # from zoompan's internal `zoom` variable (which holds the clamped previous-frame
     # value and would accumulate rounding drift). This alone fixes the mechanical
     # "robot camera" look of a plain linear zoom expression, at zero extra runtime cost.
-    z_expr = f"{z0}+({z1}-{z0})*(3*pow(on/{frames},2)-2*pow(on/{frames},3))"
-    x_expr = f"(iw*{fx})-(iw/zoom/2)"
-    y_expr = f"(ih*{fy})-(ih/zoom/2)"
+    # The SAME easing curve now also interpolates the focus point (fx0,fy0)->(fx1,fy1) --
+    # a pure pan/tilt is simply z0==z1 with a moving focus point, so this one expression
+    # family covers the whole motion vocabulary (Ken Burns zoom, pan, tilt, dolly,
+    # diagonal glide), not a separate code path per motion type.
+    smoothstep = f"(3*pow(on/{frames},2)-2*pow(on/{frames},3))"
+    z_expr = f"{z0}+({z1}-{z0})*{smoothstep}"
+    fx_expr = f"({fx0}+({fx1}-{fx0})*{smoothstep})"
+    fy_expr = f"({fy0}+({fy1}-{fy0})*{smoothstep})"
+    x_expr = f"(iw*{fx_expr})-(iw/zoom/2)"
+    y_expr = f"(ih*{fy_expr})-(ih/zoom/2)"
 
     overlay_specs = _overlay_specs_for_scene(scene, clip_dur, overlay_opts)
     encoder, encoder_args = _probe_video_encoder()
@@ -1823,7 +1951,7 @@ def _render_selfcheck(final_path: str, expected_audio_duration: float) -> dict:
 
 # ---------- Übergänge (Phase 4) — Crossfade NUR an echten Sequenz-/Szenenwechseln, ----
 # alles andere bleibt harter Schnitt über den verlustfreien concat-Demuxer.
-TRANSITION_DURATION_SEC = 0.5
+TRANSITION_DURATION_SEC = 0.5  # Fallback/Default, siehe TRANSITION_LIBRARY für die pro-Familie-Dauer
 
 # Kuratierte Übergangs-Bibliothek: ffmpegs xfade-Filter bringt bereits 58 fertige
 # Übergangstypen mit (kein neues Paket, keine eigene Easing-Formel nötig für diesen
@@ -1832,28 +1960,32 @@ TRANSITION_DURATION_SEC = 0.5
 # ein längeres Video nicht monoton wirkt; welche Familie greift, ist regelbasiert aus
 # bereits vorhandenen Szenendaten (pacing) abgeleitet, kein LLM-Call, kein Zufall
 # (Zufall würde Resume-Läufe nach einem Reload inkonsistent machen).
-#   - "calm"   -> sanftes Dissolve/Fade, kein SFX (ein Whoosh würde eine ruhige Szene
-#                 stören)
-#   - "punchy" -> energischer Wipe, mit Whoosh (schneller, "harter" Übergangs-Look)
-#   - sonst    -> neutraler Smooth-Übergang (moderner als ein reines Fade, aber
-#                 unauffälliger als ein Wipe) — der Standardfall
+#   - "calm"   -> sanftes Dissolve/Fade, kein SFX, LANGSAMER (0.8s "linger" statt der
+#                 alten festen 0.5s) — eine ruhige Szene darf sich Zeit lassen
+#   - "punchy" -> energischer Wipe, mit Whoosh, SCHNELLER (0.3s "snappy") — ein Wipe,
+#                 der 0.8s dauert, wirkt behäbig statt hart
+#   - sonst    -> neutraler Smooth-Übergang, unveränderte 0.5s — der Standardfall
+# Vorbereitet für die künftige Story-Phase-Engine: sobald scene["phase"] existiert, kann
+# die Dauer stattdessen pro Phase variieren (OPENING kurz, RESOLUTION lang) — bis dahin
+# ist `pacing` der verfügbare, sinnvolle Proxy dafür.
 TRANSITION_LIBRARY = {
-    "fade":   {"types": ["fade", "dissolve"],           "sfx": None},
-    "wipe":   {"types": ["wipeleft", "wiperight"],      "sfx": "whoosh"},
-    "smooth": {"types": ["smoothleft", "smoothright"],  "sfx": "whoosh"},
+    "fade":   {"types": ["fade", "dissolve"],           "sfx": None,      "duration": 0.8},
+    "wipe":   {"types": ["wipeleft", "wiperight"],      "sfx": "whoosh",  "duration": 0.3},
+    "smooth": {"types": ["smoothleft", "smoothright"],  "sfx": "whoosh",  "duration": 0.5},
 }
 
 
 def _transition_for_scene(scene: dict, idx: int) -> tuple:
-    """Wählt Übergangstyp + passendes SFX (oder None) für den Schnitt VOR `scene`.
-    Richtung (links/rechts) alterniert über den Szenenindex — dasselbe deterministische
-    Muster wie die Zoom-Richtung in _motion_for_scene, damit ein erneuter Render (Resume
-    nach Reload) exakt denselben Übergang produziert, kein Zufalls-Rauschen."""
+    """Wählt Übergangstyp + passendes SFX (oder None) + Übergangsdauer für den Schnitt
+    VOR `scene`. Richtung (links/rechts) alterniert über den Szenenindex — dasselbe
+    deterministische Muster wie die Zoom-Richtung in _motion_for_scene, damit ein
+    erneuter Render (Resume nach Reload) exakt denselben Übergang produziert, kein
+    Zufalls-Rauschen. Gibt (transition_type, sfx_or_None, duration_sec) zurück."""
     family = "fade" if scene.get("pacing") == "calm" else \
              "wipe" if scene.get("pacing") == "punchy" else "smooth"
-    types = TRANSITION_LIBRARY[family]["types"]
-    transition_type = types[scene.get("i", idx) % len(types)]
-    return transition_type, TRANSITION_LIBRARY[family]["sfx"]
+    lib = TRANSITION_LIBRARY[family]
+    transition_type = lib["types"][scene.get("i", idx) % len(lib["types"])]
+    return transition_type, lib["sfx"], lib["duration"]
 
 
 def _has_transition_before(scenes: list, idx: int) -> bool:
@@ -1942,7 +2074,7 @@ def _build_sfx_events(scenes: list) -> list:
         prev = scenes[idx - 1]
         is_transition = s.get("seq_id") is not None and s.get("seq_pos", 0) == 0 and prev.get("seq_id") != s.get("seq_id")
         if is_transition:
-            _transition_type, sfx = _transition_for_scene(s, idx)
+            _transition_type, sfx, _duration = _transition_for_scene(s, idx)
             if sfx:
                 events.append({"start": scene_start(s), "sfx": sfx})
         if s.get("pacing") == "punchy":
@@ -2111,14 +2243,17 @@ def _render_worker(cid: str, vid: str):
                 s["motion"] = _motion_for_scene(s, scenes[idx - 1] if idx > 0 else None)
 
         # Transition points (same rule as the whoosh SFX event) get their PRECEDING
-        # scene's clip rendered with extra frames — exactly the crossfade duration —
-        # tacked on. The crossfade then consumes exactly that overlap, so the merged
-        # clip's total duration still equals the original, uncompensated sum of both
-        # scenes' planned durations, keeping the frame-exact sync invariant intact.
-        transition_frames = round(TRANSITION_DURATION_SEC * RENDER_FPS)
+        # scene's clip rendered with extra frames — exactly THIS transition's own
+        # duration (varies per pacing family, see TRANSITION_LIBRARY: calm lingers at
+        # 0.8s, punchy snaps at 0.3s) — tacked on. The crossfade then consumes exactly
+        # that overlap, so the merged clip's total duration still equals the original,
+        # uncompensated sum of both scenes' planned durations, keeping the frame-exact
+        # sync invariant intact regardless of which duration was used.
         transition_at = [idx for idx in range(len(scenes)) if _has_transition_before(scenes, idx)]
         for idx in transition_at:
             prev = scenes[idx - 1]
+            _ttype, _sfx, t_duration = _transition_for_scene(scenes[idx], idx)
+            transition_frames = round(t_duration * RENDER_FPS)
             prev["_frames"] = (prev.get("_frames") or round(prev["dur"] * RENDER_FPS)) + transition_frames
 
         overlay_opts = get_video_overlay_opts(cid, vid)
@@ -2145,10 +2280,10 @@ def _render_worker(cid: str, vid: str):
         for idx, s in enumerate(scenes):
             path = clip_paths[idx]
             if idx in transition_at and merged_paths:
-                transition_type, _sfx = _transition_for_scene(s, idx)
+                transition_type, _sfx, t_duration = _transition_for_scene(s, idx)
                 s["transition_type"] = transition_type  # sichtbar in plan.json, zum Nachvollziehen
                 merged_path = os.path.join(render_dir, f"xfade_{s['i']:03d}.mp4")
-                _crossfade_clips(merged_paths[-1], path, merged_path, TRANSITION_DURATION_SEC, transition_type)
+                _crossfade_clips(merged_paths[-1], path, merged_path, t_duration, transition_type)
                 merged_paths[-1] = merged_path
                 transitions_done += 1
                 stage("transitions", transitions_done, len(transition_at))
@@ -2195,7 +2330,8 @@ def _render_worker(cid: str, vid: str):
 
         with _RENDER_JOBS_LOCK:
             RENDER_JOBS[key] = {"running": False, "stop_requested": False, "stage": "fertig",
-                                 "done": len(scenes), "total": len(scenes), "error": None, "file": "final.mp4"}
+                                 "done": len(scenes), "total": len(scenes), "error": None, "file": "final.mp4",
+                                 "ts": time.time()}
         print(f"  [Render] {cid}/{vid}: fertig → final.mp4", flush=True)
     except Exception as e:
         import traceback; traceback.print_exc()
@@ -2203,7 +2339,7 @@ def _render_worker(cid: str, vid: str):
             prev = RENDER_JOBS.get(key, {})
             RENDER_JOBS[key] = {"running": False, "stop_requested": False, "stage": "error",
                                  "done": prev.get("done", 0), "total": prev.get("total", 0),
-                                 "error": str(e), "file": None}
+                                 "error": str(e), "file": None, "ts": time.time()}
         print(f"  [Render] {cid}/{vid}: Fehler: {e}", flush=True)
 
 
@@ -2256,12 +2392,12 @@ def _plan_generate_worker(cid: str, vid: str, text: str, wpm: float, sec: float)
         json.dump(out_data, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
 
         with _PLAN_JOBS_LOCK:
-            PLAN_JOBS[key] = {"running": False, "step": "Fertig", "error": None, "done": True}
+            PLAN_JOBS[key] = {"running": False, "step": "Fertig", "error": None, "done": True, "ts": time.time()}
         print(f"  [Plan] {cid}/{vid}: fertig, {len(scenes)} Szenen", flush=True)
     except Exception as e:
         import traceback; traceback.print_exc()
         with _PLAN_JOBS_LOCK:
-            PLAN_JOBS[key] = {"running": False, "step": "Fehler", "error": str(e), "done": False}
+            PLAN_JOBS[key] = {"running": False, "step": "Fehler", "error": str(e), "done": False, "ts": time.time()}
 
 
 # ---------- Phase 4.5: Ein-Knopf-Orchestrator ----------
@@ -2295,7 +2431,7 @@ def _produce_worker(cid: str, vid: str, text: str = "", wpm: float = 130.0, sec:
     def fail(stage, msg):
         with _PRODUCE_JOBS_LOCK:
             PRODUCE_JOBS[key] = {"running": False, "stage": stage, "stop_requested": False,
-                                  "error": msg, "file": None}
+                                  "error": msg, "file": None, "ts": time.time()}
         print(f"  [Produce] {cid}/{vid}: Fehler in Etappe '{stage}': {msg}", flush=True)
 
     try:
@@ -2351,7 +2487,7 @@ def _produce_worker(cid: str, vid: str, text: str = "", wpm: float = 130.0, sec:
 
         with _PRODUCE_JOBS_LOCK:
             PRODUCE_JOBS[key] = {"running": False, "stage": "fertig", "stop_requested": False,
-                                  "error": None, "file": render_state.get("file")}
+                                  "error": None, "file": render_state.get("file"), "ts": time.time()}
         print(f"  [Produce] {cid}/{vid}: fertig → {render_state.get('file')}", flush=True)
     except Exception as e:
         import traceback; traceback.print_exc()
@@ -2841,7 +2977,12 @@ def render_text_overlay_png(out_path: str, width: int, height: int, style: str, 
         )
     text_b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
     args = [WHISPER_VENV_PY, OVERLAY_SCRIPT, out_path, str(width), str(height), style, text_b64]
-    result = subprocess.run(args, capture_output=True, text=True, timeout=30)
+    # 90s, not 30s: normally finishes in well under a second (confirmed: 60-130ms in
+    # isolation), but a real render shares the machine with concurrent KIE image
+    # polling/downloads and ffmpeg encoding -- observed one real run where disk/CPU
+    # contention from those pushed a single venv-python cold start past 30s. This is a
+    # transient-contention margin, not a sign the script itself is slow.
+    result = subprocess.run(args, capture_output=True, text=True, timeout=90)
     if result.returncode != 0:
         raise RuntimeError(f"Overlay-Rendering fehlgeschlagen: {result.stderr[-500:]}")
 
@@ -3736,6 +3877,7 @@ def main():
         port = int(sys.argv[sys.argv.index("--port") + 1])
     if not os.path.exists(KIE_KEY_FILE):
         print("WARN: ~/.kie_key fehlt — alle KI-Funktionen werden scheitern.")
+    _start_job_cleanup_daemon()
     srv = ThreadingHTTPServer(("127.0.0.1", port), H)
     print(f"Dashboard läuft: http://localhost:{port}  (Strg+C zum Beenden)")
     srv.serve_forever()
