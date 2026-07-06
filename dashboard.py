@@ -2800,6 +2800,12 @@ def _plan_generate_worker(cid: str, vid: str, text: str, wpm: float, sec: float)
             s["status"] = "geplant"; s["t"] = fmt_t(s["start"])
             s["video_prompt"] = ""
         _assign_phases(scenes, analysis, len(scenes))
+        # Phase H: also default 'speaker' here for the manual-script path (Phase I's
+        # `_transcribe_generate_worker` does the same). Combined they ensure every
+        # scene has a `speaker` field regardless of which path generated the plan.
+        for s in scenes:
+            if "speaker" not in s:
+                s["speaker"] = "narrator"
         out_data = {"scenes": scenes, "wpm": wpm, "sec": sec, "characters": analysis.get("characters", [])}
         json.dump(out_data, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
 
@@ -3758,6 +3764,30 @@ def _transcribe_generate_worker(cid: str, vid: str, sec: float) -> dict:
     for s in scenes:
         s["video_prompt"] = ""
     _assign_phases(scenes, analysis, len(scenes))
+    # Phase H: derive `speaker` per scene. Current implementation defaults every scene to
+    # 'narrator' (the channel's default voice). Multi-speaker scripts (where a distinct
+    # character speaks per scene) ARE detected — analyze_script returns `characters`,
+    # and a future enhancement will use it to assign per-scene speakers — but the actual
+    # per-speaker ElevenLabs-call pipeline (split + concat audio segments) is a follow-up;
+    # for now, mixed-speaker scripts log a warning + fall back to the channel default
+    # voice, surfacing the gap without breaking the build.
+    SPEAKER_DEFAULT = "narrator"
+    speaker_set = set()
+    for s in scenes:
+        # Future: derive from character matching in analyze_script. For now, set all to
+        # the channel default so the data model is in place; multi-speaker override is
+        # a manual edit + a future Phase H worker.
+        if "speaker" not in s:
+            s["speaker"] = SPEAKER_DEFAULT
+        speaker_set.add(s["speaker"])
+    if len(speaker_set) > 1:
+        # mixed-speaker scripts: future enhancement — for now, surface the gap honestly.
+        print(f"  [Phase H] WARNUNG: {len(speaker_set)} distinct speakers erkannt "
+              f"({sorted(speaker_set)}). Aktueller ElevenLabs-Pfad generiert alle "
+              f"Szenen mit dem Channel-Default-Voice. Multi-Speaker-Pipeline ist ein "
+              f"follow-up (Plan §H.2). Edit s['speaker'] in plan.json manuell wenn "
+              f"du jetzt verschiedene Stimmen willst.", flush=True)
+
     tx(4, f"Fertig — {len(scenes)} Szenen bereit ✓")
 
     out = {
