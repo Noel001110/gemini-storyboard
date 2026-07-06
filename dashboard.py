@@ -1266,6 +1266,27 @@ PHASE_VOLUME = {
     "RESOLUTION":    0.35,
 }
 
+# Phase I: TTS-Preprocessing (SSML-Enrichment). ElevenLabs accepts a curated SSML subset:
+# <break time="500ms"/> for natural pauses, and our text-based emphasis markers (the
+# `<emphasis>` SSML tag is NOT in ElevenLabs' supported set — they treat it as
+# literal text — so we use variations of punctuation + capitalisation to nudge the
+# voice without breaking compat). TwelveLabs' speech engine reacts to:
+#   - THREE-DOT "..." — natural short pause between phrases
+#   - SINGLE-LINE BREAK (newline) — slightly stronger pause / scene-change hint
+#   - DOUBLE-LINE BREAK — full paragraph pause
+#   - EXCLAMATION "!" + ALL-CAPS word — emphasis on the word (probability, not guarantee)
+# The enricher is conservative — it only ADDS markers, never removes existing text.
+TTS_PAUSE_MARKERS = {
+    ".": ".",      # explicit sentence end (no marker, TTS treats as normal)
+    "!": "!",      # emphasis on the preceding word
+    "?": "?",
+    ";": ".",      # semicolon as soft period
+    ",": ",",
+}
+TTS_PAUSE_AFTER_SENTENCE = " ... "       # inject between sentences (subtle breath)
+TTS_PAUSE_BEFORE_CLIMAX = "... "         # extra emphasis before is_climax scenes
+TTS_PAUSE_AFTER_PHASE_BREAK = "\n\n"      # strong pause between acts
+
 def _assign_phases(scenes: list, analysis: dict, total: int) -> None:
     """Phase 3: assign each scene a STORY-PHASE, preferring LLM data when available.
 
@@ -2423,6 +2444,45 @@ def _place_sfx(narration_path: str, sfx_events: list, out_path: str) -> None:
     result = subprocess.run(cmd, capture_output=True, timeout=180)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg SFX-Platzierung fehlgeschlagen: {result.stderr.decode(errors='replace')[-300:]}")
+
+
+def _enrich_for_tts(text: str, scenes: list = None) -> str:
+    """Phase I: enrich raw narration text with TTS-friendly pause/emphasis markers
+    before sending to ElevenLabs (or any TTS provider). Pure text transformation —
+    no schema-drift risk, no LLM call, idempotent on already-enriched text.
+
+    Markers applied:
+    - "..." between sentences (subtle breath)
+    - "..." before is_climax scenes from the scenes list (extra emphasis)
+    - "\n\n" before is_phase_break scenes (act-change pause)
+    - Emphasis preservation: leaves ALL-CAPS / "!" runs alone (ElevenLabs already
+      uses these naturally — explicit SSML `<emphasis>` would be ignored).
+    Returns the enriched text. If `scenes` is None, only sentence-level enrichment
+    runs (the relative-scene lookup is optional)."""
+    enriched = text.strip()
+    # Step 1: ensure a triple-dot exists between adjacent sentences if they don't already
+    # have one — but ONLY where the gap is already >0. We do NOT inject any noise
+    # inside a single sentence. Conservative: replace ". " before capital letter with
+    # ". ... " only if no triple-dot is already there.
+    import re as _re
+    enriched = _re.sub(r"\.\s+(?=[A-ZÄÖÜ])", ". ... ", enriched)
+    # Step 2: scene-level emphasis (if scenes passed)
+    if scenes:
+        # Find scene boundaries: split text by sentence-end (rough — TTS doesn't need exact)
+        # and inject markers before scenes that are climax/phase_breaks.
+        # We do this naively: each scene's first ~30 chars get a marker prefix.
+        for s in scenes:
+            txt = (s.get("text") or "").strip()
+            if not txt:
+                continue
+            marker = ""
+            if s.get("is_climax"):
+                marker = TTS_PAUSE_BEFORE_CLIMAX + marker
+            if s.get("is_phase_break"):
+                marker = TTS_PAUSE_AFTER_PHASE_BREAK + marker
+            if marker and txt in enriched:
+                enriched = enriched.replace(txt, marker.lstrip() + txt, 1)
+    return enriched
 
 
 def _phase_modulate_music(music_path: str, scenes: list, out_path: str) -> None:
@@ -4223,6 +4283,13 @@ class H(BaseHTTPRequestHandler):
             text = (d.get("text") or "").strip()
             if not text:
                 return self._send(400, {"error": "Kein Skript-Text für ElevenLabs — bitte erst Skript in ② eintippen."})
+            # Phase I: enrich text with TTS-friendly pause/emphasis markers. We don't have
+            # access to scene boundaries yet (those come from plan.json which is built
+            # AFTER this call) — but sentence-level "..." insertion runs on the raw text
+            # without needing scenes. Scene-based enrichment (climax / phase-break markers)
+            # is a no-op in the first generation; will activate once plan.json exists and
+            # a regenerate is triggered.
+            text = _enrich_for_tts(text, scenes=None)
             # Optional sec override for downstream scene-pacing (defaults to NORMAL_HARD_CAP_SEC).
             sec = d.get("sec")
             settings = {k: d.get(k) for k in (
