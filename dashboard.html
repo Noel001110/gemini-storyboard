@@ -342,8 +342,46 @@
 
       <div class="divider">oder</div>
 
+      <div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Option C · ElevenLabs Voice direkt generieren (Phase 1)</div>
+      <div class="row" style="align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+        <label style="flex:1;min-width:240px">Voice auswählen
+          <select id="elVoiceSelect" style="width:100%"><option value="">– Voices werden geladen … –</option></select>
+        </label>
+        <button onclick="loadElevenLabsVoices()" class="sm ghost" title="Voice-Liste neu laden">↻</button>
+      </div>
+      <div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:6px">
+        <label style="flex:1;min-width:160px">Stability <span id="elStabVal" class="hint">0.50</span><input type="range" id="elStab" min="0" max="1" step="0.05" value="0.5" style="width:100%"></label>
+        <label style="flex:1;min-width:160px">Similarity <span id="elSimVal" class="hint">0.75</span><input type="range" id="elSim" min="0" max="1" step="0.05" value="0.75" style="width:100%"></label>
+      </div>
+      <div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:6px">
+        <label style="flex:1;min-width:160px">Style <span id="elStyleVal" class="hint">0.00</span><input type="range" id="elStyle" min="0" max="1" step="0.05" value="0" style="width:100%"></label>
+        <label style="flex:1;min-width:160px">Speaker Boost <span id="elBoostVal" class="hint">on</span>
+          <select id="elBoost" style="width:100%"><option value="true" selected>an</option><option value="false">aus</option></select>
+        </label>
+      </div>
+      <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px">
+        <button class="sm ghost" onclick="voiceTestPreview()">🎤 Voice testen</button>
+        <button class="sm ghost" onclick="resetVoiceSliders()">↺ Reset</button>
+        <span class="hint" id="elPreviewHint" style="display:none"></span>
+        <audio id="elPreviewPlayer" controls style="display:none;height:32px;margin-left:8px"></audio>
+      </div>
+      <div class="row" style="margin-top:12px;align-items:center;gap:10px;flex-wrap:wrap">
+        <button id="elGenBtn" onclick="elevenLabsGenerate()" disabled>🎙 Voiceover generieren</button>
+        <span class="hint" id="elGenHint">Erst Skript in Option B eintippen, dann hier generieren</span>
+      </div>
+      <div id="elSteps" class="steps" style="display:none;margin-top:10px">
+        <span id="elStep1">① ElevenLabs</span>
+        <span style="color:var(--border)">›</span>
+        <span id="elStep2">② Plan</span>
+        <span style="color:var(--border)">›</span>
+        <span id="elStep3">③ Render</span>
+      </div>
+      <span class="hint" id="elStatus" style="display:block;margin-top:6px"></span>
+
+      <div class="divider">oder</div>
+
       <div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Option B · Skript manuell eingeben (Timing geschätzt)</div>
-      <textarea id="script" rows="7" placeholder="Skript hier einfügen (Timestamps werden ignoriert) …" oninput="estimate()"></textarea>
+      <textarea id="script" rows="7" placeholder="Skript hier einfügen (Timestamps werden ignoriert) …" oninput="estimate();_elRefreshGenBtn()"></textarea>
       <div class="row" style="margin-top:10px">
         <label>Wörter / Minute<input type="number" id="wpm" value="150" min="80" max="220" oninput="estimate()"></label>
         <span class="est" id="est">—</span>
@@ -1123,6 +1161,206 @@ async function transcribeAudio(){
   $('planArea').style.display=SCENES.length?'block':'none';
   if(r.characters) suggestCharsFromPlan(r.characters);
   btn.disabled=false;
+}
+
+// ---- ElevenLabs voiceover (Phase 1) ----------------------------------------------
+// Mirrors /api/upload_audio + /api/transcribe: the ElevenLabs generate endpoint is a
+// single POST that mirrors that flow but skips the Gemini transcription step because
+// word timestamps come from the provider. After the call returns, /api/voiceover_status
+// reports the ElevenLabs-specific state, and /api/plan_status reports the scene-plan
+// worker running next (mirroring how Option A drops into the same _transcribe_generate_worker).
+let _elVoices = [];
+async function loadElevenLabsVoices(){
+  const sel = $('elVoiceSelect');
+  if(!sel) return;
+  sel.innerHTML = '<option value="">– lade Voices … –</option>';
+  const r = await ch_get('/api/elevenlabs_voices').catch(() => ({voices:[], error:'Netzwerkfehler'}));
+  _elVoices = (r && r.voices) || [];
+  sel.innerHTML = '';
+  if(!_elVoices.length){
+    sel.innerHTML = `<option value="">– keine Voices verfügbar (${(r&&r.error)||'API-Key prüfen'}) –</option>`;
+    return;
+  }
+  sel.innerHTML = '<option value="">– Voice wählen –</option>' + _elVoices.map(v =>
+    `<option value="${v.voice_id}">${v.name || v.voice_id}${v.category?' ('+v.category+')':''}</option>`).join('');
+  // Sync settings dropdowns: the helper persists voice_id via the dropdown change handler
+  const cur = $('elVoiceSelect');
+  const settings = await ch_get('/api/elevenlabs_settings').catch(() => null);
+  if(settings && settings.voice_id){
+    cur.value = settings.voice_id;
+  }
+  $('elVoiceSelect').onchange = async () => {
+    await ch_api('/api/elevenlabs_settings', {
+      voice_id: $('elVoiceSelect').value,
+      model_id: 'eleven_multilingual_v2',
+      stability: +$('elStab').value,
+      similarity_boost: +$('elSim').value,
+      style: +$('elStyle').value,
+      use_speaker_boost: $('elBoost').value === 'true',
+      output_format: 'mp3_44100_128',
+    });
+  };
+  _elWireSliders();
+  _elRefreshGenBtn();
+}
+
+function _elWireSliders(){
+  const s = $('elStab'), i = $('elSim'), st = $('elStyle'), b = $('elBoost');
+  const upd = () => {
+    $('elStabVal').textContent = (+s.value).toFixed(2);
+    $('elSimVal').textContent  = (+i.value).toFixed(2);
+    $('elStyleVal').textContent= (+st.value).toFixed(2);
+    $('elBoostVal').textContent= b.value === 'true' ? 'on' : 'off';
+  };
+  s.oninput = i.oninput = st.oninput = b.onchange = upd;
+  upd();
+}
+
+function _elRefreshGenBtn(){
+  const script = ($('script') && $('script').value || '').trim();
+  const hasVoice = !!($('elVoiceSelect') && $('elVoiceSelect').value);
+  const btn = $('elGenBtn');
+  if(!btn) return;
+  btn.disabled = !(script && hasVoice);
+  $('elGenHint').textContent =
+    !script ? 'Erst Skript in Option B eintippen, dann hier generieren'
+    : !hasVoice ? 'Voice auswählen'
+    : `Bereit: ${script.length} Zeichen, ${wordCount(script)} Wörter`;
+}
+
+async function voiceTestPreview(){
+  const hint = $('elPreviewHint');
+  hint.style.display='inline'; hint.textContent='generiere …';
+  $('elPreviewPlayer').style.display='none';
+  try {
+    const r = await fetch('/api/voiceover_preview', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        text: 'Hallo, das ist ein Stimm-Sample.',
+        voice_id: $('elVoiceSelect').value,
+        stability: +$('elStab').value,
+        similarity_boost: +$('elSim').value,
+        style: +$('elStyle').value,
+        use_speaker_boost: $('elBoost').value === 'true',
+        channel: ACTIVE_CHANNEL,
+      }),
+    });
+    if(!r.ok){
+      const j = await r.json().catch(()=>({error:'preview failed'}));
+      hint.textContent='Fehler: '+(j.error||'preview failed');
+      return;
+    }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const player = $('elPreviewPlayer');
+    player.src = url;
+    player.style.display='';
+    player.play().catch(()=>{});  // autoplay may be blocked — user clicks play
+    hint.textContent='fertig ✓';
+  } catch(e){
+    hint.textContent='Fehler: '+e;
+  }
+}
+
+function resetVoiceSliders(){
+  $('elStab').value = 0.5;
+  $('elSim').value  = 0.75;
+  $('elStyle').value= 0.0;
+  $('elBoost').value= 'true';
+  _elWireSliders();
+}
+
+let _voiceoverPollTimer = null;
+function startVoiceoverPoll(){
+  if(_voiceoverPollTimer) return;
+  _voiceoverPollTimer = setInterval(async () => {
+    // ElevenLabs-specific state
+    const el_state = await ch_get('/api/voiceover_status').catch(() => null);
+    // Scene plan worker state (after ElevenLabs persist, _transcribe_generate_worker runs)
+    const plan_state = await ch_get('/api/plan_status').catch(() => null);
+    const elStep = $('elStep1'), planStep = $('elStep2'), renderStep = $('elStep3');
+    const tagFor = (st) => {
+      if(!st) return '';
+      if(st.running) return ' … '+ (st.stage||st.step||'running');
+      if(st.error)   return ' ❌ '+st.error;
+      return ' ✓';
+    };
+    if(el_state && el_state.running){
+      $('elStatus').textContent = 'ElevenLabs-Generierung'+tagFor(el_state);
+      elStep.className = ''; elStep.textContent = '① ElevenLabs'+tagFor(el_state);
+    }
+    if(plan_state && plan_state.running){
+      $('elStatus').textContent = 'Szenen-Plan'+tagFor(plan_state);
+      elStep.className = 'done'; planStep.textContent = '② Plan'+tagFor(plan_state);
+    } else if(plan_state && !plan_state.running){
+      planStep.className = 'done'; planStep.textContent = '② Plan ✓';
+      // plan done → trigger render step placeholder; actual render starts on user click
+      renderStep.textContent = '③ Render — Manuell klicken';
+    }
+    if(el_state && !el_state.running && plan_state && !plan_state.running){
+      clearInterval(_voiceoverPollTimer); _voiceoverPollTimer = null;
+      $('elStatus').textContent = el_state.resume
+        ? 'Bereits vorhanden (Resume), nichts zu tun.'
+        : 'Fertig ✓ — Plan geladen.';
+      // Reload the plan from server (echoes existing _plan_ready handler)
+      const plan = await ch_get('/api/plan').catch(() => null);
+      if(plan && plan.scenes){
+        SCENES = plan.scenes;
+        renderScenes(plan.source || 'audio');
+        $('planArea').style.display = SCENES.length ? 'block' : 'none';
+        if(plan.characters) suggestCharsFromPlan(plan.characters);
+      }
+      $('elGenBtn').disabled = false;
+    }
+  }, 2000);
+}
+
+async function elevenLabsGenerate(){
+  const text = ($('script').value || '').trim();
+  if(!text){ alert('Erst Skript in Option B eintippen.'); return; }
+  if(!$('elVoiceSelect').value){ alert('Voice auswählen.'); return; }
+  const btn = $('elGenBtn');
+  btn.disabled = true;
+  $('elSteps').style.display = 'flex';
+  $('elStep1').className = ''; $('elStep1').textContent = '① ElevenLabs …';
+  $('elStep2').className = ''; $('elStep2').textContent = '② Plan';
+  $('elStep3').className = ''; $('elStep3').textContent = '③ Render';
+  $('elStatus').textContent = 'Persistiere Voice-Setting …';
+  await ch_api('/api/elevenlabs_settings', {
+    voice_id: $('elVoiceSelect').value,
+    model_id: 'eleven_multilingual_v2',
+    stability: +$('elStab').value,
+    similarity_boost: +$('elSim').value,
+    style: +$('elStyle').value,
+    use_speaker_boost: $('elBoost').value === 'true',
+    output_format: 'mp3_44100_128',
+  });
+  $('elStatus').textContent = 'ElevenLabs wird angefragt …';
+  const r = await ch_api('/api/voiceover_generate', {
+    text,
+    sec: +$('sec').value,
+    voice_id: $('elVoiceSelect').value,
+    stability: +$('elStab').value,
+    similarity_boost: +$('elSim').value,
+    style: +$('elStyle').value,
+    use_speaker_boost: $('elBoost').value === 'true',
+  });
+  if(r.error || !r.ok){
+    $('elStatus').textContent = 'Fehler: '+(r.error||'ElevenLabs fehlgeschlagen');
+    btn.disabled = false;
+    return;
+  }
+  $('elStep1').className = 'done';
+  startVoiceoverPoll();
+}
+
+// Load voice list on first channel switch (after API endpoints are reachable).
+const _origSwitchChannel = window.switchChannel;
+if(_origSwitchChannel){
+  window.switchChannel = async function(id, name){
+    await _origSwitchChannel(id, name);
+    try { await loadElevenLabsVoices(); } catch(_) {}
+  };
 }
 
 // ---- Render scenes ----
