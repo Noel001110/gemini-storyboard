@@ -1053,11 +1053,21 @@ def _validate_image_prompt_entry(entry: dict, anonymized_words: set = frozenset(
     return True
 
 def _image_prompt_chunk(chunk_beats: list, chunk_offset: int, total: int,
-                         analysis_ctx: str) -> list:
+                         analysis_ctx: str, chunk_phases: list = None) -> list:
     """One LLM call for a small chunk of scenes (still images — no story-phase/camera-move
     logic like video; instead forces explicit character-consistency notes, since stills have
-    no 'last frame of previous clip' anchor to inherit continuity from)."""
-    numbered = "\n".join(f"{chunk_offset+i+1}. {t}" for i, t in enumerate(chunk_beats))
+    no 'last frame of previous clip' anchor to inherit continuity from).
+
+    Phase C: chunk_phases (optional) is a per-scene list of phase strings matching chunk_beats;
+    when present, each numbered line is annotated with `[Phase: ...]` so the model gets the
+    Story-Phase-Engine's dramatic context alongside the textual content. When None (legacy
+    callers), no phase annotation — backward-compatible."""
+    if chunk_phases is None:
+        chunk_phases = [None] * len(chunk_beats)
+    numbered = "\n".join(
+        f"{chunk_offset+i+1}. [Phase: {p}] {t}" if p else f"{chunk_offset+i+1}. {t}"
+        for i, (t, p) in enumerate(zip(chunk_beats, chunk_phases))
+    )
 
     instr = f"""\
 You are a storyboard director turning narration into single still images. You receive a
@@ -1066,6 +1076,14 @@ through each line using the forced fields below — do not skip straight to the 
 
 ANALYSIS (entities, locations, symbols, emotional arc, callbacks — extracted from the FULL script):
 {analysis_ctx}
+
+PHASE STYLING (Phase C, Juli 2026) — each numbered line below is annotated with its
+narrative phase. Adapt the image style to that phase:
+- OPENING:       slow, deliberate composition; establish setting; neutral color palette; static-feeling even if motion comes later.
+- RISING_ACTION: building tension; tighter framing; movement toward subject; contrast slightly elevated.
+- CLIMAX:        maximum visual impact; high contrast; dynamic angle; subject dominates frame; emotional saturation.
+- RESOLUTION:    wind-down; wider framing; softer palette; contemplative stillness.
+Don't override the LINE'S TEXT — these cues modulate STYLING, not subject matter.
 
 {_IMAGE_PROMPT_FEWSHOT}
 
@@ -1148,12 +1166,12 @@ def visual_prompts(scenes, analysis=None):
     analysis_ctx = json.dumps(analysis, ensure_ascii=False, indent=1) if analysis else "{}"
     anon_words = _anonymized_words(analysis)
 
-    def _fetch_image_chunk(chunk, chunk_offset):
+    def _fetch_image_chunk(chunk, chunk_offset, chunk_phases=None):
         """Try the chunk; on failure (incl. truncated/malformed JSON on large chunks),
         split in half and retry each half instead of giving up the whole chunk to the
         generic fallback — a truncation only costs half the chunk, not all of it."""
         try:
-            return _image_prompt_chunk(chunk, chunk_offset, total, analysis_ctx)
+            return _image_prompt_chunk(chunk, chunk_offset, total, analysis_ctx, chunk_phases)
         except Exception as e:
             if len(chunk) <= 1:
                 print(f"  [Plan] Bild-Chunk-Fehler (Szene {chunk_offset}): {e} — Fallback", flush=True)
@@ -1161,16 +1179,22 @@ def visual_prompts(scenes, analysis=None):
                          "concrete_entity": ""}]
             mid = len(chunk) // 2
             print(f"  [Plan] Bild-Chunk-Fehler: {e} — teile Chunk und wiederhole …", flush=True)
-            left  = _fetch_image_chunk(chunk[:mid], chunk_offset)
-            right = _fetch_image_chunk(chunk[mid:], chunk_offset + mid)
+            left  = _fetch_image_chunk(chunk[:mid], chunk_offset, (chunk_phases or [])[:mid])
+            right = _fetch_image_chunk(chunk[mid:], chunk_offset + mid, (chunk_phases or [])[mid:])
             return left + right
 
     prompts: list[str] = []
+    # Phase C: extract phase per scene so the chunk prompt can carry per-line
+    # narrative-position cues. Default "" (no annotation) when phase missing —
+    # _assign_phases always sets a phase in the modern pipeline, but legacy callers
+    # and edge cases stay graceful.
+    phases = [s.get("phase", "") for s in scenes]
     chunks = [beats[i:i+IMAGE_PROMPT_CHUNK_SIZE] for i in range(0, total, IMAGE_PROMPT_CHUNK_SIZE)]
+    chunks_phases = [phases[i:i+IMAGE_PROMPT_CHUNK_SIZE] for i in range(0, total, IMAGE_PROMPT_CHUNK_SIZE)]
     offset = 0
     for ci, chunk in enumerate(chunks):
         print(f"  [Plan] Bild-Chunk {ci+1}/{len(chunks)} ({len(chunk)} Szenen) …", flush=True)
-        entries = _fetch_image_chunk(chunk, offset)
+        entries = _fetch_image_chunk(chunk, offset, chunks_phases[ci])
 
         for j, entry in enumerate(entries):
             beat_i = offset + j
@@ -1204,6 +1228,29 @@ def story_phase(i: int, total: int) -> str:
 PHASE_SET = {"OPENING", "RISING_ACTION", "CLIMAX", "RESOLUTION"}
 PHASE_TO_ACT = {"OPENING": 0, "RISING_ACTION": 1, "CLIMAX": 2, "RESOLUTION": 3}
 PHASE_COVERAGE_THRESHOLD = 0.8  # <80% LLM coverage → full fallback (no mixing)
+
+# Phase-aware image-prompt additions (Phase C, Juli 2026). Injected per-line into the
+# image-prompt chunk so the visual model gets narrative-position cues alongside the text.
+# Default "" for unknown phases means no bias applied — backward-compat with legacy
+# scenes that don't have s["phase"] yet (kept by _assign_phases fallback).
+PHASE_PROMPT_ADDITIONS = {
+    "OPENING":       "STYLE: slow, deliberate composition; establish setting; neutral color palette; static-feeling even if motion comes later.",
+    "RISING_ACTION": "STYLE: building tension; tighter framing; movement toward subject; contrast slightly elevated.",
+    "CLIMAX":        "STYLE: maximum visual impact; high contrast; dynamic angle; subject dominates frame; emotional saturation.",
+    "RESOLUTION":    "STYLE: wind-down; wider framing; softer palette; contemplative stillness.",
+}
+def _phase_prompt_addition(phase: str) -> str:
+    return PHASE_PROMPT_ADDITIONS.get(phase, "")
+
+# Phase D color-grading: ffmpeg `eq=contrast:saturation:brightness` filter per phase.
+# Identity ("") for unknown phases preserves the legacy uncolored look. Difference values
+# are subtle — anything stronger reads as "distorted" rather than "cinematic contrast".
+PHASE_COLOR_FILTER = {
+    "OPENING":       "eq=contrast=1.0:saturation=0.9:brightness=0.0",
+    "RISING_ACTION": "eq=contrast=1.1:saturation=1.05:brightness=0.0",
+    "CLIMAX":        "eq=contrast=1.3:saturation=1.2:brightness=-0.02",
+    "RESOLUTION":    "eq=contrast=0.95:saturation=0.85:brightness=0.03",
+}
 
 def _assign_phases(scenes: list, analysis: dict, total: int) -> None:
     """Phase 3: assign each scene a STORY-PHASE, preferring LLM data when available.
@@ -2024,10 +2071,17 @@ def _render_clip(img_path: str, scene: dict, out_path: str, fps: int = RENDER_FP
     overlay_specs = _overlay_specs_for_scene(scene, clip_dur, overlay_opts)
     encoder, encoder_args = _probe_video_encoder()
     inputs = ["-loop", "1", "-i", img_path]
+    # Phase D: phase-aware color-grading via ffmpeg `eq` filter, applied AFTER zoompan so
+    # it operates on the visual content but BEFORE any text overlays compose (overlays
+    # should sit on top of the color-graded base, not be color-graded themselves).
+    # Unknown phases (legacy scenes) -> identity filter, no visual impact.
+    eq_filter = PHASE_COLOR_FILTER.get(scene.get("phase", ""), "")
+    eq_suffix  = f",{eq_filter}" if eq_filter else ""
     filter_parts = [
         f"[0:v]scale={RENDER_SUPERSAMPLE_WIDTH}:-2,"
         f"zoompan=z='{z_expr}':d={frames}:x='{x_expr}':y='{y_expr}':"
-        f"s={RENDER_WIDTH}x{RENDER_HEIGHT}:fps={fps},setsar=1[base]"
+        f"s={RENDER_WIDTH}x{RENDER_HEIGHT}:fps={fps},setsar=1"
+        f"{eq_suffix}[base]"
     ]
     overlay_pngs = []
     last_label = "base"
