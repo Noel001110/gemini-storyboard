@@ -692,6 +692,10 @@ def main():
         run(t_phase34_resume_supports_both_providers, "34: Resume-Marker akzeptiert both elevenlabs + minimax")
         run(t_phase34_no_old_loadelevenlabsvoices_callers, "34: keine alten loadElevenLabsVoices-Caller mehr")
 
+        summary_section("Phase 34.1: MiniMax-Sliders + Provider-Toggle")
+        run(t_phase34_1_minimax_slider_visibility, "34.1: MiniMax-Sliders (Speed/Volume/Pitch) + Hide ElevenLabs-Sliders")
+        run(t_phase34_1_minimax_slider_persistence, "34.1: MiniMax-Sliders persist via /api/elevenlabs_settings")
+
         print(f"\n=== Result ===")
         print(f"  Passed: {PASSED}")
         print(f"  Failed: {FAILED}")
@@ -1179,6 +1183,52 @@ def t_phase34_no_old_loadelevenlabsvoices_callers():
     matches = _re.findall(r"\bloadElevenLabsVoices\b", html)
     assert len(matches) == 0, \
         f"Phase 34 anti-regression: loadElevenLabsVoices() darf NICHT mehr vorkommen (gefunden: {len(matches)} mal)"
+
+
+# ─── Phase 34.1 — MiniMax-Sliders + Provider-Toggle ─────────────────────────
+
+def t_phase34_1_minimax_slider_visibility():
+    """Phase 34.1: MiniMax-Sliders (Speed/Volume/Pitch) sind im HTML vorhanden +
+    _ttsSlidersVisibility(provider) togglet ElevenLabs vs MiniMax-Block.
+    ElevenLabs-Sliders sind in #elSlidersBlock, MiniMax in #minimaxSlidersBlock.
+    Bug-Fix 2 (User-Feedback): ElevenLabs-Sliders verschwinden bei MiniMax-Auswahl,
+    um Verwirrung zu vermeiden (User könnte denken sie wirken auch auf MiniMax)."""
+    html = open(os.path.join(ROOT, "dashboard.html")).read()
+    # Container-IDs vorhanden
+    assert 'id="elSlidersBlock"' in html, \
+        "34.1 missing: #elSlidersBlock container (ElevenLabs-Sliders)"
+    assert 'id="minimaxSlidersBlock"' in html, \
+        "34.1 missing: #minimaxSlidersBlock container (MiniMax-Sliders)"
+    # MiniMax-Sliders: Speed, Volume, Pitch
+    for slider_id in ('mmSpeed', 'mmVolume', 'mmPitch'):
+        assert f'id="{slider_id}"' in html, \
+            f"34.1 missing: MiniMax-Slider #{slider_id}"
+    # Visibility-Controller
+    assert 'function _ttsSlidersVisibility' in html, \
+        "34.1 missing: _ttsSlidersVisibility() function"
+    assert '_ttsSlidersVisibility(provider)' in html, \
+        "34.1 missing: _ttsSlidersVisibility(provider)-Aufruf im loadTtsVoices"
+    # Toggle-Logik: display:none für jeweils den anderen Block
+    body = html[html.find("function _ttsSlidersVisibility"):html.find("function _ttsSlidersVisibility")+500]
+    assert "'none'" in body, \
+        "34.1 missing: display:none Logik in _ttsSlidersVisibility"
+    # MiniMax-Slider-Wire-Helper
+    assert 'function _mmWireSliders' in html, \
+        "34.1 missing: _mmWireSliders() function (Slider-Persistierung)"
+
+
+def t_phase34_1_minimax_slider_persistence():
+    """Phase 34.1: MiniMax-Slider-Werte (speed/volume/pitch) werden via
+    /api/elevenlabs_settings persistiert (mit tts_provider='minimax'). Beim
+    Voice-Settings-Response werden die Werte geladen."""
+    html = open(os.path.join(ROOT, "dashboard.html")).read()
+    # Persistenz im onchange-Handler
+    assert '+s.value' in html and '+v.value' in html, \
+        "34.1 missing: MiniMax-Slider-Werte werden via +s.value/+v.value gepersistiert"
+    assert 'parseInt(p.value, 10)' in html, \
+        "34.1 missing: Pitch-Wert wird via parseInt() (int) gepersistiert"
+    assert "tts_provider: 'minimax'" in html, \
+        "34.1 missing: tts_provider: 'minimax' in der MiniMax-Persistenz-Payload"
 
 
 if __name__ == "__main__":

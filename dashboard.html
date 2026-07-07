@@ -526,15 +526,32 @@
         </label>
         <button onclick="loadTtsVoices()" class="sm ghost" title="Voice-Liste neu laden">↻</button>
       </div>
-      <div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:6px">
-        <label style="flex:1;min-width:160px">Stability <span id="elStabVal" class="hint">0.50</span><input type="range" id="elStab" min="0" max="1" step="0.05" value="0.5" style="width:100%"></label>
-        <label style="flex:1;min-width:160px">Similarity <span id="elSimVal" class="hint">0.75</span><input type="range" id="elSim" min="0" max="1" step="0.05" value="0.75" style="width:100%"></label>
+      <div id="elSlidersBlock" class="space-y-1">
+        <div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:6px">
+          <label style="flex:1;min-width:160px">Stability <span id="elStabVal" class="hint">0.50</span><input type="range" id="elStab" min="0" max="1" step="0.05" value="0.5" style="width:100%"></label>
+          <label style="flex:1;min-width:160px">Similarity <span id="elSimVal" class="hint">0.75</span><input type="range" id="elSim" min="0" max="1" step="0.05" value="0.75" style="width:100%"></label>
+        </div>
+        <div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:6px">
+          <label style="flex:1;min-width:160px">Style <span id="elStyleVal" class="hint">0.00</span><input type="range" id="elStyle" min="0" max="1" step="0.05" value="0" style="width:100%"></label>
+          <label style="flex:1;min-width:160px">Speaker Boost <span id="elBoostVal" class="hint">on</span>
+            <select id="elBoost" style="width:100%"><option value="true" selected>an</option><option value="false">aus</option></select>
+          </label>
+        </div>
       </div>
-      <div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:6px">
-        <label style="flex:1;min-width:160px">Style <span id="elStyleVal" class="hint">0.00</span><input type="range" id="elStyle" min="0" max="1" step="0.05" value="0" style="width:100%"></label>
-        <label style="flex:1;min-width:160px">Speaker Boost <span id="elBoostVal" class="hint">on</span>
-          <select id="elBoost" style="width:100%"><option value="true" selected>an</option><option value="false">aus</option></select>
-        </label>
+
+      <div id="minimaxSlidersBlock" style="display:none" class="space-y-1">
+        <!-- Phase 34.1: MiniMax-spezifische Voice-Controls.
+             sichtbar nur wenn tts_provider=minimax. Drei Slider:
+             - Speed: 0.5–2.0 (1.0 = normal). MiniMax-API-Schema: voice_setting.speed.
+             - Volume: 0.0–2.0 (1.0 = normal). Schema: voice_setting.vol.
+             - Pitch: -12 bis +12 (0 = normal, semitones). Schema: voice_setting.pitch. -->
+        <div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:6px">
+          <label style="flex:1;min-width:160px">Speed <span id="mmSpeedVal" class="hint">1.00</span><input type="range" id="mmSpeed" min="0.5" max="2.0" step="0.05" value="1.0" style="width:100%"></label>
+          <label style="flex:1;min-width:160px">Volume <span id="mmVolumeVal" class="hint">1.00</span><input type="range" id="mmVolume" min="0" max="2.0" step="0.05" value="1.0" style="width:100%"></label>
+        </div>
+        <div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:6px">
+          <label style="flex:1;min-width:160px">Pitch <span id="mmPitchVal" class="hint">0</span><input type="range" id="mmPitch" min="-12" max="12" step="1" value="0" style="width:100%"></label>
+        </div>
       </div>
       <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px">
         <button class="sm ghost" onclick="voiceTestPreview()">🎤 Voice testen</button>
@@ -1557,10 +1574,15 @@ async function loadTtsVoices(){
         voice_id: v,
         model_id: 'minimax-speech-2.6-hd',
         tts_provider: 'minimax',
+        speed:  +$('mmSpeed').value,
+        volume: +$('mmVolume').value,
+        pitch:  parseInt($('mmPitch').value, 10),
       });
     }
   };
+  _ttsSlidersVisibility(provider);
   _elWireSliders();
+  _mmWireSliders();
   _elRefreshGenBtn();
 }
 
@@ -1570,6 +1592,18 @@ async function onTtsProviderChange(){
   const provider = $('ttsProviderSelect').value;
   await ch_api('/api/tts_provider', { tts_provider: provider });
   await loadTtsVoices();
+}
+
+// Phase 34.1 — Slider-Visibility-Controller. Zeigt je nach gewähltem Provider
+// den ElevenLabs-Block (Stability/Similarity/Style/Speaker-Boost) ODER den
+// MiniMax-Block (Speed/Volume/Pitch). Versteckt die jeweils ANDEREN Slider
+// damit User nicht denkt sie wirken auch auf den anderen Provider.
+function _ttsSlidersVisibility(provider){
+  const elBlock = $('elSlidersBlock');
+  const mmBlock = $('minimaxSlidersBlock');
+  if (!elBlock || !mmBlock) return;
+  elBlock.style.display = (provider === 'elevenlabs') ? '' : 'none';
+  mmBlock.style.display = (provider === 'minimax')   ? '' : 'none';
 }
 
 function _elWireSliders(){
@@ -1582,6 +1616,33 @@ function _elWireSliders(){
   };
   s.oninput = i.oninput = st.oninput = b.onchange = upd;
   upd();
+}
+
+// Phase 34.1 — MiniMax-Slider-Wire-Up. Speed (0.5–2.0), Volume (0–2.0),
+// Pitch (-12..+12 semitones). Änderungen werden via ch_api zu
+// /api/elevenlabs_settings gepersistiert (mit tts_provider='minimax').
+function _mmWireSliders(){
+  const s = $('mmSpeed'), v = $('mmVolume'), p = $('mmPitch');
+  if (!s || !v || !p) return;
+  const upd = () => {
+    $('mmSpeedVal').textContent  = (+s.value).toFixed(2);
+    $('mmVolumeVal').textContent = (+v.value).toFixed(2);
+    $('mmPitchVal').textContent  = String(parseInt(p.value, 10));
+  };
+  s.oninput = v.oninput = p.oninput = upd;
+  upd();
+  // Persist on change — kombiniert mit dem Voice-Settings-Endpoint
+  const persist = async () => {
+    await ch_api('/api/elevenlabs_settings', {
+      voice_id: $('elVoiceSelect').value,
+      model_id: 'minimax-speech-2.6-hd',
+      tts_provider: 'minimax',
+      speed:  +s.value,
+      volume: +v.value,
+      pitch:  parseInt(p.value, 10),
+    });
+  };
+  s.onchange = v.onchange = p.onchange = persist;
 }
 
 function _elRefreshGenBtn(){
