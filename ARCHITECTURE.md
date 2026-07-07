@@ -1329,3 +1329,27 @@ Stand: Alpine.js-basierter Stepper im Editor-View, sticky unter dem Header. Stat
 **Tests:** `tests/test_cinematic_e2e.py::t_stepper_*` — 3 neue Tests grün (HTML-Struktur, Python-Heuristik-Spiegelung, canEnter-Mirror).
 
 **Caveat (anchored in 33.4):** die Schritt-Reihenfolge ①Modus/②Skript/③Bilder/④Titel/⑤Render aus dem aktuellen Editor-View entspricht NICHT dem im Design-Brief vorgeschlagenen ①Thema/②Skript/③Audio/④Bilder/⑤Render. Wenn 33.4 die Step-Cards migriert, müssen die Inhalte an die neuen Positionen wandern und der Stepper auf die neue Reihenfolge umgestellt werden.
+
+### 33.2.1 Bug-Fixes pre-33.3 (User-Feedback-Review)
+
+Nach dem 33.2-Commit hat User-Feedback zwei Live-Knall-Bugs identifiziert, die in 33.2.1 direkt gefixt wurden:
+
+**Bug-1: Heuristik-URLs zeigten auf nicht-existenten `/api/v1/videos/...`-Tree.**
+- Symptom: 5x `fetch()` schicken alle 404 zurück → Stepper zeigt alle Steps als not-completed (sah im UI wie tot aus).
+- Fix: **Konsolidierter Single-Endpoint `/api/stepper_state?channel=X&video=Y`** im Backend (`dashboard.py`) implementiert, der alle 5 Heuristik-Daten in einem Round-Trip liefert:
+  - `thema_done` (bool): meta.json.selected_title nicht leer
+  - `plan_done` (bool): generated/plan.json existiert
+  - `audio_done` (bool): uploads/voiceover.mp3 existiert
+  - `images_done` / `images_total` (int/int): out/*NNN.jpg-Counter
+  - `rendered` (bool): meta.json.rendered_at ODER render/final.mp4
+- Frontend nutzt jetzt exakt diesen einen Endpoint; race-anfällige Multi-Fetch-Heuristik ersetzt.
+- Regression-Guard im Test: `t_stepper_backend_endpoint_exists` verifiziert dass `/api/v1/videos` NICHTS MEHR im HTML steht.
+
+**Bug-2: Stepper-Labels (Thema/Skript/Audio/Bilder/Render) matched nicht mit den Sections (Modus/Skript/Bilder/Titel/Render).**
+- Symptom: Klick auf Step „③ Audio" → scrollt zu Section „③ Bilder generieren" → User-Desorientierung.
+- Fix: Step-Labels auf die EXISTIERENDEN Sections angepasst (①Modus / ②Skript / ③Bilder / ④Titel / ⑤Render). Die im Design-Brief vorgeschlagene neue Reihenfolge ①Thema/②Skript/③Audio/④Bilder/⑤Render bleibt als 33.4-Work — Step-Inhalte-Migration.
+- Test `t_stepper_html_structure` verifiziert die neuen Label-Strings.
+
+**Bug-3 (informell, kein Crash):** `x-init="init()"` ist ein No-Op weil Reset erst in `openVideo()` passiert. Akzeptables Verhalten — kein Crash, nur ungenutzte Init-Methode. Wird in 33.4 mit Lifecycle-Hooks ersetzt.
+
+Tests: 30 → 31 (1 neue `t_stepper_backend_endpoint_exists` + 1 erweiterter `t_stepper_html_structure` für neue Labels).

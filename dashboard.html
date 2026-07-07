@@ -2258,32 +2258,29 @@ function copyScript(){
 
 // ─── Phase 33.2 — Stepper State-Machine + Heuristik ─────────────────────────
 // Alpine.js component, eingehängt am Stepper-HTML weiter oben (x-data="stepperState()").
-// Five-step wizard mirror — Step-Definitionen, Heuristik aus file-System-Checks
-// (gecached in localStorage per video, damit der Stepper nicht jedes Klick
-//  filesystem-IO macht), State-Machine (active/completed Sets, canEnter Hybrid).
+// Single-Endpunkt-Heuristik: ein einziger /api/stepper_state Round-Trip liefert
+// alle 5 Heuristik-Bedingungen auf einmal (Bug-1 Fix: vorher waren es 5 separate
+// fetches gegen einen nicht-existenten Backend-Pfad —
+// 5x 404 hätte bedeutet alle Steps sind "not completed").
 //
-// Heuristik-Korrekturen aus User-Feedback Phase 33.2:
-// - ① THEMA: meta.json + selected_title NOT empty (nicht nur meta.json —
-//   Thumbnail-Upload erstellt auch eine meta.json ohne Titel)
-// - ② SKRIPT: plan.json exists
-// - ③ AUDIO:  voiceover.mp3 exists (NUR mp3, nicht audio_meta.json —
-//   audio_meta.json wird während ElevenLabs-Calls kurz vor dem mp3
-//   geschrieben, also Race-Bug möglich)
-// - ④ BILDER: counter (N von M Szenen haben JPGs), kein binärer done-State
-// - ⑤ RENDER: final.mp4 exists OR meta.json.rendered_at set
+// Step-Labels entsprechen den EXISTIERENDEN Sections im Editor-View (Bug-2 Fix):
+// ① Modus / ② Skript / ③ Bilder / ④ Titel / ⑤ Render. Die im Design-Brief
+// vorgeschlagene neue Reihenfolge (Thema/Skript/Audio/Bilder/Render) wird in
+// 33.4 umgestellt wenn die Step-Cards migriert werden — Anchor-IDs sind
+// bereits vorbereitet (data-step-section="1..5").
 function stepperState(){
   return {
     cid: '',
     vid: '',
     steps: [
-      { n: 1, label: 'Thema',        subtitle: 'Titel wählen' },
-      { n: 2, label: 'Skript',       subtitle: 'Voice oder Text' },
-      { n: 3, label: 'Audio',        subtitle: 'Voice-Over' },
-      { n: 4, label: 'Bilder',       subtitle: 'Szenen generieren' },
-      { n: 5, label: 'Render',       subtitle: 'Film zusammenbauen' },
+      { n: 1, label: 'Modus',  subtitle: 'Bild oder Video' },
+      { n: 2, label: 'Skript', subtitle: 'Voice oder Text' },
+      { n: 3, label: 'Bilder', subtitle: 'Szenen generieren' },
+      { n: 4, label: 'Titel',  subtitle: 'Titel & Thumbnail' },
+      { n: 5, label: 'Render', subtitle: 'Film zusammenbauen' },
     ],
     completed: {},      // {1: true, 2: true, ...}
-    counts: {},         // {4: '47 / 60', ...}
+    counts: {},         // {4: {done, total}}
     currentStep: 1,
     _cacheKey: '',
     _cacheBust: 0,
@@ -2305,71 +2302,36 @@ function stepperState(){
       } else {
         await this._recompute();
       }
-      // Active-State Hybrid: erster nicht-completed Step ist active.
-      // User kann overriden via Klick (canEnter check).
       this.currentStep = this._firstIncomplete() || 5;
-      // Anchor-scroll bei Video-Wechsel nicht — User öffnet Video und
-      // liest Top-of-Page. Wenn Step aktiv ist, behält UI ihn dort.
     },
 
     invalidate(){
-      // Aufruf von außerhalb (z.B. nach Render-Start, Bild-Generation fertig).
       this._cacheBust += 1;
       localStorage.removeItem(this._cacheKey);
       if (this.cid && this.vid) this.reset(this.cid, this.vid);
     },
 
     async _recompute(){
-      // Heuristik-Reihenfolge entspricht User-Feedback-Plan §33.2:
-      // ① meta.json + selected_title, ② plan.json, ③ voiceover.mp3,
-      // ④ counter N/M von Szenen mit .jpg, ⑤ final.mp4 oder rendered_at.
-      const base = `/api/v1/videos/${encodeURIComponent(this.cid)}/${encodeURIComponent(this.vid)}`;
+      // SINGLE-ROUNDTRIP: ein fetch, alle Daten. Vermeidet 5x 404-Probleme
+      // und reduziert Race-Bugs zwischen aufeinanderfolgenden Fetches.
+      const url = `/api/stepper_state?channel=${encodeURIComponent(this.cid)}&video=${encodeURIComponent(this.vid)}&_=${this._cacheBust}`;
+      let s = {};
+      try {
+        const r = await fetch(url);
+        if (r.ok) s = await r.json();
+      } catch (e) {
+        console.warn('[Stepper] Backend-Roundtrip fehlgeschlagen:', e);
+        return;   // Backend nicht erreichbar → Stepper bleibt im Initial-State
+      }
       const completed = {};
-      const counts = {};
-
-      // ① THEMA — meta.json + selected_title (nicht nur meta.json)
-      try {
-        const m = await fetch(`${base}/meta.json?_=${this._cacheBust}`).then(r => r.ok ? r.json() : null);
-        if (m && (m.selected_title || '').trim()) completed[1] = true;
-      } catch (e) {}
-
-      // ② SKRIPT — plan.json
-      try {
-        const r = await fetch(`${base}/generated/plan.json?_=${this._cacheBust}`);
-        if (r.ok) completed[2] = true;
-      } catch (e) {}
-
-      // ③ AUDIO — voiceover.mp3 (kein audio_meta.json als Race-Fallback)
-      try {
-        const r = await fetch(`${base}/uploads/voiceover.mp3?_=${this._cacheBust}`, { method: 'HEAD' });
-        if (r.ok) completed[3] = true;
-      } catch (e) {}
-
-      // ④ BILDER — counter N/M aus plan.json scenes + jpg-count im out/-Ordner.
-      try {
-        const planR = await fetch(`${base}/generated/plan.json?_=${this._cacheBust}`);
-        if (planR.ok) {
-          const plan = await planR.json();
-          const total = (plan.scenes || []).length;
-          let generated = 0;
-          // HINWEIS: wir können nicht effizient zählen ohne /api/endpoint.
-          // Für MVP reichen wir die Plan-Länge als Denominator; das Frontend
-          // zeigt das dann als "0 / N" bis zur ersten Bild-Generierung.
-          counts[4] = { done: 0, total };
-        }
-      } catch (e) {}
-
-      // ⑤ RENDER — final.mp4 oder rendered_at
-      try {
-        const m = await fetch(`${base}/meta.json?_=${this._cacheBust}`).then(r => r.ok ? r.json() : null);
-        if (m && (m.rendered_at || (await fetch(`${base}/render/final.mp4?_=${this._cacheBust}`, { method: 'HEAD' })).ok)) {
-          completed[5] = true;
-        }
-      } catch (e) {}
-
+      if (s.thema_done)  completed[1] = true;
+      if (s.plan_done)   completed[2] = true;
+      if (s.audio_done)  completed[3] = true;
+      if (s.rendered)    completed[5] = true;
+      // ④ BILDER als Counter (kein binärer done-Threshold)
+      const counts = { 4: { done: s.images_done || 0, total: s.images_total || 0 } };
       this.completed = completed;
       this.counts = counts;
-      // 30-Second-Cache schreiben
       localStorage.setItem(this._cacheKey, JSON.stringify({
         ts: Math.floor(Date.now() / 1000),
         completed, counts,
@@ -2382,15 +2344,9 @@ function stepperState(){
     },
 
     canEnter(n){
-      // Hybrid: completed steps sind click-bar, current step ist aktiv,
-      // pending steps sind locked. Erlaubt ist auch der direkte Nachfolger
-      // eines completed-ODER-current steps — damit User zumindest einen
-      // Schritt vorwärts springen kann (sonst wäre nach jedem abgeschlosse-
-      // nen Schritt die Current-Step-Aktualisierung Pflicht, was UX mühsam
-      // macht wenn die Heuristik mal driftet).
       if (this.completed[n]) return true;
       if (n === this.currentStep) return true;
-      if (n === 1) return true;        // Step ① ist immer offen (Modus wählen)
+      if (n === 1) return true;
       if (this.completed[n - 1] || (n - 1) === this.currentStep) return true;
       return false;
     },
@@ -2398,11 +2354,9 @@ function stepperState(){
     goTo(n){
       if (!this.canEnter(n)) return;
       this.currentStep = n;
-      // Anchor-scroll zum Step-Abschnitt
       const el = document.querySelector(`[data-step-section="${n}"]`);
       if (el) {
         el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        // Step-Header-Circle highlighten
         const stepBtn = document.querySelector(`#stepper [data-step="${n}"]`);
         if (stepBtn) {
           stepBtn.classList.add('ring-2', 'ring-app-acc');
@@ -2425,16 +2379,22 @@ function stepperState(){
         : 'text-app-mut';
     },
     connectorClass(n){
-      // Connector zwischen Step n und n+1 ist "completed" wenn n+1 completed ist.
       return this.completed[n + 1]
         ? 'bg-app-ok'
         : 'bg-app-border';
     },
+    // Phase 33.2 — Counter-Label im Stepper (④ zeigt N / M Bilder).
+    counterLabel(n){
+      if (n === 4) {
+        const c = this.counts[4] || {};
+        const d = c.done || 0, t = c.total || 0;
+        return t > 0 ? `${d} / ${t}` : '—';
+      }
+      return '';
+    },
   };
 }
 
-// Reset-Hook: damit z.B. nach Render-Abschluss oder Audio-Upload der Stepper
-// neu rechnet. Wird vom existing-Code an den passenden Stellen aufgerufen.
 function stepperInvalidate(){
   const nav = document.getElementById('stepper');
   if (nav && nav._x_dataStack) {

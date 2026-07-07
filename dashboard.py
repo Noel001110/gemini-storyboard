@@ -3624,6 +3624,48 @@ class H(BaseHTTPRequestHandler):
             meta = load_v_meta(cid, vid)
             meta["has_thumbnail"] = os.path.exists(os.path.join(v_out(cid, vid), "thumbnail.jpg"))
             return self._send(200, meta)
+        # UI-Rebuild Phase 33.2 — Stepper-Heuristik (Round-Trip für ALLE State-Daten)
+        if p == "/api/stepper_state":
+            # Konsolidierter Endpunkt: alle 5 Heuristik-Bedingungen in EINEM Round-Trip.
+            # Vorher: Frontend machte 5 separate fetches → race-anfällig, langsam, viele 404s
+            # wenn das Backend-Routing anders benannt ist. Mit diesem Endpunkt hat das
+            # Frontend genau eine Quelle der Wahrheit für "wie weit ist das Video?".
+            try:
+                meta = load_v_meta(cid, vid)
+            except Exception:
+                meta = {}
+            plan_path = v_plan(cid, vid)
+            audio_path = os.path.join(v_uploads(cid, vid), "voiceover.mp3")
+            out_dir = v_out(cid, vid)
+            # Image count: plan.json scenes total + Anzahl generierter *NNN.jpg im out/.
+            try:
+                plan = json.load(open(plan_path)) if os.path.exists(plan_path) else {}
+            except Exception:
+                plan = {}
+            total_scenes = len(plan.get("scenes") or [])
+            try:
+                generated_files = [f for f in os.listdir(out_dir) if re.match(r"^\d{3}\.jpg$", f)]
+                generated_count = len(generated_files)
+            except Exception:
+                generated_count = 0
+            rendered = bool(meta.get("rendered_at")) or \
+                os.path.exists(os.path.join(v_render(cid, vid), "final.mp4"))
+            return self._send(200, {
+                # ① THEMA: meta.json + selected_title nicht leer (siehe 33.2-Heuristik)
+                "thema_done": bool((meta.get("selected_title") or "").strip()),
+                # ② SKRIPT
+                "plan_done":   os.path.exists(plan_path),
+                # ③ AUDIO: NUR voiceover.mp3, kein audio_meta.json-Fallback (Race-Bug-Safe)
+                "audio_done":  os.path.exists(audio_path),
+                # ④ BILDER: counter (N / M), kein binärer done-Threshold
+                "images_done": generated_count,
+                "images_total": total_scenes,
+                # ⑤ RENDER
+                "rendered":    rendered,
+                # raw meta für UI-Sidebars (nicht für Stepper selbst, aber das Backend
+                # hat's geladen — Übertragung vermeidet zweiten Fetch)
+                "meta":        meta,
+            })
         if p == "/api/transcribe_status":
             return self._send(200, dict(TX_STATUS))
         # ElevenLabs voiceover endpoints (Phase 1) --------------------------------

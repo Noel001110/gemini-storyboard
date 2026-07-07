@@ -668,6 +668,7 @@ def main():
 
         summary_section("Phase 33.2: UI Stepper (Heuristik + State-Machine)")
         run(t_stepper_html_structure, "33.2: #stepper nav + x-data + 5 data-step-section attributes")
+        run(t_stepper_backend_endpoint_exists, "33.2-Bug1: /api/stepper_state single-endpoint (kein /api/v1/videos)")
         run(t_stepper_heuristic_python_mirror, "33.2: Heuristik (5 Regeln, race-bug-safe)")
         run(t_stepper_state_machine_canEnter, "33.2: canEnter State-Machine (Hybrid active-State)")
 
@@ -767,24 +768,43 @@ def t_round5_whisper_word_count_mismatch_warn():
 # ─── Phase 33.2 — Stepper Tests ────────────────────────────────────────────
 
 def t_stepper_html_structure():
-    """Phase 33.2: Stepper-Container ist im #view-editor als erstes Element nach
-    back-link, mit Alpine x-data="stepperState()" gebunden. Die 5 Step-Cards
-    müssen data-step-section="N" Attribute haben (Anchor-Scroll-Targets)."""
+    """Phase 33.2 (post-fix-33.2-bug1+2): Stepper-Container im #view-editor mit Alpine
+    x-data="stepperState()" gebunden. 5 Step-Cards haben data-step-section="N".
+    Step-Labels entsprechen den EXISTIERENDEN Sections (①Modus/②Skript/③Bilder/④Titel/⑤Render)."""
     src = open(os.path.join(ROOT, "dashboard.html")).read()
-    # Stepper-Container muss existieren + mit Alpine gebunden sein
     assert '<nav id="stepper"' in src, "Phase 33.2 missing: #stepper nav element"
     assert 'x-data="stepperState()"' in src, \
         "Phase 33.2 missing: x-data binding to stepperState()"
 
-    # data-step-section auf allen 5 Steps
     for n in (1, 2, 3, 4, 5):
         assert f'data-step-section="{n}"' in src, \
             f"Phase 33.2 missing: data-step-section=\"{n}\" auf Step {n} card"
 
-    # Step-Definitionen (die 5 Label-Texte) müssen in der JS-Funktion vorhanden sein
-    for label in ("'Thema'", "'Skript'", "'Audio'", "'Bilder'", "'Render'"):
+    # Bug-2-Fix: Step-Labels müssen den Sections entsprechen
+    for label in ("'Modus'", "'Skript'", "'Bilder'", "'Titel'", "'Render'"):
         assert label in src, \
             f"Phase 33.2 missing: stepperState() definiert step '{label.strip(chr(39))}'"
+
+
+def t_stepper_backend_endpoint_exists():
+    """Phase 33.2 Bug-1-Fix: Stepper nutzt nicht /api/v1/videos/... (existiert nicht),
+    sondern den EINEN Backend-Endpoint /api/stepper_state der alle 5 Heuristik-
+    Daten konsolidiert zurückgibt. Verifiziert dass der Endpoint im Backend
+    definiert ist + das Frontend die korrekte URL nutzt."""
+    py_src = open(os.path.join(ROOT, "dashboard.py")).read()
+    html_src = open(os.path.join(ROOT, "dashboard.html")).read()
+    # Backend-Endpoint vorhanden
+    assert '/api/stepper_state' in py_src, \
+        "Bug-1 missing: backend /api/stepper_state endpoint not defined in dashboard.py"
+    # Frontend nutzt genau diesen Endpoint
+    assert '/api/stepper_state?channel=' in html_src, \
+        "Bug-1 missing: frontend /api/stepper_state URL with channel/video params"
+    # Anti-Regression: alte falsche URLs NICHT mehr da
+    assert '/api/v1/videos' not in html_src, \
+        "Bug-1: old /api/v1/videos/... URL still in dashboard.html — must be removed"
+    # Backend liefert die 5 Daten-Felder die die Heuristik erwartet
+    for field in ('"thema_done"', '"plan_done"', '"audio_done"', '"images_done"', '"images_total"', '"rendered"'):
+        assert field in py_src, f"backend /api/stepper_state missing field: {field}"
 
 
 def t_stepper_heuristic_python_mirror():
