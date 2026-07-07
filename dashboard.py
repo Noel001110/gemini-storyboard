@@ -1303,7 +1303,9 @@ def gen_charsheet(cid, name, description):
         f"White background (#FFFFFF), black ink only, medium-weight lines, no shading. "
         f"Label each pose clearly below in small neat text."
     )
-    tmp = os.path.join(ch_sheets(cid), f"_tmp_{re.sub(r'[^\\w]','_',name)}.jpg")
+    # Pre-33.2 cleanup: backslash inside an f-string expression part is illegal on Python 3.11/3.12 (PEP 701, allowed only in 3.13+). Extracting the regex sanitizer value to its own line keeps the server startable on 3.11/3.12 Docker images.
+    tmp_name = re.sub(r"[^\\w]", "_", name)
+    tmp = os.path.join(ch_sheets(cid), f"_tmp_{tmp_name}.jpg")
     res = gen_image(prompt, "", tmp)
     if res["ok"]:
         data = open(tmp, "rb").read()
