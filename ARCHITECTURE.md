@@ -481,6 +481,8 @@ Gemini generiert im Rahmen dieses Projekts bereits den gesamten Text-Content (Sk
 
 Der Pause-Trim (`_compute_pause_trims` / `_trim_audio_pauses` / `_adjust_words_for_trims`) und das Alignment (`align_scenes_to_whisper`) laufen in beiden Fällen identisch — die Übergabe ist einheitlich `[{word, start, end}, ...]`. Die einzige Verzweigung findet **vor** `transcribe_words_whisper()` statt: ist `voiceover_word_timestamps` vorhanden, wird diese Liste direkt verwendet (mit `language="elevenlabs"`, `language_probability=1.0` als Audit-Marker im Log); sonst Whisper.
 
+**Wichtige Korrektur (Juli 2026):** Der ElevenLabs-`/with-timestamps`-Endpoint (`eleven_multilingual_v2`) liefert **zeichen**-basiertes Alignment — `alignment.characters` + `character_start_times_seconds` + `character_end_times_seconds` — **NICHT** `alignment.words`. `elevenlabs_generate()` erwartete fälschlich `alignment.words`, wodurch jede Preview/Generierung mit „ElevenLabs antwortete ohne alignment.words" scheiterte. Fix: `_el_words_from_alignment()` (engine_elevenlabs.py) aggregiert die Zeichen an Whitespace-Grenzen zu Wörtern (mit fertigem `words`-Feld als Fallback für andere Schemata). **v3 wird bewusst nicht genutzt** — es liefert keine verlässlichen Timestamps, die die Szenen-Sync + Phase-O-Mikrotiming brauchen.
+
 **End-to-End verifiziert** (Juli 2026), beide Pfade getrennt:
 - **Option A** (Audio-Transkription): `/api/transcribe` liefert jetzt wieder reine geschätzte Szenen ohne `start_aligned` (4 Stufen, kein Whisper mehr an dieser Stelle) — korrektes Verhalten, die Ausrichtung folgt beim Rendern.
 - **Option B** (manueller Skript-Pfad, hier simuliert: Szenen mit WPM-geschätztem `start`/`dur`, kein `source`-Feld, keine `start_aligned`-Felder) + echtes deutsches TTS-Voice-over hochgeladen + gerendert: Server-Log zeigt `[Whisper] 27 Wörter ausgerichtet (Sprache: de, p=0.984)`, `plan.json` zeigt danach `start_aligned`/`end_aligned` auf allen drei Szenen — und zwar spürbar abweichend von der WPM-Schätzung (Szene 0 geschätzt `0.0–4.0`, ausgerichtet `0.0–3.04`; die reale Aufnahme war insgesamt nur `9.84s` lang, nicht die geschätzten `12.0s`). Damit bekommt Option B jetzt exakt dieselbe Timing-Qualität wie Option A, sobald ein echtes Voice-over vorliegt.
@@ -1899,4 +1901,78 @@ display:block-Schicht darüber. Die Reihenfolge im OpenVideo/Stepper-Code:
 #### Tests
 `tests/test_cinematic_e2e.py::t_phase33_4_2_*` — 1 neuer Integrationstest grün (54/54 total):
 - `t_phase33_4_2_thema_card_restructured` — Validiert das Vorhandensein des `ideaInput` Textareas, der `genTitleStep`/`genThumbnailStep` Funktionen, der Container `titleListStep`/`thumbSlotStep` und den Ausschluss der Option A (Audio-Upload) in Schritt ②.
+
+
+## 35. Session-Fixes + UX-Verbesserungen (Juli 2026)
+
+Sammel-Session nach Phase P: Runtime-Bugfixes (mehrere via Pyright entdeckt) plus
+UX-Verbesserungen aus direktem Nutzer-Feedback. Alle Änderungen gegen den echten Code
+verifiziert; Testsuite durchgehend 106/106.
+
+### 35.1 Regressions-/Runtime-Fixes
+
+| Fix | Ursache | Datei |
+|---|---|---|
+| **`_mux_audio` NameError** (KRITISCH) | Beim Phase-M.3-Refactor aus dashboard.py entfernt, nie nach `engine/` übernommen → jeder Render crashte in Stage „audio", `final.mp4` nie erzeugt | `engine/render.py` (wiederhergestellt + `__all__` + Import) |
+| **`VIDEO_PROMPT_MIN_LEN`** undefiniert | Nie definiert (T2V-Pfad) — T2V ist deprecated (Phase 39) | `dashboard.py` (Minimal-Konstante) |
+| **`v_render` → `v_out`** | Typo; `final.mp4` liegt in `v_out`, Status-GET crashte für Videos ohne `rendered_at` | `dashboard.py` |
+| **`d` in `/api/tts_provider`** | Handler lag in `do_GET`, las aber POST-Body → GET-Crash, POST-Zweig tot | `dashboard.py` (GET=lesen, POST nach `do_POST`) |
+| **`ensure_video` NameError** | `_tts_persist_and_schedule` rief es ohne Lazy-Import auf (Schwester-Funktionen hatten ihn) → Voiceover crashte | `engine_elevenlabs.py` |
+| **ElevenLabs `alignment.words`** | `/with-timestamps` liefert Zeichen-Alignment, Code erwartete `words` → siehe §23-Korrektur | `engine_elevenlabs.py` (`_el_words_from_alignment`) |
+
+Die 3 verbleibenden Pyright-„possibly unbound" (`task_id`, `audio_meta`, `chosen_preset`)
+sind verifizierte False-Positives (defensiv korrekt, nur nicht beweisbar).
+
+### 35.2 Charakter-Referenz — Upload + Settings-Modal
+
+- **Public-Upload:** `/api/upload_charref` gibt jetzt eine öffentliche `uri` zurück
+  (`upload_image_public` → litterbox/tmpfiles). `set_char_ref` braucht http-URLs (die
+  char_ref_url dient als KIE-Bildreferenz). Vorher bekam das Frontend `undefined` →
+  Referenz wurde nie gesetzt (Kern von Bug B-1).
+- **Doppelte IDs behoben:** Es gab zwei Char-Ref-UIs — ein verstecktes statisches Markup
+  (view-videolist) mit den kanonischen IDs und das Settings-Modal mit abweichenden IDs +
+  doppeltem `btnCharRef`. Klicks im Modal zielten auf die versteckten Elemente → sichtbar
+  passierte nichts. Fix: Modal-UI selbst-enthaltend mit kanonischen IDs, statisches
+  Duplikat entfernt, jede ID nur noch 1×, `openChannelSettings` ruft `loadCharRefStatus`.
+
+### 35.3 UI: Single-Page-Flow statt Tab-Wizard
+
+Nutzerwunsch: kein Tab-Umschalten, alle Schritte von oben nach unten. `updateStepVisibility`
+versteckt nicht mehr alle Cards außer der aktiven (Phase 33.4.2-prep), sondern zeigt
+Sektion 1–3 immer und 4 (Plan) + 5 (Render), sobald `SCENES` existieren. Der separate
+Stepper-Balken oben ist ausgeblendet (die nummerierten Sektionen ①–⑤ sind die Navigation);
+`goTo()` scrollt smooth zum Schritt. Siehe §33.4.2-prep D (als überholt markiert).
+
+### 35.4 Skript-Persistenz
+
+`#script` wurde nirgends gespeichert → ging bei jedem Reload verloren. Jetzt localStorage
+pro Kanal+Video: `saveScriptLocal()` (beim Tippen + beim Auto-Fill aus Szenen),
+`restoreScriptLocal()` (beim Video-Öffnen). Zusätzlich `fillScriptFromScenesIfEmpty()` —
+bei aus Titel/Thema generiertem Plan ist `#script` leer; das Feld wird aus den Szenen-Texten
+(= Narration) rekonstruiert, damit der Voiceover-Button aktiv wird (überschreibt nie
+getippten Text).
+
+### 35.5 „Alle Bilder neu generieren" (force)
+
+`_batch_generate_worker(cid, vid, force=False)`: `force=True` → `todo = list(scenes)`
+(auch bereits generierte Bilder), sonst nur offene. Reihenfolge bleibt erhalten (§11.3).
+`/api/generate_all_start` liest das `force`-Flag; neuer Button „🔄 Alle neu generieren"
+(`genAll(true)`) mit Bestätigungsdialog (kostet Credits).
+
+### 35.6 Test-Hygiene
+
+`t_phase38_channel_creation_with_preset` + `t_phase_l_hook_throughline_in_prompt` erzeugten
+echte Kanäle über `POST /api/channels` und löschten nur das Verzeichnis (`shutil.rmtree`),
+nicht den `channels.json`-Eintrag → bei jedem Lauf akkumulierten `p38test_*`-Kanäle in der
+echten Sidebar. Fix: channels.json vor dem Test sichern, im `finally` exakt wiederherstellen.
+
+### 35.7 Bekannte offene Punkte
+
+- **Status-Stage-Bug (kosmetisch):** `voiceover_status` bleibt auf `elevenlabs-generate`
+  hängen, während `_transcribe_generate_worker` bereits durch die TX-Stages (1–4) läuft —
+  die Stage wird dort nicht aktualisiert. Im UI wirkt der Job „hängend", obwohl er arbeitet
+  (Voiceover-Rebuild des Plans).
+- **Race Bild-Gen ↔ Plan-Rebuild:** Voiceover-Generierung baut den Plan aus dem echten
+  Audio neu (re-segmentiert + re-promptet). Parallel laufende Bildgenerierung arbeitet auf
+  dem alten Plan → Bilder erst nach dem Rebuild generieren.
 
