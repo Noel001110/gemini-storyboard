@@ -1502,18 +1502,17 @@ def t_seq_continuity_prompt_last():
 def t_seq_motion_inheritance_precedence():
     """§11.4 (Schutzregel 2): _motion_for_scene checks seq_pos FIRST, before any
     new motion rule (Phase L is_hook, future overrides, etc.).
+
+    Phase M.3: _motion_for_scene lives in engine/render.py (not dashboard.py).
     """
-    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    src = open(os.path.join(ROOT, "engine", "render.py")).read()
     i = src.find("def _motion_for_scene")
-    assert i >= 0, "_motion_for_scene must exist"
+    assert i >= 0, "_motion_for_scene must exist in engine/render.py"
     body_start = src.find("\n", i) + 1
-    # Read until next `def ` at top-level
     end = src.find("\ndef ", body_start)
     if end < 0:
         end = body_start + 3000
     body = src[body_start:end]
-    # First condition must reference seq_pos (the inheritance check)
-    # Find the first `if ` after the function start
     first_if = body.find("if ")
     assert first_if >= 0, "_motion_for_scene must have at least one if"
     snippet = body[first_if:first_if + 300]
