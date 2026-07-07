@@ -906,7 +906,7 @@ def _image_job_worker_inner(job_id: str, task_id: str, out_path: str, plan_path:
     _mark_scene_error(plan_path, scene_i)
 
 
-def _batch_generate_worker(cid: str, vid: str):
+def _batch_generate_worker(cid: str, vid: str, force: bool = False):
     """Runs 'Alle Bilder generieren' entirely server-side — survives page reloads and
     tab closes. Dispatches up to MAX_CONCURRENT_IMAGE_GENS scenes at once (KIE's real
     limits support 100+ concurrent tasks, see IMAGE_GEN_SEMAPHORE) instead of one at a
@@ -938,7 +938,10 @@ def _batch_generate_worker(cid: str, vid: str):
 
     scenes = plan["scenes"]
     total = len(scenes)
-    todo = [s for s in scenes if not s.get("file")]
+    # force=True: ALLE Szenen neu generieren (auch bereits vorhandene Bilder);
+    # sonst nur die offenen. Reihenfolge bleibt erhalten (§11.3 Schutzregel 1 —
+    # kein sort/reverse auf todo).
+    todo = list(scenes) if force else [s for s in scenes if not s.get("file")]
     with _BATCH_JOBS_LOCK:
         BATCH_JOBS[key] = {"running": True, "stop_requested": False,
                             "done": total - len(todo), "total": total,
@@ -3047,6 +3050,8 @@ class H(BaseHTTPRequestHandler):
         # ── "Alle Bilder generieren" — runs server-side, survives reloads ──────
         if p == "/api/generate_all_start":
             if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
+            # force=True: auch bereits generierte Bilder neu erzeugen ("Alle neu generieren")
+            force = bool(d.get("force", False))
             key = (cid, vid)
             with _BATCH_JOBS_LOCK:
                 if BATCH_JOBS.get(key, {}).get("running"):
@@ -3059,7 +3064,7 @@ class H(BaseHTTPRequestHandler):
                 # concurrent generation loops hammering KIE in parallel.
                 BATCH_JOBS[key] = {"running": True, "stop_requested": False, "done": 0,
                                     "total": 0, "current_i": [], "error": None}
-            threading.Thread(target=_batch_generate_worker, args=(cid, vid), daemon=True).start()
+            threading.Thread(target=_batch_generate_worker, args=(cid, vid, force), daemon=True).start()
             return self._send(200, {"ok": True, "already_running": False})
 
         if p == "/api/generate_all_stop":

@@ -527,7 +527,7 @@
       </div>
 
       <div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Sprecher-Skript eingeben</div>
-      <textarea id="script" rows="10" placeholder="Füge hier das Skript ein, das für das Video gesprochen wird …" oninput="estimate();_elRefreshGenBtn()"></textarea>
+      <textarea id="script" rows="10" placeholder="Füge hier das Skript ein, das für das Video gesprochen wird …" oninput="estimate();_elRefreshGenBtn();saveScriptLocal()"></textarea>
       <div class="row" style="margin-top:10px;align-items:center">
         <label>Wörter / Minute<input type="number" id="wpm" value="150" min="80" max="220" oninput="estimate()"></label>
         <span class="est" id="est">—</span>
@@ -639,6 +639,7 @@
       <style>@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}</style>
       <div class="toolbar">
         <button onclick="genAll()" id="genAllBtn">🖼 Alle Bilder generieren</button>
+        <button onclick="genAll(true)" id="genAllForceBtn" class="ghost" title="Alle Bilder neu erzeugen, auch bereits vorhandene (kostet Credits)">🔄 Alle neu generieren</button>
         <button onclick="stopGenAll()" id="stopAllBtn" class="ghost" style="display:none;color:var(--danger);border-color:var(--danger)">⏹ Stoppen</button>
         <button class="ghost sm" onclick="downloadZip()">⬇ ZIP</button>
         <span class="hint" id="prog">0 / 0</span>
@@ -990,6 +991,12 @@ async function openVideo(vid, name){
   // them) never runs when there's no plan to render.
   $('renderCard').style.display = 'none';
   $('produceCard').style.display = 'none';
+
+  // Skript dieses Videos wiederherstellen (localStorage) — überlebt Reload.
+  // Vorheriges Video-Skript nicht stehen lassen; wenn keins gespeichert, füllt
+  // später fillScriptFromScenesIfEmpty() aus dem Plan.
+  if($('script')) $('script').value = '';
+  restoreScriptLocal();
 
   const modeR = await ch_get('/api/get_mode');
   applyMode(modeR.mode || 'image');
@@ -1645,13 +1652,28 @@ function _mmWireSliders(){
 // (z.B. Plan aus Titel/Thema generiert), das Skript aus den Szenen-Texten
 // rekonstruieren — das IST die Narration, und der Voiceover braucht diesen Text.
 // Überschreibt NIE ein vom Nutzer getipptes Skript (nur wenn leer).
+// Skript-Persistenz pro Kanal+Video via localStorage — überlebt Browser-Reload,
+// unabhängig vom Plan-Zustand. (Das #script-Feld wird sonst nirgends gespeichert.)
+function _scriptKey(){ return `script_${ACTIVE_CHANNEL}_${ACTIVE_VIDEO}`; }
+function saveScriptLocal(){
+  try{ if(ACTIVE_VIDEO && $('script')) localStorage.setItem(_scriptKey(), $('script').value); }catch(e){}
+}
+function restoreScriptLocal(){
+  try{
+    const el=$('script'); if(!el || !ACTIVE_VIDEO) return false;
+    const saved = localStorage.getItem(_scriptKey());
+    if(saved != null && saved.trim()){ el.value = saved; if(typeof estimate==='function') estimate(); return true; }
+  }catch(e){}
+  return false;
+}
+
 function fillScriptFromScenesIfEmpty(){
   const el = $('script');
   if(!el) return;
   if((el.value||'').trim()) return;                 // Nutzer-Skript nie überschreiben
   if(!(Array.isArray(SCENES) && SCENES.length)) return;
   const txt = SCENES.map(s => (s.text||'').trim()).filter(Boolean).join(' ').trim();
-  if(txt){ el.value = txt; if(typeof estimate==='function') estimate(); }
+  if(txt){ el.value = txt; if(typeof estimate==='function') estimate(); saveScriptLocal(); }
 }
 
 function _elRefreshGenBtn(){
@@ -2148,8 +2170,9 @@ async function genT2V(i){
 // dashboard.py) — clicking this just tells the server to start, then we poll for
 // progress. This is what makes it survive page reloads and tab closes, and what makes
 // a second click/tab safe (the server refuses to start a second run for the same video).
-async function genAll(){
-  const r = await ch_api('/api/generate_all_start', {});
+async function genAll(force=false){
+  if(force && !confirm('ALLE Bilder neu generieren — auch die bereits vorhandenen?\n\nDas erzeugt jedes Bild neu und kostet KIE-Credits für jede Szene erneut.')) return;
+  const r = await ch_api('/api/generate_all_start', {force: !!force});
   if(!r.ok){ alert('Fehler: '+(r.error||'unbekannt')); return; }
   startBatchPoll();
 }
