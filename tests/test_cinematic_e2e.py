@@ -672,6 +672,12 @@ def main():
         run(t_stepper_heuristic_python_mirror, "33.2: Heuristik (5 Regeln, race-bug-safe)")
         run(t_stepper_state_machine_canEnter, "33.2: canEnter State-Machine (Hybrid active-State)")
 
+        summary_section("Phase 33.3: Sidebar + Brand-Color + Settings-Modal")
+        run(t_phase33_sidebar_brand_color_in_response, "33.3: /api/channels liefert brand_color/video_count/active_count pro Channel")
+        run(t_phase33_settings_modal_in_html, "33.3: #settingsModal Container + open/close Funktionen")
+        run(t_phase33_top_tabs_removed, "33.3: Skript-Generator-Tab + Stil-Tab weg — nur Videos als Library-Tab")
+        run(t_phase33_sidebar_counter_classes, "33.3: .ch-cnt + .ch-active Counter-Klassen im CSS")
+
         print(f"\n=== Result ===")
         print(f"  Passed: {PASSED}")
         print(f"  Failed: {FAILED}")
@@ -920,6 +926,73 @@ def t_stepper_state_machine_canEnter():
     for n in (1, 2, 3, 4, 5):
         assert canEnter(n, completed, 5) is True, \
             f"all completed → step {n} unlocked"
+
+
+# ─── Phase 33.3 — Sidebar / Modal / Tabs-Refactor ──────────────────────────
+
+def t_phase33_sidebar_brand_color_in_response():
+    """33.3: /api/channels erweitert pro Channel um video_count + active_count
+    (brand_color wird Frontend-seitig per nameToHsl aus dem Namen abgeleitet wenn
+    nicht explizit gesetzt)."""
+    py_src = open(os.path.join(ROOT, "dashboard.py")).read()
+    idx = py_src.find('if p == "/api/channels":')
+    body = py_src[idx:idx + 1500]
+    assert "video_count" in body, \
+        "33.3 missing: /api/channels liefert kein video_count pro Channel"
+    assert "active_count" in body, \
+        "33.3 missing: /api/channels liefert kein active_count pro Channel"
+
+
+def t_phase33_settings_modal_in_html():
+    """33.3: Settings-Modal (id=settingsModal) im HTML, plus openChannelSettings()
+    Funktion die Modal öffnet und Inhalt lädt. Shared zwischen Library und Editor."""
+    html = open(os.path.join(ROOT, "dashboard.html")).read()
+    assert 'id="settingsModal"' in html, \
+        "33.3 missing: #settingsModal Container"
+    assert "openChannelSettings" in html, \
+        "33.3 missing: openChannelSettings() function"
+    assert "closeSettingsModal" in html, \
+        "33.3 missing: closeSettingsModal() function"
+    # Brand-Color-Picker muss da sein
+    assert 'id="settingsBrandColor"' in html, \
+        "33.3 missing: brand_color-Picker im Modal"
+    # Header-Settings-Button muss das Modal öffnen
+    assert 'onclick="openChannelSettings()"' in html, \
+        "33.3 missing: Settings-Button → openChannelSettings() wiring"
+    # ESC-Handler für Modal-Close
+    assert "Escape" in html, \
+        "33.3 missing: ESC-Key schließt Modal nicht"
+
+
+def t_phase33_top_tabs_removed():
+    """33.3: Skript-Generator-Tab weg (Duplikat zu Step ②), Stil-Einstellungen-Tab
+    weg (wandert ins Modal). Library zeigt nur Videos als Hauptbereich."""
+    html = open(os.path.join(ROOT, "dashboard.html")).read()
+    assert "switchTopTab('script'" not in html, \
+        "33.3 missing: Skript-Generator-Tab wurde nicht entfernt (Duplikation zu Step ②)"
+    assert "switchTopTab('style'" not in html, \
+        "33.3 missing: Stil-Einstellungen-Tab wurde nicht entfernt (sollte Modal sein)"
+    assert 'switchTopTab("videos"' not in html, \
+        "33.3: kein expliziter Videos-Tab-Click mehr erwartet (Tab-Pattern weg)"
+    # Library-Header ist neu (mit Neues-Video-Button)
+    assert 'id="libraryHeader"' in html, \
+        "33.3 missing: Library-Header mit Neues-Video-Button"
+
+
+def t_phase33_sidebar_counter_classes():
+    """33.3: Channel-Sidebar hat Counter-Badges für Video-Count + Active-Count.
+    CSS-Klassen .ch-cnt und .ch-active müssen existieren und sichtbar sein."""
+    html = open(os.path.join(ROOT, "dashboard.html")).read()
+    assert ".ch-cnt" in html, \
+        "33.3 missing: .ch-cnt CSS-Klasse für Video-Counter"
+    assert ".ch-active" in html, \
+        "33.3 missing: .ch-active CSS-Klasse für Active-Counter"
+    # nameToHsl helper existiert (HSL-from-name fallback für brand_color)
+    assert "nameToHsl" in html, \
+        "33.3 missing: nameToHsl helper für brand_color default fallback"
+    # Frontend nutzt nameToHsl im chList-Rendering
+    assert "nameToHsl(ch.name" in html, \
+        "33.3 missing: nameToHsl wird im loadChannels() für brand-color-Default aufgerufen"
 
 
 if __name__ == "__main__":

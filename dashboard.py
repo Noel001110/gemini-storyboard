@@ -3592,7 +3592,19 @@ class H(BaseHTTPRequestHandler):
         if p == "/":
             return self._send(200, open(os.path.join(HERE, "dashboard.html"), encoding="utf-8").read(), "text/html; charset=utf-8")
         if p == "/api/channels":
-            return self._send(200, {"channels": load_channels()})
+            # UI-Rebuild Phase 33.3 — Sidebar braucht pro Channel einen Video-Counter
+            # und Brand-Color. Wir packen die beiden Felder direkt ins channels-Response.
+            chs = load_channels()
+            for ch in chs:
+                vids = load_videos(ch["id"])
+                ch["video_count"] = len(vids)
+                # Active-Count = Videos mit plan.json ODER voiceover.mp3 (Phase-B-Hint)
+                ch["active_count"] = sum(
+                    1 for v in vids
+                    if os.path.exists(os.path.join(v_dir(ch["id"], v["id"]), "generated", "plan.json"))
+                    or os.path.exists(os.path.join(v_dir(ch["id"], v["id"]), "uploads", "voiceover.mp3"))
+                )
+            return self._send(200, {"channels": chs})
         if p == "/api/videos":
             return self._send(200, {"videos": load_videos(cid)})
         if p == "/api/char_ref":

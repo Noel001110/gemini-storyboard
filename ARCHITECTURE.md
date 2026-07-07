@@ -1353,3 +1353,57 @@ Nach dem 33.2-Commit hat User-Feedback zwei Live-Knall-Bugs identifiziert, die i
 **Bug-3 (informell, kein Crash):** `x-init="init()"` ist ein No-Op weil Reset erst in `openVideo()` passiert. Akzeptables Verhalten — kein Crash, nur ungenutzte Init-Methode. Wird in 33.4 mit Lifecycle-Hooks ersetzt.
 
 Tests: 30 → 31 (1 neue `t_stepper_backend_endpoint_exists` + 1 erweiterter `t_stepper_html_structure` für neue Labels).
+
+### 33.3 Sidebar + Brand-Color + Settings-Modal (Phase 33.3)
+
+Architektur-Entscheidungen (User-Feedback-Diskussion):
+
+| Frage | Entscheidung | Begründung |
+|---|---|---|
+| Brand-Color-Persistierung | Frontend per `nameToHsl(name)` ableiten wenn nicht explizit gesetzt | Single Source of Truth (im Channel-Namen), keine extra Konfig nötig |
+| Settings-Modal statt Tab | Ja | Tab-only funktioniert nicht im Editor-Modus |
+| Channel-Switch ohne Confirm | Ja | Stepper-Cache-Key ist pro Channel (`stepper-cid-vid`), refresht automatisch |
+| Skript-Generator-Tab weg | Ja | Wandert komplett in Step ② im Editor — keine Duplikat-Eingabe |
+
+**Was 33.3 implementiert:**
+
+**Backend (`dashboard.py`):**
+- `/api/channels` Endpoint erweitert: jedes Channel-Dict bekommt `video_count` (Total) + `active_count` (mit plan.json ODER voiceover.mp3) zusätzlich zu den existierenden Feldern.
+- Keine neuen Endpoints — wir nutzen die bestehende JSON-Infrastruktur.
+
+**Frontend (`dashboard.html`):**
+
+1. **Channel-Sidebar (`chList`)** — jeder Channel rendert jetzt:
+   - Brand-Color-Dot (8px, gefüllt mit `ch.brand_color` oder `nameToHsl(name)` als HSL-Hash)
+   - Channel-Name (unverändert, mit escHtml)
+   - Video-Counter-Badge (`.ch-cnt`)
+   - Active-Counter-Badge (`.ch-active`, nur wenn > 0)
+   - Action-Buttons (✎/✕)
+   - `nameToHsl(name)` ist deterministisch: gleicher Name → gleicher Farbton, jeder Channel hat eine visuell unterscheidbare Identität ohne explizite Konfig.
+
+2. **Library-Header (NEU)** — `#libraryHeader` ersetzt die Tab-Liste:
+   - Kanal-Name links + Hint-Text
+   - "+ Neues Video" Button rechts
+   - Skript-Generator-Tab ENTFERNT (Duplikat zu Step ②)
+   - Stil-Einstellungen-Tab ENTFERNT (wandert ins Modal)
+
+3. **Channel-Settings-Modal (NEU)** — `#settingsModal`:
+   - Shared zwischen Library-Mode und Editor-Mode (öffnen via Settings-Icon im Header)
+   - Brand-Color-Picker (`<input type="color">`)
+   - Bild-Master-Prompt + Video-Master-Prompt (Textareas, jeweils eigener Save-Button)
+   - Image-Modell-Select (nano-banana-2 / -lite)
+   - Charakter-Referenz-URL Input
+   - Lazy-Init beim ersten Öffnen (cached, Settings-Content wird nicht jedes Mal neu gefetcht)
+   - ESC-Taste schließt das Modal
+   - Backdrop-Click schließt das Modal
+   - `showToast()` für Save-Bestätigung (1.8s Timeout)
+
+4. **JS-Helpers:**
+   - `nameToHsl(name)` — HSL-Farbton aus Hash, deterministisch
+   - `openChannelSettings()` / `closeSettingsModal()` — Modal-Lifecycle
+   - `saveSettingsMaster/VidMaster/CharRef()` — Save-Handler
+   - `showToast(msg)` — Mini-Notification-UI
+
+5. **SwitchTopTab bleibt als Defensive-Funktion** — kein Caller mehr (Tabs sind weg), aber für evt. Re-Introduktion behalten.
+
+**Tests:** `tests/test_cinematic_e2e.py::t_phase33_*` — 4 neue Tests grün (35/35 total).
