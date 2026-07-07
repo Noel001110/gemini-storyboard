@@ -1282,6 +1282,118 @@ Definition of Done (Plan §3 Phase K):
 - [x] Tests grün
 
 
+## 32c. Phase P — Ink-Style-Grading-Feintuning (2026-07)
+
+Refinement des bestehenden Phase-Color-Gradings (§26). Grund (Plan §0 + §2 Kriterium 6): `eq=saturation=1.2` ist auf schwarz-auf-weiß-Tusche-Zeichnungen mathematisch fast ein No-Op (kaum Sättigung zu verstärken), `contrast` „dramatisiert" nicht. Für diesen Stil wirken **Papier-Tönung** (`colorbalance`) und **Vignette** deutlich stärker.
+
+### 32c.1 `PHASE_COLOR_FILTER` — von `eq` auf `colorbalance`
+
+`engine_elevenlabs.py` — pro Phase eine kleine Farbtönung auf Mitteltöne/Lichter (`rm`/`gm`/`bm`), Werte bewusst klein (−0.05..+0.08), damit kein Frame „defekt" wirkt (§26.3):
+
+- **OPENING**: `colorbalance=rm=-0.02:gm=0.0:bm=+0.04` — kühl (neutral-neugieriger Einstieg)
+- **RISING_ACTION**: `colorbalance=rm=0.0:gm=0.0:bm=+0.02` — leicht kühl (steigende Spannung)
+- **CLIMAX**: `colorbalance=rm=+0.05:gm=+0.02:bm=-0.02` — warm (gebrochenes Orange/Beige) + Vignette
+- **RESOLUTION**: `colorbalance=rm=-0.01:gm=+0.02:bm=-0.01` — leicht grünlich (Nachklang)
+
+### 32c.2 Vignette nur für CLIMAX
+
+`vignette` ist ffmpeg-seitig ein **separater** Filter, kein `colorbalance`-Parameter. Daher hängt `_render_clip` (`engine/render.py`) ihn nur bei CLIMAX per Komma an: `colorbalance=...,vignette=PI/5`. Position unverändert wie bei `eq` (§26.1): am `[base]`-Label nach `zoompan`, vor den Overlays. Filtergraph vorab am lokalen ffmpeg-Build verifiziert (Plan §3, Lehre aus dem `drawtext`-Fund §18.1) — `colorbalance` + `vignette` sind kompiliert.
+
+### 32c.3 Rückwärtskompatibilität
+
+Szene ohne `phase` → `PHASE_COLOR_FILTER.get(scene.get("phase",""), "")` liefert `""` → kein Suffix → byte-identisch zu vor Phase P. Legacy-Pläne rendern unverändert.
+
+### 32c.4 Verifikation
+
+- `tests/test_cinematic_e2e.py` — 106 Tests grün:
+  - `t_phase_d_color_filter_present` — akzeptiert jetzt `eq=` **oder** `colorbalance=` (eq-Dimensions-Check nur noch für Legacy-eq-Format)
+  - `t_phase_p_climax_has_vignette` — Source-Grep: `vignette=PI/5` nur für CLIMAX (`scene.get("phase") == "CLIMAX"`)
+  - `t_phase_p_legacy_plan_identity` — Phase-freie Szene → leerer Filter → keine Grading-Filter
+
+Definition of Done (Plan §3 Phase P):
+- [x] `colorbalance` (Papier-Tönung) für alle 4 Phasen
+- [x] `vignette` nur für CLIMAX (dezent, PI/5)
+- [x] Filter am lokalen ffmpeg-Build verifiziert (kein Laufzeit-Crash)
+- [x] Legacy-Identität (Szene ohne Phase rendert wie vor P)
+- [x] Tests grün
+- [ ] Optional-Experiment Fokus-Rahmen (Rand-Unschärfe) — bewusst verworfen (Plan §3: nur bei überzeugendem A/B)
+
+Offen (Tuning, kein Blocker): `vignette=PI/5` ist der ffmpeg-Default und relativ kräftig; falls die §6-A/B-Probe zu dunkle Ränder zeigt, Richtung `PI/4` schwächen.
+
+
+## 32d. Phase L — Hook + Leitfrage + Render-Kopplung (2026-07)
+
+Plan §3/§4.2: Cold Open (Hook) und Leitfrage (throughline_question) waren nur im Generator-Prompt (`SCRIPT_SYSTEM`) impliziert, wurden aber weder extrahiert noch beim Rendern genutzt. Phase L macht sie zu geprüften Datenfeldern + koppelt sie an die Render-Pipeline. Additiv: alte Pläne ohne `hook`-Feld rendern unverändert.
+
+### 32d.1 Analyse-Schema (`analyze_script`)
+
+`dashboard.py` erweitert das `analyze_script`-JSON additiv:
+- `hook`: `{"beat": N, "type": "quote"|"scene"|"thesis"|"none", "strength": "strong"|"weak"}`
+- `throughline_question`: Ein-Satz-Frage (max 200 Zeichen), die das ganze Video trägt — **oder leerer String**
+
+Strikte Nie-Erfinden-Regel analog CALLOUTS: `type="none"`, wenn Beats 0–2 mit Kontext/Definitionen statt Person/Szene/Zahl/These beginnen; Leitfrage niemals erfinden (leerer String ist valide).
+
+### 32d.2 `is_hook`-Flag + Render-Kopplung
+
+`_assign_phases` setzt `is_hook = (beat == hook.beat and strength == "strong")`. Drei Kopplungsstellen (je Ein-Zeilen-Priorität vor der bestehenden Auswahl):
+
+1. **Motion** (`engine/render.py:256`): `if scene.get("is_hook") and not is_seq_continuation: return _build_motion("snap_zoom_in", 1.2)` — kräftiger Einstiegs-Zoom
+2. **Transition** (`engine/render.py:553`): die **Folgeszene** nach einem Hook erzwingt Hard Cut (xfade duration=0), damit der Hook auf einem Schnitt endet, nicht auf einem weichen Fade — via `prev_is_hook`-Logik im Render-Worker
+3. **Image-Prompt** (`engine/prompts.py:313`): `HOOK_PROMPT_ADDITION` („single striking focal subject, maximum negative space, poster-like composition") wird bei `is_hook=True` injiziert, analog `PHASE_PROMPT_ADDITIONS`
+
+### 32d.3 Verifikation
+
+- `t_phase_l_hook_fields_in_analyze_prompt` — Prompt enthält hook + throughline_question Schema
+- `t_phase_l_is_hook_motion_override` — is_hook → snap_zoom_in
+- `t_phase_l_transition_after_hook` — Folgeszene nach Hook = Hard Cut
+- `t_phase_l_hook_throughline_in_prompt` / `t_phase_l_no_hook_no_behavior_change` — Prompt-Injection + Legacy-Identität
+
+
+## 32e. Phase N — Animierte Daten-Overlays: Count-Up (2026-07)
+
+Plan §3/§4.3: statische Counter (§28) werden um animierte Count-Up-Overlays erweitert. Umsetzung ohne Framework-Bruch: PIL rendert eine **PNG-Frame-Sequenz**, ffmpeg liest sie als `image2`-Input — `overlay`/`fade` bleiben unverändert. Karten bleiben bewusst ausgeschlossen (Geodaten = Framework durch die Hintertür).
+
+### 32e.1 Datenmodell + Vorrang
+
+`analyze_script` additiv: `data_visuals: [{"beat": N, "kind": "counter", "from": 0, "to": 3.2, "format": ..., "label": ...}]`. Strikte Regel: nur wenn die Zahl **wörtlich** im Beat-Text steht, sonst `data_visual` weglassen. Der Plan-Worker ordnet `s["data_visual"]` zu. `_overlay_specs_for_scene` (`engine/render.py:292`) prüft `data_visual` **vor** `callout` — statischer Callout bleibt Fallback.
+
+### 32e.2 Sequenz-Render
+
+`_render_counter_anim_sequence` (`engine/render.py:594`) ruft `render_overlay.py` im `counter_anim`-Modus auf und schreibt `ov_%04d.png` (Smoothstep-interpolierter Wert 0→Ziel, Line-Art-Optik). In `_render_clip` ersetzt für diesen Input `-framerate {fps} -i {dir}/ov_%04d.png` das bisherige `-loop 1 -i {png}`; Wert-Interpolation nutzt dieselbe Smoothstep-Formel (3t²−2t³) wie die Kamera, damit Zahl und Bewegung dieselbe Sprache sprechen.
+
+### 32e.3 Verifikation
+
+- `t_phase_n_overlay_sequence_mode` — counter_anim-Modus + Smoothstep vorhanden
+- `t_phase_n_data_visual_prompt_never_invents` — Prompt-Text erzwingt „number must appear literally"
+- `t_phase_n_static_callout_fallback` — data_visual hat Vorrang, callout bleibt Fallback
+
+
+## 32f. Phase O — Wort-Akzent-Puls (Mikro-Timing) (2026-07)
+
+Plan §3/§4.4: Innerhalb einer Szene passierte bisher genau eine gleichförmige Kamerabewegung („Slideshow-Gefühl"). Phase O addiert **einen** betonungsgenauen Zoom-Impuls pro geeigneter Szene — deterministisch aus Whisper-Wort-Timestamps, kein LLM im Render-Pfad.
+
+### 32f.1 Akzent-Berechnung (`engine/scenes.py`)
+
+`_render_worker` verwirft die pro Szene konsumierten Whisper-Wörter nicht mehr, sondern:
+- `_is_accent_eligible(scene)`: nur `pacing=="punchy"` **oder** `phase=="CLIMAX"`/`is_climax`, und Dauer ≥ 2s (calm-Szenen brauchen Bildruhe)
+- `_compute_accent_t(...)`: Betonungs-Proxy = Wort mit der **längsten Folgepause ≥ 0.25s**; Tiebreak: Wörter ≥ 8 Zeichen oder Zahlen gewinnen. Rückgabe: Sekunden relativ zum Clip-Start, additiv als `scene["accent_t"]` persistiert (Resume-stabil)
+
+### 32f.2 Gauß-Puls im Zoom-Ausdruck (`engine/render.py:346`)
+
+Nur wenn `accent_t` gesetzt (sonst byte-identischer Ausdruck):
+```
+z_expr = "{z0}+({z1}-{z0})*{smoothstep} + {amp}*exp(-pow((on-{f_a})/{sigma},2))"
+```
+`amp=0.05` (+5% Zoom, unter der 1.2×-Jitter-Grenze), `sigma≈0.06·fps` (~0.2s Puls-Breite), `f_a = round(accent_t·fps)`. Der Gauß-Term ist beidseitig glatt (kein Ruckeln), symmetrisch (Zoom-in + Zoom-out in einem); mit `z1 ≤ 1.25` bleibt der Crop sicher im Bild.
+
+### 32f.3 Verifikation
+
+- `t_phase_o_accent_rule_deterministic` — längste-Pause-Regel
+- `t_phase_o_accent_only_punchy_or_climax` — Eligibility nur punchy/CLIMAX + ≥2s
+- `t_phase_o_no_accent_expr_unchanged` — ohne accent_t byte-identischer Fallback
+- `t_phase_o_accent_zoom_bounded` — Puls-Amplitude hält Crop im Bild
+
+
 ## 33. UI-Rebuild (Phase 33, Juli 2026 — IN PROGRESS)
 
 Migration des Frontends von handgeschriebener Vanilla-HTML/CSS auf einen **shadcn-Pattern-Stack**: Tailwind CSS (Utility-Classes), Lucide Icons, Alpine.js (Mini-Reaktivität). Ziel: enterprise-grade Optik ohne Build-Pipeline.

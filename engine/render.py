@@ -366,9 +366,15 @@ def _render_clip(img_path: str, scene: dict, out_path: str, fps: int = RENDER_FP
     encoder, encoder_args = _probe_video_encoder()
     inputs = ["-loop", "1", "-i", img_path]
 
-    # Phase D: phase-aware color-grading via ffmpeg `eq` filter, applied AFTER zoompan
-    eq_filter = PHASE_COLOR_FILTER.get(scene.get("phase", ""), "")
-    eq_suffix  = f",{eq_filter}" if eq_filter else ""
+    # Phase D + Phase P: phase-aware color-grading applied AFTER zoompan.
+    # Plan §0 + §3: colorbalance (Papier-Tönung) statt eq (für Tusche-Look effektiver),
+    # + vignette für CLIMAX (dezent, PI/5-Bereich). Bei CLIMAX hängen wir den
+    # Vignette-Filter mit Komma verkettet an colorbalance (ffmpeg-Filtergraph).
+    color_filter = PHASE_COLOR_FILTER.get(scene.get("phase", ""), "")
+    if scene.get("phase") == "CLIMAX":
+        # Vignette nur für CLIMAX, dezent (PI/5 = ~36° Vignette-Winkel)
+        color_filter = f"{color_filter},vignette=PI/5" if color_filter else "vignette=PI/5"
+    eq_suffix  = f",{color_filter}" if color_filter else ""
     filter_parts = [
         f"[0:v]scale={RENDER_SUPERSAMPLE_WIDTH}:-2,"
         f"zoompan=z='{z_expr}':d={frames}:x='{x_expr}':y='{y_expr}':"

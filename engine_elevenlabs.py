@@ -86,10 +86,25 @@ PHASE_PROMPT_ADDITIONS = {
     "RESOLUTION":    "STYLE: wind-down; wider framing; softer palette; contemplative stillness.",
 }
 PHASE_COLOR_FILTER = {
-    "OPENING":       "eq=contrast=1.0:saturation=0.9:brightness=0.0",
-    "RISING_ACTION": "eq=contrast=1.1:saturation=1.05:brightness=0.0",
-    "CLIMAX":        "eq=contrast=1.3:saturation=1.2:brightness=-0.02",
-    "RESOLUTION":    "eq=contrast=0.95:saturation=0.85:brightness=0.03",
+    # Phase P — Ink-Style-Grading-Refinement:
+    # - colorbalance auf Mitteltöne/Lichter: kühlere/wärmere Tönung pro Phase
+    #   (Plan §0: "Papier-Tönung wirkt deutlich stärker als eq" auf Tusche-Look)
+    # - colorbalance-Args: rs/gs/bs = shadow tints, rm/gm/bm = midtones (wirkt am stärksten),
+    #                       rl/gl/bl = highlight tints (sehr subtil)
+    # - vignette nur für CLIMAX (Plan §3: dezent, PI/5-Bereich) — ffmpeg-seitig ist
+    #   `vignette` ein SEPARATER Filter, NICHT ein Parameter von colorbalance.
+    #   Daher: bei CLIMAX hängt der Aufrufer (engine/render.py _render_clip) den
+    #   Vignette-Filter mit Komma verkettet an: "colorbalance=...,vignette=PI/5".
+    # - OPENING kühl (leichte Blau-Tönung = neutraler/neugieriger Einstieg)
+    # - RISING_ACTION leicht kühl (steigende Spannung)
+    # - CLIMAX warm (gebrochenes Orange/Beige = dramatische Wärme) + Vignette
+    # - RESOLUTION leicht grünlich (Auflösung/Nachklang)
+    #
+    # Werte sind klein gehalten (-0.05..+0.08), keine Filter soll "defekt" wirken (§26.3).
+    "OPENING":       "colorbalance=rm=-0.02:gm=0.0:bm=+0.04",
+    "RISING_ACTION": "colorbalance=rm=0.0:gm=0.0:bm=+0.02",
+    "CLIMAX":        "colorbalance=rm=+0.05:gm=+0.02:bm=-0.02",  # +vignette in _render_clip
+    "RESOLUTION":    "colorbalance=rm=-0.01:gm=+0.02:bm=-0.01",
 }
 PHASE_VOLUME = {
     "OPENING":       0.30,

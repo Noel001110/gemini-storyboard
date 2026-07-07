@@ -170,12 +170,43 @@ def t_phase_c_prompt_additions_present():
 
 
 def t_phase_d_color_filter_present():
-    """Phase D: PHASE_COLOR_FILTER has valid ffmpeg eq filters for all 4 phases."""
+    """Phase D: PHASE_COLOR_FILTER hat für alle 4 Phasen einen Color-Grading-Filter.
+
+    Phase P hat absichtlich von `eq` auf `colorbalance` gewechselt (Plan §0: "eq ist fast
+    wirkungslos für Tusche-Look, colorbalance deutlich stärker"). Test akzeptiert BEIDE
+    Formate.
+    """
     for ph, f in el.PHASE_COLOR_FILTER.items():
-        assert f.startswith("eq="), f"Filter for {ph} not ffmpeg eq"
-        # Verify all 3 dimensions present
-        for dim in ("contrast", "saturation", "brightness"):
-            assert dim in f, f"Phase {ph} filter missing {dim}"
+        assert f.startswith("eq=") or f.startswith("colorbalance="), \
+            f"Filter for {ph} not ffmpeg eq/colorbalance: {f!r}"
+        if f.startswith("eq="):
+            # Verify all 3 dimensions present (legacy eq-Format)
+            for dim in ("contrast", "saturation", "brightness"):
+                assert dim in f, f"Phase {ph} eq-filter missing {dim}"
+
+
+def t_phase_p_climax_has_vignette():
+    """Plan §3 Phase P: CLIMAX-Szenen bekommen zusätzlich zum colorbalance einen
+    Vignette-Filter (PI/5 = dezent, ~36° Vignette-Winkel)."""
+    # Source-Grep: _render_clip hängt für CLIMAX den vignette-Filter an
+    src = open(os.path.join(ROOT, "engine", "render.py")).read()
+    assert "vignette=PI/5" in src, \
+        "Phase P: CLIMAX muss vignette=PI/5 bekommen (Plan §3)"
+    # Logik: nur CLIMAX, nicht andere Phasen
+    assert 'scene.get("phase") == "CLIMAX"' in src, \
+        "vignette muss nur für CLIMAX (nicht global) angewendet werden"
+
+
+def t_phase_p_legacy_plan_identity():
+    """Plan §3 Phase P: Szenen OHNE Phase bekommen keinen Filter (legacy identity).
+    Phase-freie Szenen rendern byte-identisch zu vor Phase P."""
+    from engine_elevenlabs import PHASE_COLOR_FILTER
+    src = open(os.path.join(ROOT, "engine", "render.py")).read()
+    # color_filter = PHASE_COLOR_FILTER.get(scene.get("phase", ""), "")
+    # Wenn keine Phase → leerer String → keine Filter angewendet
+    assert 'PHASE_COLOR_FILTER.get(scene.get("phase"' in src or \
+           'PHASE_COLOR_FILTER.get(scene.get("phase", ""), "")' in src, \
+        "PHASE_COLOR_FILTER.get muss für leere Phase leeren String liefern"
 
 
 def t_phase_e_title_card_assignment():
