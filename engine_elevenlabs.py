@@ -523,6 +523,8 @@ def _tts_persist_and_schedule(cid: str, vid: str, text: str,
     einheitliche Return-Shape (audio_base64 + words + task_id)."""
     if not vid:
         raise RuntimeError("Kein Video ausgewählt.")
+    # Lazy-import (Import-Zyklus vermeiden) — wie in den Schwester-Funktionen.
+    from dashboard import ensure_video
     ensure_video(cid, vid)
     final_settings = load_voice_settings(cid, override_voice_id=override_voice_id)
     if settings:
