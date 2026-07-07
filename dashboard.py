@@ -998,8 +998,13 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
                 # from the analysis — pure landscape/symbol scenes skip it, saving KIE
                 # tokens and avoiding mis-conditioning a scene with no character in it.
                 entity = str(scene.get("concrete_entity", ""))
-                use_char_ref = bool(char_ref_url) and entity.startswith("char_") and \
-                    any(c.get("id") == entity for c in plan.get("characters", []))
+                # Globale Charakter-Referenz anhängen, sobald die Szene eine Figur zeigt
+                # (Entity beginnt mit "char_"). Die frühere Zusatzprüfung "Entity muss
+                # als id in plan['characters'] stehen" war zu fragil: wenn analyze_script
+                # (flaky Gemini-JSON) die characters-Liste LEER lässt, matchte NICHTS mehr
+                # → die Referenz wurde NIE angehängt → generische Strichmännchen statt
+                # des Referenz-Stils. Der char_-Prefix allein ist das verlässliche Signal.
+                use_char_ref = bool(char_ref_url) and entity.startswith("char_")
                 refs = chain_refs + ([char_ref_url] if use_char_ref else [])
                 full_prompt = _build_image_prompt(scene.get("prompt", ""), master, char_refs, phase=scene.get("phase", ""))
                 if scene.get("seq_id") is not None and scene.get("seq_pos", 0) >= 1:
