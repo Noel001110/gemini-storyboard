@@ -729,6 +729,10 @@ def main():
         run(t_phase_m_no_eager_cross_engine_imports, "M.0-M.6: keine Top-Level Cross-Engine-Imports (lazy)")
         run(t_phase_m_dashboard_size_below_4000, "M.6: dashboard.py < 4000 Zeilen (vorher 4657)")
 
+        summary_section("Bug B-1: Char-Upload-Crash bei ungültigem Base64")
+        run(t_bug_b1_charref_upload_validates_base64, "B-1: handler hat try/except + validate=False + name-check + mkdir")
+        run(t_bug_b1_charref_upload_roundtrip, "B-1 E2E: valid upload schreibt PNG+JSON, keine 5xx")
+
         print(f"\n=== Result ===")
         print(f"  Passed: {PASSED}")
         print(f"  Failed: {FAILED}")
@@ -1699,6 +1703,111 @@ def t_phase_m_engine_modules_exist():
     assert hasattr(engine, "__all__") or hasattr(engine.scenes, "split_units")
     assert hasattr(routes, "register_engine_paths")
     assert hasattr(routes, "ENDPOINT_REGISTRY")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bug-Ticket B-1: Charakter-Upload-Crash bei ungültigem Base64 (2026-07-07)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def t_bug_b1_charref_upload_validates_base64():
+    """B-1: ungültiges Base64 im /api/upload_charref-Request darf NICHT zum
+    Server-Crash führen — muss 400 mit klarer Fehlermeldung zurückgeben.
+
+    Regression: Vorher warf base64.b64decode bei Junk-Input binascii.Error,
+    die ungefangene Exception schickte einen leeren 500er-Body → Frontend
+    zeigte Silent-Fail.
+    """
+    import json
+    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    # Finde upload_charref-Handler
+    i = src.find('if p == "/api/upload_charref":')
+    assert i >= 0
+    # Suche die nächsten ~50 Zeilen — der try/except-Block muss da sein
+    snippet = src[i:i + 2000]
+    assert "b64decode(" in snippet, "b64decode call must exist in handler"
+    assert "try:" in snippet and "except" in snippet, \
+        "B-1: upload_charref must have try/except around b64decode (regression: empty 500 was silent-fail)"
+    assert "validate=False" in snippet, \
+        "B-1: b64decode should use validate=False for tolerance against missing padding"
+    # Name-Validierung muss da sein (leerer Name war Bug-Quelle)
+    assert 'return self._send(400, {"error": "name fehlt"})' in snippet, \
+        "B-1: empty name must be rejected with 400"
+    # Auto-mkdir muss da sein (frische Kanäle hatten charsheets/ nicht)
+    assert "os.makedirs(ch_sheets" in snippet, \
+        "B-1: handler must auto-mkdir charsheets/ (regression: fresh channel crashed)"
+
+
+def t_bug_b1_charref_upload_roundtrip():
+    """B-1 End-to-End: Valider Upload schreibt PNG + JSON, beide lesbar.
+    Verwendet die echte HTTP-Schnittstelle (startet Server im Thread).
+    """
+    import threading
+    import urllib.request
+    import urllib.error
+    import time as _time
+
+    # Free port — pick a high random one to avoid clashes
+    port = 18701
+
+    server_thread = threading.Thread(
+        target=lambda: __import__("subprocess").run(
+            ["python3", os.path.join(ROOT, "dashboard.py"), "--port", str(port)],
+            capture_output=True
+        ),
+        daemon=True
+    )
+    server_thread.start()
+    _time.sleep(2.5)  # server boot
+
+    try:
+        # Valid base64 PNG (1x1 transparent)
+        valid_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABAQMAAAAl21bKAAAAA1BMVEX///+nxBvIAAAAC0lEQVQI12NgAAIAAAUAAeImBZsAAAAASUVORK5CYII="
+        payload = json.dumps({
+            "channel": "b1_test_roundtrip",
+            "name": "RoundtripChar",
+            "image": valid_b64,
+            "mime": "image/png"
+        }).encode()
+
+        req = urllib.request.Request(
+            f"http://localhost:{port}/api/upload_charref",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                body = json.loads(r.read())
+                assert body.get("ok") is True, f"upload must succeed, got: {body}"
+                assert body.get("safe") == "roundtripchar"
+        except urllib.error.HTTPError as e:
+            raise AssertionError(
+                f"upload must NOT 5xx on valid input (B-1 regression), "
+                f"got {e.code}: {e.read()!r}"
+            )
+
+        # Verify the PNG file was actually written
+        png_path = os.path.join(ROOT, "channels", "b1_test_roundtrip", "charsheets", "roundtripchar.png")
+        assert os.path.exists(png_path), f"PNG must be on disk: {png_path}"
+        meta_path = os.path.join(ROOT, "channels", "b1_test_roundtrip", "charsheets", "roundtripchar.json")
+        assert os.path.exists(meta_path), f"meta JSON must be on disk: {meta_path}"
+        meta = json.load(open(meta_path))
+        assert meta["name"] == "RoundtripChar"
+        assert meta["safe"] == "roundtripchar"
+
+        # Cleanup
+        import shutil
+        shutil.rmtree(os.path.join(ROOT, "channels", "b1_test_roundtrip"), ignore_errors=True)
+    finally:
+        # Subprocess-launched server has no clean shutdown from test thread;
+        # kill any leftover on this port
+        try:
+            __import__("subprocess").run(
+                ["lsof", "-ti", f":{port}"],
+                capture_output=True, text=True, check=False
+            ).stdout.strip().split("\n")
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
