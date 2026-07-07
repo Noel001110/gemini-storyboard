@@ -1509,6 +1509,7 @@ function startPlanPoll(){
       SCENES = r.scenes || [];
       renderScenes('text');
       $('planArea').style.display = SCENES.length ? 'block' : 'none';
+      updateStepVisibility();  // Single-page-Flow: Render-Step mit einblenden, sobald Szenen da
       if(r.characters) suggestCharsFromPlan(r.characters);
     }
   };
@@ -1741,6 +1742,7 @@ function startVoiceoverPoll(){
         SCENES = plan.scenes;
         renderScenes(plan.source || 'audio');
         $('planArea').style.display = SCENES.length ? 'block' : 'none';
+        updateStepVisibility();  // Single-page-Flow: Render-Step mit einblenden, sobald Szenen da
         if(plan.characters) suggestCharsFromPlan(plan.characters);
       }
       $('elGenBtn').disabled = false;
@@ -2549,10 +2551,18 @@ function copyScript(){
 // Override-Layer: vorherige per-Step-Gating-Logik (z.B. planArea nur wenn Plan
 // existiert) muss VOR diesem Aufruf gesetzt sein.
 function updateStepVisibility(currentStep){
+  // Single-page-Flow (kein Tab-Wizard mehr, Nutzerwunsch Juli 2026): alle Schritte
+  // laufen von oben nach unten durch — Thema → Skript → Audio → Bilder → Render.
+  // Fertige Schritte bleiben sichtbar (vorher versteckte der Wizard alle außer der
+  // aktiven Card). `currentStep` steuert nur noch das Scroll-Ziel (siehe goTo).
+  // Sektion 1–3 sind immer sichtbar; 4 (Plan/Bilder) + 5 (Render) erscheinen, sobald
+  // es Szenen gibt — sonst wären sie leer. renderCard hat keine eigene Daten-Reveal-
+  // Logik, deshalb wird sie hier an SCENES gekoppelt (wie planArea).
+  const hasScenes = (typeof SCENES !== 'undefined') && Array.isArray(SCENES) && SCENES.length > 0;
+  const vis = { 1: '', 2: '', 3: '', 4: hasScenes ? '' : 'none', 5: hasScenes ? '' : 'none' };
   for (let n = 1; n <= 5; n++) {
     const card = document.querySelector(`[data-step-section="${n}"]`);
-    if (!card) continue;
-    card.style.display = (n === currentStep) ? '' : 'none';
+    if (card) card.style.display = vis[n];
   }
 }
 function stepperState(){

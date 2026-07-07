@@ -1932,6 +1932,13 @@ def t_phase38_channel_creation_with_preset():
     import shutil
 
     port = 18704
+    # Hermetik: der Test erzeugt echte Kanäle über POST /api/channels, und
+    # CHANNELS_DIR zeigt fest auf ROOT/channels. shutil.rmtree unten räumt die
+    # Verzeichnisse, ABER nicht den channels.json-Eintrag → sonst akkumuliert die
+    # echte Kanalliste bei jedem Lauf p38test_*-Einträge (Test-Hygiene-Bug, Juli 2026).
+    # Deshalb channels.json vorher sichern und im finally exakt wiederherstellen.
+    channels_json = os.path.join(ROOT, "channels", "channels.json")
+    _orig_channels = open(channels_json).read() if os.path.exists(channels_json) else None
     proc = subprocess.Popen(
         ["python3", os.path.join(ROOT, "dashboard.py"), "--port", str(port)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=ROOT,
@@ -1986,6 +1993,11 @@ def t_phase38_channel_creation_with_preset():
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+        # channels.json exakt auf Vor-Test-Stand zurücksetzen (kein p38test-Leak)
+        if _orig_channels is not None:
+            with open(channels_json, "w") as _f: _f.write(_orig_channels)
+        elif os.path.exists(channels_json):
+            os.remove(channels_json)
 
 
 def t_phase33_7_no_purple_tokens():
@@ -2511,6 +2523,13 @@ def t_phase_l_hook_throughline_in_prompt():
     import shutil
 
     port = 18704
+    # Hermetik: der Test erzeugt echte Kanäle über POST /api/channels, und
+    # CHANNELS_DIR zeigt fest auf ROOT/channels. shutil.rmtree unten räumt die
+    # Verzeichnisse, ABER nicht den channels.json-Eintrag → sonst akkumuliert die
+    # echte Kanalliste bei jedem Lauf p38test_*-Einträge (Test-Hygiene-Bug, Juli 2026).
+    # Deshalb channels.json vorher sichern und im finally exakt wiederherstellen.
+    channels_json = os.path.join(ROOT, "channels", "channels.json")
+    _orig_channels = open(channels_json).read() if os.path.exists(channels_json) else None
     proc = subprocess.Popen(
         ["python3", os.path.join(ROOT, "dashboard.py"), "--port", str(port)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=ROOT,
@@ -2565,6 +2584,11 @@ def t_phase_l_hook_throughline_in_prompt():
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+        # channels.json exakt auf Vor-Test-Stand zurücksetzen (kein p38test-Leak)
+        if _orig_channels is not None:
+            with open(channels_json, "w") as _f: _f.write(_orig_channels)
+        elif os.path.exists(channels_json):
+            os.remove(channels_json)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
