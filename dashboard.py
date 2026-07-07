@@ -1005,7 +1005,16 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
                 # → die Referenz wurde NIE angehängt → generische Strichmännchen statt
                 # des Referenz-Stils. Der char_-Prefix allein ist das verlässliche Signal.
                 use_char_ref = bool(char_ref_url) and entity.startswith("char_")
-                refs = chain_refs + ([char_ref_url] if use_char_ref else [])
+                # Phase 2 (Audit-Fix): Charsheets als Bild-Referenzen anhängen.
+                # load_char_refs() liefert pro validiertem Char ein image_data_url (data:image/png;base64,...)
+                # das ans Bildmodell geht. Wir hängen alle an, NICHT nur die zur Entity passenden —
+                # das Modell kann daraus den Stil ableiten (Phase 10: "Style-Ref").
+                # char_ref_url (kanal-global) bleibt zusätzlich als Anker für KIE.
+                charsheet_data_urls = [cr["image_data_url"] for cr in (char_refs or [])
+                                      if cr.get("image_data_url")]
+                refs = (chain_refs
+                        + charsheet_data_urls
+                        + ([char_ref_url] if use_char_ref else []))
                 full_prompt = _build_image_prompt(scene.get("prompt", ""), master, char_refs, phase=scene.get("phase", ""))
                 if scene.get("seq_id") is not None and scene.get("seq_pos", 0) >= 1:
                     # Positive constraints only — negated instructions ("do NOT redesign")

@@ -764,6 +764,16 @@ def main():
         run(t_bug_b1_charref_upload_validates_base64, "B-1: handler hat try/except + validate=False + name-check + mkdir")
         run(t_bug_b1_charref_upload_roundtrip, "B-1 E2E: valid upload schreibt PNG+JSON, keine 5xx")
 
+        summary_section("Char-Müll-Injection-Schutz (Audit-Fix nach User-Report)")
+        run(t_char_filter_mull_empty, "Char-Filter: leere/zu kurze Description wird gefiltert")
+        run(t_char_filter_mull_test_patterns, "Char-Filter: Test-Stick-Figure-Patterns werden gefiltert")
+        run(t_char_filter_real_charsheets_pass, "Char-Filter: echte LLM-Beschreibungen kommen durch")
+        run(t_char_filter_build_image_prompt, "Char-Filter: _build_image_prompt ignoriert Müll-Charsheets")
+        run(t_char_filter_load_char_refs, "Char-Filter: load_char_refs filtert Müll aus Dateisystem")
+        run(t_phase2_load_char_refs_data_url, "Phase 2: load_char_refs liefert data:image/png;base64 für PNG")
+        run(t_phase2_local_png_to_data_url, "Phase 2: _local_png_to_data_url funktioniert")
+        run(t_phase2_mull_charsheet_has_no_data_url, "Phase 2: Müll-Charsheet bekommt KEINE data-URL (nur echte)")
+
         summary_section("Phase Q + 38: Stil-Preset-Library + Legacy-Bereinigung")
         run(t_phase_q38_preset_masters_dict, "Q.2+38: PRESET_MASTERS hat 5 Presets + DEFAULT=flat_cartoon_doc")
         run(t_phase_q38_new_channel_gets_preset, "Q.4: IMAGE_MASTER_DEFAULT ist jetzt flat_cartoon_doc (nicht Stick)")
@@ -2597,7 +2607,189 @@ def t_phase_l_hook_throughline_in_prompt():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Phase Q + 38: Stil-Preset-Bibliothek (CINEMATIC_UPGRADE_PLAN.md §9.4, §10.4, §10.6)
+# Char-Müll-Injection-Schutz (Audit-Fix nach User-Report)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def t_char_filter_mull_empty():
+    """Audit-Fix: leere Description wird gefiltert (sonst werden Test-Müll-Charsheets
+    ohne echte Spec in jeden Prompt injiziert)."""
+    from engine.prompts import _is_valid_char_description
+    assert _is_valid_char_description("") == False
+    assert _is_valid_char_description("   ") == False
+    assert _is_valid_char_description("hi") == False
+    assert _is_valid_char_description("x" * 29) == False
+    assert _is_valid_char_description("x" * 30) == True
+
+
+def t_char_filter_mull_test_patterns():
+    """Audit-Fix: Test-Stick-Figure-Patterns werden gefiltert."""
+    from engine.prompts import _is_valid_char_description
+    assert _is_valid_char_description(
+        "Stick-figure construction. Torso is a single vertical line; "
+        "limbs are single lines with rounded joints. Minimalist stick-figure aesthetic. "
+        "No hands or feet; limbs terminate in rounded ends."
+    ) == False
+    assert _is_valid_char_description(
+        "Character with torso is a single vertical line and proper proportions."
+    ) == False
+    assert _is_valid_char_description(
+        "Character with minimalist stick-figure aesthetic design, dark outlines."
+    ) == False
+
+
+def t_char_filter_real_charsheets_pass():
+    """Echte Char-Beschreibungen dürfen NICHT gefiltert werden, auch wenn sie
+    'stick figure' enthalten (legitimer User-Stil)."""
+    from engine.prompts import _is_valid_char_description
+    real_descriptions = [
+        ("human_rights_activist",
+         "**Character Design Specification:**\n\n"
+         "*   **Proportions:** Head is roughly 1/4 of total height. Medium-length, rounded hair with a side part.\n"
+         "*   **Line Weight:** Consistent medium-thick black outlines, hand-drawn quality.\n"
+         "*   **Facial features:** Two simple black dot eyes, small circular mouth.\n"
+         "*   **Body:** Simple stick-figure construction with rounded joints.\n"
+         "*   **Clothing:** Dark suit jacket, light shirt.\n"
+         "*   **Hands and feet:** Simple oval hands."),
+        ("the_journalist",
+         "**Character Design Specification:**\n\n"
+         "*   **Proportions:** Head is roughly 1/5 of total body height. Body features simple stick-figure limbs.\n"
+         "*   **Face:** Circular head, simple dot eyes."),
+    ]
+    for name, desc in real_descriptions:
+        assert _is_valid_char_description(desc), \
+            f"Echte Char-Description für {name!r} darf NICHT gefiltert werden"
+
+
+def t_char_filter_build_image_prompt():
+    """Integration: _build_image_prompt injiziert Müll-Charsheets NICHT."""
+    from engine.prompts import _build_image_prompt
+    prompt = _build_image_prompt(
+        "Scene text.",
+        "MASTER.",
+        [
+            {"name": "MüllChar", "description": "Torso is a single vertical line; minimalist stick-figure aesthetic."},
+            {"name": "ValidChar", "description": "A young woman with red hair, blue dress, confident posture. " * 2},
+            {"name": "Empty", "description": ""},
+        ],
+        phase="CLIMAX",
+    )
+    assert "MüllChar" not in prompt, "Müll-Char darf nicht im Prompt landen"
+    assert "Empty" not in prompt, "Leerer Char muss ignoriert werden"
+    assert "ValidChar" in prompt, "Valid-Char muss bleiben"
+    assert "Torso is a single vertical line" not in prompt
+
+
+def t_char_filter_load_char_refs():
+    """Integration: load_char_refs filtert Müll aus dem Dateisystem."""
+    import os as _os, json as _json
+    import dashboard
+    from engine.prompts import load_char_refs
+
+    test_cid = "audit_charsheet_test"
+    test_dir = dashboard.ch_sheets(test_cid)
+    _os.makedirs(test_dir, exist_ok=True)
+    try:
+        _json.dump({"name": "Müll", "description": "Torso is a single vertical line; minimalist stick-figure aesthetic."},
+                   open(_os.path.join(test_dir, "mullchar.json"), "w"))
+        _json.dump({"name": "Empty", "description": ""},
+                   open(_os.path.join(test_dir, "empty.json"), "w"))
+        _json.dump({"name": "Real", "description": "A young journalist with shoulder-length hair, round glasses. " * 3},
+                   open(_os.path.join(test_dir, "realchar.json"), "w"))
+        refs = dashboard.load_char_refs(test_cid)
+        names = [r["name"] for r in refs]
+        assert "Müll" not in names, f"Müll-Char muss gefiltert werden, war: {names}"
+        assert "Empty" not in names, f"Leerer Char muss gefiltert werden, war: {names}"
+        assert "Real" in names, f"Real-Char muss bleiben, war: {names}"
+    finally:
+        import shutil
+        test_ch_dir = _os.path.join(ROOT, "channels", test_cid)
+        if _os.path.exists(test_ch_dir):
+            shutil.rmtree(test_ch_dir, ignore_errors=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase Q + 38: Stil-Preset-Bibliothek
+
+
+def t_phase2_local_png_to_data_url():
+    """Phase 2: _local_png_to_data_url liest PNG und returnt data:image/png;base64,..."""
+    import os as _os
+    import dashboard
+    from engine.prompts import _local_png_to_data_url
+    # Echtes Test-PNG aus default/charsheets
+    test_png = _os.path.join(dashboard.ch_sheets("default"), "human_rights_activist.png")
+    if not _os.path.exists(test_png):
+        return  # skip wenn kein echtes PNG vorhanden
+    url = _local_png_to_data_url(test_png)
+    assert url.startswith("data:image/png;base64,"),         f"Muss data:image/png;base64 sein, war: {url[:60]}"
+    # Base64-Portion muss das echte PNG decoden
+    import base64 as _b64
+    decoded = _b64.b64decode(url.split(",", 1)[1])
+    is_png = decoded[:8] == b"\x89PNG\r\n\x1a\n"
+    is_jpeg = decoded[:4] == b"\xff\xd8\xff\xe0" or decoded[:3] == b"\xff\xd8\xff"
+    assert is_png or is_jpeg, \
+        f"Muss gültige Bild-Bytes sein (PNG oder JPEG), Header: {decoded[:8]!r}"
+    assert _os.path.getsize(test_png) == len(decoded), "Größe muss übereinstimmen"
+
+
+def t_phase2_load_char_refs_data_url():
+    """Phase 2: load_char_refs liefert für jedes char mit PNG ein image_data_url."""
+    import os as _os, json as _json
+    import dashboard
+    from engine.prompts import load_char_refs
+
+    test_cid = "phase2_test_chars"
+    test_dir = dashboard.ch_sheets(test_cid)
+    _os.makedirs(test_dir, exist_ok=True)
+    try:
+        # Echtes PNG + valide Description
+        valid_desc = "A young journalist with shoulder-length hair, round glasses, expressive eyes. " * 3
+        fake_png = b"\x89PNG\r\n\x1a\nfake-png-bytes"
+        open(_os.path.join(test_dir, "with_image.png"), "wb").write(fake_png)
+        _json.dump({"name": "WithImage", "description": valid_desc, "safe": "with_image"},
+                   open(_os.path.join(test_dir, "with_image.json"), "w"))
+        # JSON ohne PNG
+        _json.dump({"name": "NoImage", "description": valid_desc, "safe": "no_image"},
+                   open(_os.path.join(test_dir, "no_image.json"), "w"))
+
+        refs = load_char_refs(test_cid)
+        with_image = next((r for r in refs if r["name"] == "WithImage"), None)
+        no_image = next((r for r in refs if r["name"] == "NoImage"), None)
+
+        assert with_image is not None, "WithImage muss geladen werden"
+        assert "image_data_url" in with_image,             "WithImage muss image_data_url haben (PNG existiert)"
+        assert with_image["image_data_url"].startswith("data:image/png;base64,")
+
+        assert no_image is not None, "NoImage muss auch geladen werden (nur Müll wird gefiltert)"
+        assert "image_data_url" not in no_image,             "NoImage darf KEINE image_data_url haben (kein PNG)"
+    finally:
+        import shutil
+        shutil.rmtree(_os.path.join(ROOT, "channels", test_cid), ignore_errors=True)
+
+
+def t_phase2_mull_charsheet_has_no_data_url():
+    """Phase 2: Müll-Charsheets (gefiltert) bekommen auch keine data-URL."""
+    import os as _os, json as _json
+    import dashboard
+    from engine.prompts import load_char_refs
+
+    test_cid = "phase2_mull_test"
+    test_dir = dashboard.ch_sheets(test_cid)
+    _os.makedirs(test_dir, exist_ok=True)
+    try:
+        # Müll-Char mit PNG (auch wenn Müll, soll keine data-URL ins System leaken)
+        fake_png = b"\x89PNG\r\n\x1a\nmull"
+        open(_os.path.join(test_dir, "mull.png"), "wb").write(fake_png)
+        _json.dump({"name": "Müll", "description": "Torso is a single vertical line; minimalist stick-figure aesthetic."},
+                   open(_os.path.join(test_dir, "mull.json"), "w"))
+        refs = load_char_refs(test_cid)
+        # Müll wird komplett gefiltert → keine data-URL im Result
+        assert refs == [],             f"Müll-Char muss komplett gefiltert werden, refs war: {refs}"
+    finally:
+        import shutil
+        shutil.rmtree(_os.path.join(ROOT, "channels", test_cid), ignore_errors=True)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 def t_phase_q38_preset_masters_dict():
