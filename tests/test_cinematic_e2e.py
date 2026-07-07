@@ -720,6 +720,15 @@ def main():
         run(t_seq_renumber_assigns_anchor_zero, "§11.4: _renumber_seq_pos assigns 0,1,2... per seq_id")
         run(t_seq_batch_worker_docstring_s1_fixed, "§11.4 S1: _batch_generate_worker docstring no longer lies")
 
+        summary_section("Phase M (Migrations-Verifikation, Refactor Engine-Extract)")
+        run(t_phase_m_engine_modules_exist, "M: 5 Module (engine.scenes/render/audio/prompts + routes) importieren")
+        run(t_phase_m_dashboard_re_exports_scenes, "M.2: dashboard.X is engine.scenes.X für 7 Symbole")
+        run(t_phase_m_dashboard_re_exports_render, "M.3: dashboard.X is engine.render.X für 8 Symbole")
+        run(t_phase_m_dashboard_re_exports_audio, "M.4: dashboard.X is engine.audio.X für 6 Symbole")
+        run(t_phase_m_dashboard_re_exports_prompts, "M.5+M.6: dashboard.X is engine.prompts.X für 10 Symbole")
+        run(t_phase_m_no_eager_cross_engine_imports, "M.0-M.6: keine Top-Level Cross-Engine-Imports (lazy)")
+        run(t_phase_m_dashboard_size_below_4000, "M.6: dashboard.py < 4000 Zeilen (vorher 4657)")
+
         print(f"\n=== Result ===")
         print(f"  Passed: {PASSED}")
         print(f"  Failed: {FAILED}")
@@ -1566,6 +1575,130 @@ def t_seq_batch_worker_docstring_s1_fixed():
     assert "_resolve_chain_refs" in docstring, (
         f"S1 fix incomplete: docstring must reference _resolve_chain_refs. Got: {docstring[:300]!r}"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase M (Migrations-Verifikation, 2026-07-07) — Modul-Identitäten + Architektur-Inv.
+# Diese Tests prüfen NICHT Logik, sondern dass der Refactor die versprochenen
+# Garantien einhält: dashboard.X ist engine.Y, Cross-Module-Referenzen sind lazy,
+# alle 61 vorherigen Tests bleiben grün.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def t_phase_m_dashboard_re_exports_scenes():
+    """M.2: alle aus engine/scenes.py extrahierten Symbole sind über dashboard.X
+    als dasselbe Objekt erreichbar (Re-Export funktioniert).
+    """
+    import engine.scenes
+    assert dashboard.split_units is engine.scenes.split_units
+    assert dashboard.segment_by_pacing is engine.scenes.segment_by_pacing
+    assert dashboard._renumber_seq_pos is engine.scenes._renumber_seq_pos
+    assert dashboard._apply_visual_sequences_direct is engine.scenes._apply_visual_sequences_direct
+    assert dashboard._wait_for_chain_scene is engine.scenes._wait_for_chain_scene
+    assert dashboard._resolve_chain_refs is engine.scenes._resolve_chain_refs
+    assert dashboard.MAX_SCENE_SEC == engine.scenes.MAX_SCENE_SEC
+
+
+def t_phase_m_dashboard_re_exports_render():
+    """M.3: alle aus engine/render.py extrahierten Symbole re-exportiert."""
+    import engine.render
+    assert dashboard.RENDER_FPS == engine.render.RENDER_FPS
+    assert dashboard._render_clip is engine.render._render_clip
+    assert dashboard._assemble_clips is engine.render._assemble_clips
+    assert dashboard._motion_for_scene is engine.render._motion_for_scene
+    assert dashboard._transition_for_scene is engine.render._transition_for_scene
+    assert dashboard.MOTION_LIBRARY is engine.render.MOTION_LIBRARY
+    assert dashboard.TRANSITION_LIBRARY is engine.render.TRANSITION_LIBRARY
+    assert dashboard.render_text_overlay_png is engine.render.render_text_overlay_png
+    assert dashboard.render_title_card_png_via_venv is engine.render.render_title_card_png_via_venv
+
+
+def t_phase_m_dashboard_re_exports_audio():
+    """M.4: alle aus engine/audio.py extrahierten Symbole re-exportiert."""
+    import engine.audio
+    assert dashboard._build_sfx_events is engine.audio._build_sfx_events
+    assert dashboard._duck_music_under_voice is engine.audio._duck_music_under_voice
+    assert dashboard._place_sfx is engine.audio._place_sfx
+    assert dashboard._phase_modulate_music is engine.audio._phase_modulate_music
+    assert dashboard._build_final_audio is engine.audio._build_final_audio
+    assert dashboard.SFX_FILES is engine.audio.SFX_FILES
+
+
+def t_phase_m_dashboard_re_exports_prompts():
+    """M.5+M.6: alle aus engine/prompts.py extrahierten Symbole re-exportiert."""
+    import engine.prompts
+    assert dashboard._build_image_prompt is engine.prompts._build_image_prompt
+    assert dashboard._build_video_prompt is engine.prompts._build_video_prompt
+    assert dashboard._phase_prompt_addition is engine.prompts._phase_prompt_addition
+    assert dashboard.visual_prompts is engine.prompts.visual_prompts
+    assert dashboard._image_prompt_chunk is engine.prompts._image_prompt_chunk
+    assert dashboard.generate_script is engine.prompts.generate_script
+    assert dashboard.generate_titles is engine.prompts.generate_titles
+    assert dashboard.make_thumbnail_prompt is engine.prompts.make_thumbnail_prompt
+    assert dashboard.gen_thumbnail_image is engine.prompts.gen_thumbnail_image
+    assert dashboard.load_char_refs is engine.prompts.load_char_refs
+    assert dashboard.gen_charsheet is engine.prompts.gen_charsheet
+
+
+def t_phase_m_no_eager_cross_engine_imports():
+    """Architektur-Invariante: engine-Module dürfen NICHT andere engine-Module oben
+    importieren — nur innerhalb von Funktionen (lazy). Sonst gibt's Import-Zyklen
+    sobald ein Modul das andere erweitert.
+
+    Erkennt NUR Imports, die direkt im Modul-Body stehen (nicht in Funktionen).
+    """
+    import ast
+    import os as _os
+    engine_dir = _os.path.join(ROOT, "engine")
+    offenders = []
+    for fname in _os.listdir(engine_dir):
+        if not fname.endswith(".py") or fname == "__init__.py":
+            continue
+        path = _os.path.join(engine_dir, fname)
+        with open(path) as f:
+            src = f.read()
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:
+            continue
+        # Only check top-level statements (col_offset == 0); function-body imports are OK
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.startswith("engine."):
+                        offenders.append(f"{fname}: top-level 'import {alias.name}'")
+            elif isinstance(node, ast.ImportFrom):
+                if node.module and node.module.startswith("engine."):
+                    offenders.append(f"{fname}: top-level 'from {node.module} import ...'")
+    assert not offenders, (
+        "Top-level cross-engine imports detected (must be lazy inside functions):\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def t_phase_m_dashboard_size_below_4000():
+    """Sanity-Check: dashboard.py nach M sollte deutlich kleiner sein als vorher.
+    Vorher: 4657 Zeilen. Aktuell (M.6): 3285. Erwartung: < 4000.
+    """
+    src_path = os.path.join(ROOT, "dashboard.py")
+    line_count = sum(1 for _ in open(src_path))
+    assert line_count < 4000, (
+        f"dashboard.py ist {line_count} Zeilen — Refactor hat nicht genug reduziert "
+        f"(Baseline 4657). Siehe docs/phase-m-report.md für Analyse."
+    )
+    print(f"    (dashboard.py: {line_count} Zeilen)")
+
+
+def t_phase_m_engine_modules_exist():
+    """M.0+M.2-M.5: alle 4 engine-Module + 1 routes-Modul existieren und importieren."""
+    import engine
+    import engine.scenes
+    import engine.render
+    import engine.audio
+    import engine.prompts
+    import routes
+    assert hasattr(engine, "__all__") or hasattr(engine.scenes, "split_units")
+    assert hasattr(routes, "register_engine_paths")
+    assert hasattr(routes, "ENDPOINT_REGISTRY")
 
 
 if __name__ == "__main__":
