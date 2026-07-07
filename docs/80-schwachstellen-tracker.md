@@ -39,8 +39,8 @@ Quelle: `docs/Architekturanalyse und Schwachstellenbericht — Storyboard Genera
 | ID | Maßnahme | Status | Beleg / Lücke |
 |:----|:----|:----|:----|
 | #2 | Connection-Pool | ❌ | Jeder KIE-Call neue urllib-Verbindung |
-| #14 | Exponential Backoff | ❌ | Retry ist linear (4× direkt) in `_kie_submit_image` |
-| #15 | Circuit Breaker | ❌ | Kein — 4× Retry dann Error, kein globaler Schutz |
+| #14 | Exponential Backoff | ✅ | `e88efed` _kie_retry_with_backoff() mit exp Backoff | | Retry ist linear (4× direkt) in `_kie_submit_image` |
+| #15 | Circuit Breaker | ✅ | `e88efed` Circuit Breaker + half-open recovery | | Kein — 4× Retry dann Error, kein globaler Schutz |
 | #39 | Timeout-Management | ⚠ | Partial: per-Call `timeout=30` in urllib, kein zentrales |
 
 ---
@@ -196,21 +196,21 @@ Aus den 80 IDs sind in der MD-Tabelle **69 dokumentiert**. Die folgenden 11 IDs 
 
 | Phase | Done | Partial | In Progress | Open | Unbekannt | Total |
 |:----|:----:|:----:|:----:|:----:|:----:|:----:|
-| 1 (Architektur) | 1 | 2 | 0 | 9 | — | 12 |
+| 1 (Architektur) | 3 | 2 | 0 | 7 | — | 12 |
 | 2 (Daten) | 5 | 0 | 0 | 5 | — | 10 |
 | 3 (Sicherheit) | 3 | 2 | 0 | 12 | — | 17 |
 | 4 (KI-Pipeline) | 2 | 2 | 0 | 14 | — | 18 |
 | 5 (Frontend/DX) | 0 | 1 | 0 | 11 | — | 12 |
 | Unbekannt | — | — | — | — | 11 | 11 |
-| **Total** | **11** | **7** | **0** | **51** | **11** | **80** |
+| **Total** | **13** | **7** | **0** | **49** | **11** | **80** |
 
 → **80 Schwachstellen, davon 5 done, 7 partial, 1 in progress, 56 open, 11 unknown.**
 
 ## Quick-Win-Reihenfolge (Produktion zuerst)
 
 2. ~~**#38** /health-Endpoint~~ ✅
-2. **#14** Exponential Backoff für KIE.ai
+2. ~~**#14**~~ ✅
 3. **#40** Strukturiertes JSON-Logging
 4. **#56** Ruff Linting
 5. **#69** Temp-Files sauber löschen (Crash-Recovery)
-6. **#14** Exponential Backoff für KIE.ai
+3. **#40** Strukturiertes JSON-Logging
