@@ -1401,6 +1401,18 @@ def _kie_submit_image(full_prompt: str, model: str = "nano-banana-2", ref_urls: 
             with urllib.request.urlopen(req, timeout=30) as r:
                 resp = json.load(r)
         except urllib.error.HTTPError as e:
+            # Round-5 Fix-2: HTTP 429 (Too Many Requests) is transient — the account
+            # exceeded the per-window limit. Retry with backoff instead of letting the
+            # caller mark the scene as failed. Without this fix, a single rate-limit
+            # spike would lose ALL 60 scenes in a batch because the worker calls
+            # _mark_scene_error() and continues to the next scene (which hits the same
+            # 429 and fails identically). 4 attempts × exponential backoff covers
+            # normal KIE rate windows (the API documentation says ~20/min for our tier).
+            if e.code == 429 and attempt < 3:
+                wait = 2 ** (attempt + 1)   # 2s, 4s, 8s
+                print(f"  [KIE] HTTP 429 Rate-Limit (Versuch {attempt+1}/4), warte {wait}s …", flush=True)
+                time.sleep(wait)
+                continue
             raise RuntimeError(f"KIE HTTP {e.code}: {e.read().decode()[:200]}")
         if resp.get("code") == 200:
             return resp["data"]["taskId"]
@@ -1701,7 +1713,21 @@ def _batch_generate_worker(cid: str, vid: str):
                 job_id = f"{cid}_{vid}_{i}_{int(time.time())}"
                 JOBS[job_id] = {"status": "running", "progress": 0, "file": None,
                                 "source_url": None, "ts": None, "error": None}
+                # Round-5 Fix-4 (race-detect): atomic check-and-set in ACTIVE_SCENE_JOBS_LOCK
+                # so that two concurrent batch paths (or batch + manual single click)
+                # for the SAME scene don't double-submit KIE-Tasks. Without this, a
+                # rapid "Generate Scene 5" click + a "Generate all" batch passing
+                # through scene 5 would BOTH submit, double-billing the user.
+                # Note: there's an earlier dedup-check at L1630-1632 (poll-wait pattern),
+                # but it has a TOCTOU window between lock-release and KIE submit — this
+                # second check closes it.
                 with _ACTIVE_SCENE_JOBS_LOCK:
+                    existing_job = ACTIVE_SCENE_JOBS.get(scene_key)
+                    if existing_job and JOBS.get(existing_job, {}).get("status") == "running":
+                        print(f"  [BatchGen] Szene {i} bereits in Arbeit ({existing_job}) — Batch überspringt", flush=True)
+                        JOBS.pop(job_id, None)   # unused slot
+                        IMAGE_GEN_SEMAPHORE.release()
+                        return
                     ACTIVE_SCENE_JOBS[scene_key] = job_id
                 # Mark "läuft" in plan.json so the individual scene tiles show "Wird
                 # generiert …" while the batch is running, not just for scenes started
@@ -3235,9 +3261,26 @@ def align_scenes_to_whisper(scenes: list, whisper_words: list) -> None:
     SAME audio in the SAME order, so word-count-based advancement is enough — no fuzzy
     text matching needed. This also tolerates the two engines disagreeing on individual
     words (e.g. Whisper hearing "Wortszeitstempel" where Gemini heard "Wort-Zeitstempel")
-    since only the word COUNT is used to advance the pointer, never the text itself."""
+    since only the word COUNT is used to advance the pointer, never the text itself.
+
+    Round-5 Fix-5: word-count mismatch is a real failure mode — Whisper hears
+    Füllwörter / Halluzinationen / Halluzinationen am Anfang ('[music]'), Gemini
+    optimiert sie weg. Wenn `wi >= n` vor der letzten Scene erreicht wird, kriegen
+    der Rest KEIN `start_aligned`/`end_aligned` und fallen auf geschätzte `dur`-Werte
+    zurück → stille Sync-Drift am Übergang aligned ↔ unaligned. Erkennen + loggen
+    wenn Summe drastisch von n abweicht (User-Signal: „Audio ist wahrscheinlich
+    off-tone, plan.json prüfen")."""
     wi = 0
     n = len(whisper_words)
+    total_scene_words = sum(len(s.get("text", "").split()) for s in scenes)
+    # Detect mismatch upfront — >20% gap means one engine inflated/dropped words vs. the
+    # other. The user can then re-record the audio or live with partial alignment.
+    if n > 0 and total_scene_words > 0:
+        drift_ratio = abs(n - total_scene_words) / max(n, total_scene_words)
+        if drift_ratio > 0.20:
+            print(f"  [Whisper] WARNUNG: word-count mismatch — Gemini-Scenes={total_scene_words}, "
+                  f"Whisper-Words={n} (Δ={drift_ratio*100:.0f}%). Letzte {sum(1 for s in scenes if s.get('start_aligned') is None)} "
+                  f"Szenen bekommen kein aligned-Start → Sync-Drift wahrscheinlich.", flush=True)
     for s in scenes:
         words_in_scene = len(s.get("text", "").split())
         if words_in_scene == 0 or wi >= n:
@@ -4070,7 +4113,18 @@ class H(BaseHTTPRequestHandler):
                 })
             # Mark running BEFORE the call so a fast frontend polling loop sees a
             # state — most calls will be running for several seconds.
+            # Atomic-Pre-Job-Lock (Round-5 Fix-1): verify no existing job runs. Without
+            # this guard, two rapid clicks would each set running=True, both submit
+            # ElevenLabs-Calls, double-bill the user, and race-write voiceover.mp3.
             with _VOICE_JOBS_LOCK:
+                existing = VOICE_JOBS.get((cid, vid), {})
+                if existing.get("running"):
+                    print(f"  [ElevenLabs] Job für {cid}/{vid} bereits in Arbeit — dupliziere nicht", flush=True)
+                    return self._send(200, {
+                        "ok": True, "task_id": existing.get("voiceover_task_id"),
+                        "deduped": True,
+                        "chars": existing.get("voiceover_chars"),
+                    })
                 VOICE_JOBS[(cid, vid)] = {
                     "running": True, "stage": "elevenlabs-generate",
                     "error": None, "voiceover_source": "elevenlabs",

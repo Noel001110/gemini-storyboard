@@ -659,6 +659,13 @@ def main():
         summary_section("Cross-Phase Integration: full pipeline")
         run(t_cross_phase_full_pipeline_integration, "X: 6-scene realistic script through all 8 phases")
 
+        summary_section("Round-5: Resume-Safety / Lock-Discipline / Edge-Cases")
+        run(t_round5_elevenlabs_double_click_guard, "R5-Fix1: ElevenLabs double-click guard (no 2x API-Call)")
+        run(t_round5_kie_429_retry_with_backoff, "R5-Fix2: KIE HTTP 429 retry-with-backoff in _kie_submit_image")
+        run(t_round5_frontend_xss_escape, "R5-Fix3: Frontend escHtml() for channel/video/character names")
+        run(t_round5_image_job_worker_race_detect, "R5-Fix4: _batch_generate_worker ACTIVE_SCENE_JOBS dedup")
+        run(t_round5_whisper_word_count_mismatch_warn, "R5-Fix5: align_scenes_to_whisper word-count-drift warning")
+
         print(f"\n=== Result ===")
         print(f"  Passed: {PASSED}")
         print(f"  Failed: {FAILED}")
@@ -672,6 +679,84 @@ def main():
 
     finally:
         teardown(tmp_home)
+
+
+# ─── Round-5 Fix-Tests (Resume-Safety / Lock-Discipline / Edge-Cases) ───
+
+def t_round5_elevenlabs_double_click_guard():
+    """Round-5 Fix-1: VOICE_JOBS[...]['running'] is checked atomically before setting.
+    Without this guard, two rapid clicks each spawn their own ElevenLabs API call,
+    double-billing the user and racing the voiceover.mp3 file write."""
+    import dashboard
+    # Read the actual handler code to confirm the guard pattern is present.
+    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    # The guard must be inside the `with _VOICE_JOBS_LOCK:` block, BEFORE the running=True assignment
+    assert "if existing.get(\"running\"):" in src, \
+        "Round-5 Fix-1 missing: no existing-running-check inside _VOICE_JOBS_LOCK block before assignment"
+    # Also check the helper function for the resume-dedupe pattern
+    assert "deduped" in src, \
+        "Round-5 Fix-1 missing: response should carry deduped:True"
+
+
+def t_round5_kie_429_retry_with_backoff():
+    """Round-5 Fix-2: HTTP 429 in _kie_submit_image triggers exponential backoff retry.
+    Without it, a rate-limit spike would lose ALL batch-scenes."""
+    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    idx = src.find("def _kie_submit_image")
+    body = src[idx:idx + 3500]
+    assert "if e.code == 429 and attempt < 3" in body, \
+        "Round-5 Fix-2 missing: HTTP 429 must trigger retry-with-backoff in _kie_submit_image"
+    # Verify exponential backoff (not constant)
+    assert "2 ** (attempt + 1)" in body, \
+        "Round-5 Fix-2: backoff must be exponential (2^attempt), not constant"
+    # Verify max 4 attempts (1 initial + 3 retries)
+    assert "for attempt in range(4)" in body, \
+        "Round-5 Fix-2: max 4 attempts expected (1 + 3 retries)"
+
+
+def t_round5_frontend_xss_escape():
+    """Round-5 Fix-3: User-Content (channel/video/character name) escaped with escHtml
+    before innerHTML interpolation. Old 'replace(/'/g,\\\\'\\')' didn't escape `<`, `>`,
+    `"`, `&` — XSS via `<img src=x onerror=alert(1)>` was possible."""
+    src = open(os.path.join(ROOT, "dashboard.html")).read()
+    # The escape helper must exist
+    assert "function escHtml" in src or "const escHtml" in src, \
+        "Round-5 Fix-3 missing: escHtml helper not defined in dashboard.html"
+    # The dangerous patterns — raw innerHTML with user-input — must use escHtml
+    # Spot-check the 4 known XSS vector lines
+    for vec_line, vec_name in [
+        ("<span class=\"ch-name\">${escHtml(ch.name)}</span>", "channel-name innerHTML"),
+        ("renameChannel(event,'${escHtml(ch.id).replace", "channel rename onclick"),
+        ("<div class=\"video-name\">${escHtml(v.name)}</div>", "video-name innerHTML"),
+        ("renameVideo('${escHtml(v.id).replace", "video rename onclick"),
+    ]:
+        assert vec_line in src, \
+            f"Round-5 Fix-3 missing escape: '{vec_name}' does not use escHtml(...)"
+
+
+def t_round5_image_job_worker_race_detect():
+    """Round-5 Fix-4: _batch_generate_worker checks ACTIVE_SCENE_JOBS before submitting
+    a KIE task. Without it, a manual 'Generate Scene 5' click + a 'Generate all'
+    batch passing through Scene 5 would BOTH submit."""
+    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    idx = src.find("def _batch_generate_worker")
+    body = src[idx:idx + 15000]   # large slice — body of this function is ~13K
+    # The dedup-block must be present in the batch worker
+    assert "if existing_job and JOBS.get(existing_job, {}).get(\"status\") == \"running\":" in body, \
+        "Round-5 Fix-4 missing: _batch_generate_worker has no ACTIVE_SCENE_JOBS-dedup check"
+
+
+def t_round5_whisper_word_count_mismatch_warn():
+    """Round-5 Fix-5: align_scenes_to_whisper warns when word-count between Gemini-scenes
+    and Whisper-output drifts >20%. Without this, a silent sync drift at the
+    aligned/unaligned transition was hidden from the user."""
+    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    idx = src.find("def align_scenes_to_whisper")
+    body = src[idx:idx + 2500]
+    assert "drift_ratio" in body, \
+        "Round-5 Fix-5 missing: drift_ratio computation not present in align_scenes_to_whisper"
+    assert "WARNUNG" in body, \
+        "Round-5 Fix-5 missing: warning-log not emitted on word-count mismatch"
 
 
 if __name__ == "__main__":

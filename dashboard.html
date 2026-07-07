@@ -540,6 +540,17 @@ let VIDEOS         = [];    // videos in active channel
 let CURRENT_MODE   = 'image'; // 'image' | 'video'
 
 const $ = id => document.getElementById(id);
+// Round-5 Fix-3: HTML-attribute Escape-Funktion. Schließt XSS-Lücke in
+// channel/video/character-Names die via innerHTML und onclick-Attributen
+// interpoliert wurden. Die alte Heuristik ('replace(/'/g,"\\'")') hat nur
+// single-quotes escaped — `<img src=x onerror=alert(1)>` oder
+// `"); document.location = 'evil.com'` würden durchgehen.
+const escHtml = s => String(s ?? "")
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 const api = (u,m,b) => fetch(u,{method:m||'GET',headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined}).then(r=>r.json());
 // POST helper that always injects current channel + active video
 const ch_api = (u,b={}) => api(u,'POST',{...b, channel: ACTIVE_CHANNEL, video: ACTIVE_VIDEO});
@@ -554,9 +565,9 @@ async function loadChannels(){
   channels.forEach(ch=>{
     const el = document.createElement('div');
     el.className = 'ch-item' + (ch.id===ACTIVE_CHANNEL?' active':'');
-    el.innerHTML = `<span class="ch-dot"></span><span class="ch-name">${ch.name}</span>`
-      + `<span class="ch-del" onclick="renameChannel(event,'${ch.id}','${ch.name.replace(/'/g,"\\'")}')" title="Umbenennen">✎</span>`
-      + (channels.length>1?`<span class="ch-del" onclick="deleteChannel(event,'${ch.id}')" title="Löschen">✕</span>`:'');
+    el.innerHTML = `<span class="ch-dot"></span><span class="ch-name">${escHtml(ch.name)}</span>`
+      + `<span class="ch-del" onclick="renameChannel(event,'${escHtml(ch.id).replace(/'/g,"&#39;")}','${escHtml(ch.name).replace(/'/g,"&#39;")}')" title="Umbenennen">✎</span>`
+      + (channels.length>1?`<span class="ch-del" onclick="deleteChannel(event,'${escHtml(ch.id).replace(/'/g,"&#39;")}')" title="Löschen">✕</span>`:'');
     el.onclick = e=>{ if(!e.target.classList.contains('ch-del')) switchChannel(ch.id, ch.name); };
     list.appendChild(el);
   });
@@ -629,12 +640,12 @@ function renderVideoGrid(){
     card.innerHTML = `
       <div class="video-thumb" id="thumb_${v.id}">📹<span class="video-mode-tag">${modeTag}</span></div>
       <div class="video-info">
-        <div class="video-name">${v.name}</div>
+        <div class="video-name">${escHtml(v.name)}</div>
         <div class="video-meta" id="meta_${v.id}">wird geladen …</div>
       </div>
       <div class="video-actions">
-        <button class="sm ghost" onclick="event.stopPropagation();renameVideo('${v.id}','${v.name.replace(/'/g,"\\'")}')">✎ Umbenennen</button>
-        <button class="sm ghost" onclick="event.stopPropagation();deleteVideo('${v.id}','${v.name.replace(/'/g,"\\'")}')" style="color:var(--danger)">✕</button>
+        <button class="sm ghost" onclick="event.stopPropagation();renameVideo('${escHtml(v.id).replace(/'/g,"&#39;")}','${escHtml(v.name).replace(/'/g,"&#39;")}')">✎ Umbenennen</button>
+        <button class="sm ghost" onclick="event.stopPropagation();deleteVideo('${escHtml(v.id).replace(/'/g,"&#39;")}','${escHtml(v.name).replace(/'/g,"&#39;")}')" style="color:var(--danger)">✕</button>
       </div>`;
     card.onclick = () => openVideo(v.id, v.name);
     g.appendChild(card);
@@ -696,7 +707,7 @@ async function openVideo(vid, name){
   ACTIVE_VIDEO = vid;
   $('view-videolist').style.display = 'none';
   $('view-editor').style.display = '';
-  $('crumb').innerHTML = `${CHANNEL_NAME}<span class="sep">›</span><span class="cur">${name}</span>`;
+  $('crumb').innerHTML = `${escHtml(CHANNEL_NAME)}<span class="sep">›</span><span class="cur">${escHtml(name)}</span>`;
 
   SCENES = [];
   $('scenes').innerHTML = '';
@@ -1193,7 +1204,7 @@ async function loadElevenLabsVoices(){
     return;
   }
   sel.innerHTML = '<option value="">– Voice wählen –</option>' + _elVoices.map(v =>
-    `<option value="${v.voice_id}">${v.name || v.voice_id}${v.category?' ('+v.category+')':''}</option>`).join('');
+    `<option value="${escHtml(v.voice_id)}">${escHtml(v.name || v.voice_id)}${escHtml(v.category?' ('+v.category+')':'')}</option>`).join('');
   // Sync settings dropdowns: the helper persists voice_id via the dropdown change handler
   const cur = $('elVoiceSelect');
   const settings = await ch_get('/api/elevenlabs_settings').catch(() => null);
@@ -1964,11 +1975,11 @@ function renderCharList(){
     d.innerHTML = `
       <div>${imgTag}</div>
       <div>
-        <div style="font-weight:600;margin-bottom:4px">${ch.name} ${uriTag}</div>
-        <div class="hint">${ch.description||''}</div>
+<div style="font-weight:600;margin-bottom:4px">${escHtml(ch.name)} ${escHtml(uriTag)}</div>
+        <div class="hint">${escHtml(ch.description||'')}</div>
       </div>
-      <div>
-        <button class="sm" onclick="genCharSheet('${ch.name}','${(ch.description||'').replace(/'/g,"\\'")}')">
+      <div style="display:flex;gap:6px;margin-top:6px">
+        <button class="sm" onclick="genCharSheet('${escHtml(ch.name).replace(/'/g,"&#39;")}','${escHtml(ch.description||'').replace(/'/g,"&#39;")}')">
           ${ch.has_image?'Neu generieren':'Referenzbild erstellen'}
         </button>
       </div>`;
