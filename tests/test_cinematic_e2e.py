@@ -706,6 +706,9 @@ def main():
         run(t_phase33_4_2_prep_no_dead_code, "33.4.2-prep A: titleThumbCard/genTitles/genThumbnail/selectTitle alle entfernt")
         run(t_phase33_4_2_prep_central_visibility, "33.4.2-prep D: updateStepVisibility(currentStep) + goTo() wired")
 
+        summary_section("Phase 33.4.2: Thema-Card integration & linear workflow (PR 2)")
+        run(t_phase33_4_2_thema_card_restructured, "33.4.2: Thema-Card restructure & Option A upload removal")
+
         print(f"\n=== Result ===")
         print(f"  Passed: {PASSED}")
         print(f"  Failed: {FAILED}")
@@ -1337,6 +1340,19 @@ def t_phase33_4_2_prep_central_visibility():
     # Aufruf im goTo
     assert "if (typeof updateStepVisibility === 'function') updateStepVisibility(n)" in html, \
         "33.4.2-prep D: goTo() must call updateStepVisibility(n)"
+
+def t_phase33_4_2_thema_card_restructured():
+    """Phase 33.4.2: Thema-Card restructure & Option A upload removal."""
+    html = open(os.path.join(ROOT, "dashboard.html")).read()
+    assert "id=\"ideaInput\"" in html, "Thema-Card: ideaInput textarea missing"
+    assert "genTitleStep()" in html, "Thema-Card: genTitleStep() trigger missing"
+    assert "genThumbnailStep()" in html, "Thema-Card: genThumbnailStep() trigger missing"
+    assert "id=\"titleListStep\"" in html, "Thema-Card: titleListStep list container missing"
+    assert "id=\"thumbSlotStep\"" in html, "Thema-Card: thumbSlotStep preview container missing"
+    
+    # Audio-Upload Dropzone und Option A müssen komplett aus Schritt 2 verschwunden sein
+    assert "Option A · Voice-Over hochladen" not in html, "Schritt 2: Option A dropzone must be removed"
+    assert "transAudio" not in html or "transcribeAudio" not in html, "Schritt 2: transcribeAudio logic must be removed from Step 2"
 
 
 if __name__ == "__main__":

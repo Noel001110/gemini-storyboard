@@ -22,6 +22,7 @@ Stand: Juli 2026. Dieses Dokument ist **selbsterklärend** — es setzt keine vo
 - ✅ **JOBS-Memory-Cleanup (Phase 0 des Cinema-Erweiterungsplans)** — umgesetzt, ARCHITECTURE §21
 - ✅ **Quick-Win Q (`sec`-Defaults 4→5.5, Normal-Hardcap 4→5.5)** — umgesetzt, ARCHITECTURE §22
 - ✅ **Phase 1 ElevenLabs (TTS + Word-Timestamps)** — umgesetzt, ARCHITECTURE §23
+- ✅ **Phase 33.4.2 / PR 2 (Thema-Card Integration & linearer Script-First Flow)** — umgesetzt, ARCHITECTURE §33.4.2
 - ⏳ **Story-Phase-Engine (Phase 3 des Cinema-Erweiterungsplans, neu geschrieben)** — geplant, siehe Implementierungs-Plan `.kilo/plans/1783367382459-quickwin-elevenlabs.md` (Phase B in der Liste)
 
 Die in §8 unten erwähnten Phase-3-ff-Phasen (4–9) sind im **Übergabe-Plan `IMPLEMENTATION_PLAN_NEXT.md`** und in `ARCHITECTURE.md` §§22-23ff. neu beschrieben — die Phase-Nummern dort sind mit der aktuellen Reihenfolge konsistent, §8 hier nicht.

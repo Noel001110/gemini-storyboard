@@ -46,7 +46,7 @@
 <style>
   :root{
     --bg:#f7f7f8; --surface:#ffffff; --surface-2:#f2f3f5; --border:#e5e7eb;
-    --text:#111827; --mut:#6b7280; --mut-2:#9ca3af;
+    --text:#111827; --mut:#4b5563; --mut-2:#6b7280;
     --acc:#4f46e5; --acc-soft:#eef2ff; --acc-hover:#4338ca;
     --ok:#16a34a; --ok-soft:#f0fdf4;
     --warn:#d97706; --warn-soft:#fffbeb;
@@ -236,7 +236,6 @@
   <button id="sidebarToggle" onclick="toggleSidebar()" title="Kanäle" class="p-2 hover:bg-app-surface-2 rounded-md text-app-mut lg:hidden">
     <i data-lucide="menu" class="w-4 h-4"></i>
   </button>
-  <span class="dot"></span>
   <div class="flex items-center gap-2">
     <div class="w-7 h-7 rounded-md bg-app-acc flex items-center justify-center">
       <i data-lucide="film" class="w-4 h-4 text-white"></i>
@@ -458,20 +457,47 @@
 
     <!-- Schritt ① — Thema wählen (Phase 33.4.1: umbenannt von "Modus wählen". Modus-Toggle
          bleibt hier, in 33.4.2 wird Titel- + Bild-Stil-Setup hier integriert). -->
-    <div class="card" data-step-section="1" style="padding:14px 16px">
-      <div class="row" style="align-items:center;gap:16px">
-        <strong style="font-size:13px">① Modus:</strong>
+    <!-- Schritt ① — Thema & Idee -->
+    <div class="card" data-step-section="1" style="padding:18px 20px">
+      <h2>① Thema &amp; Idee</h2>
+      <div class="row" style="align-items:center;gap:16px;margin-bottom:14px;">
+        <strong style="font-size:13px">Modus:</strong>
         <div class="seg">
           <button id="modeBtnImg" class="sel" onclick="setMode('image')">📷 Bild</button>
           <button id="modeBtnVid" onclick="setMode('video')">🎬 Video (T2V)</button>
         </div>
         <span class="hint" id="modeHint">Bilder werden generiert, Videos optional per I2V</span>
       </div>
+      
+      <div style="margin-bottom:14px;">
+        <label class="block text-xs font-semibold text-app-mut uppercase tracking-wide mb-2">Thema / Roh-Idee</label>
+        <textarea id="ideaInput" rows="2" placeholder="Beschreibe kurz die Video-Idee oder das Thema..." style="width:100%;margin-top:6px;" oninput="saveIdea()"></textarea>
+      </div>
+
+      <div style="margin-bottom:14px;">
+        <div class="row" style="align-items:center;gap:10px;">
+          <button id="genTitlesBtn" onclick="genTitleStep()" class="sm">✍️ Titel generieren</button>
+          <span class="hint">Generiert 5 clickbait-but-honest Titel-Optionen.</span>
+        </div>
+        <div id="titleListStep" class="space-y-2" style="margin-top:10px;display:flex;flex-direction:column;gap:6px;"></div>
+      </div>
+
+      <div>
+        <div class="row" style="align-items:start;gap:16px;">
+          <div style="flex:1;">
+            <button id="genThumbBtn" onclick="genThumbnailStep()" class="sm">✨ Thumbnail generieren</button>
+            <p class="hint" style="margin-top:6px;">Basierend auf dem ausgewählten Titel und dem Master-Prompt des Kanals.</p>
+          </div>
+          <div id="thumbSlotStep" style="flex:0 0 160px;aspect-ratio:16/9;border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden;background:var(--surface-2);display:flex;align-items:center;justify-content:center;">
+            <div class="slot-empty"><span class="slot-icon">🖼</span><span class="slot-label" style="font-size:10px;">Kein Thumbnail</span></div>
+          </div>
+        </div>
+      </div>
     </div>
 
-    <!-- Schritt ② — Skript oder Voice-Over einfügen (beides führt zum selben Szenen-Plan) -->
+    <!-- Schritt ② — Skript erstellen -->
     <div class="card" data-step-section="2">
-      <h2>② Skript oder Voice-Over einfügen</h2>
+      <h2>② Skript erstellen</h2>
 
       <div id="cardSettings" style="margin-bottom:16px;padding-bottom:14px;border-bottom:1px solid var(--border)">
         <div id="settingsImg" class="row" style="align-items:center">
@@ -492,35 +518,13 @@
         </div>
       </div>
 
-      <div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Option A · Voice-Over hochladen (empfohlen — echte Timestamps)</div>
-      <div class="dropzone" id="dropzone" onclick="$('audioFile').click()" ondragover="dragOver(event)" ondragleave="dragLeave()" ondrop="dropFile(event)">
-        <p>MP3, WAV, M4A, OGG hier ablegen oder klicken</p>
-        <p class="name" id="audioLabel" style="display:none"></p>
-      </div>
-      <input type="file" id="audioFile" accept="audio/*" style="display:none" onchange="audioSelected()">
-      <audio id="audioPlayer" controls style="display:none"></audio>
-
-      <div class="row" style="margin-top:12px;align-items:center">
-        <button id="transBtn" onclick="transcribeAudio()" disabled>Transkribieren &amp; Plan erstellen</button>
-        <div class="steps" id="transSteps" style="display:none">
-          <span id="step1">① Upload</span>
-          <span style="color:var(--border)">›</span>
-          <span id="step2">② Transkription</span>
-          <span style="color:var(--border)">›</span>
-          <span id="step3">③ Prompts</span>
-        </div>
-        <span class="hint" id="transStatus">Keine Datei</span>
-      </div>
-
-      <div class="divider">oder</div><div class="divider">oder</div>
-
-      <div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Option B · Skript manuell eingeben (Timing geschätzt)</div>
-      <textarea id="script" rows="7" placeholder="Skript hier einfügen (Timestamps werden ignoriert) …" oninput="estimate();_elRefreshGenBtn()"></textarea>
-      <div class="row" style="margin-top:10px">
+      <div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Sprecher-Skript eingeben</div>
+      <textarea id="script" rows="10" placeholder="Füge hier das Skript ein, das für das Video gesprochen wird …" oninput="estimate();_elRefreshGenBtn()"></textarea>
+      <div class="row" style="margin-top:10px;align-items:center">
         <label>Wörter / Minute<input type="number" id="wpm" value="150" min="80" max="220" oninput="estimate()"></label>
         <span class="est" id="est">—</span>
       </div>
-      <div class="row" style="margin-top:10px">
+      <div class="row" style="margin-top:12px;gap:10px;align-items:center">
         <button onclick="makePlan()" id="planBtn">Plan aus Skript erstellen</button>
         <span class="hint">Timing geschätzt via WPM-Formel + Pacing-Analyse</span>
       </div>
@@ -974,10 +978,77 @@ async function refreshPlanAndStatus(){
 }
 
 // ---- Title & Thumbnail ----
-let VIDEO_META = {titles: [], selected_title: '', thumbnail_prompt: '', has_thumbnail: false};
+let VIDEO_META = {titles: [], selected_title: '', thumbnail_prompt: '', has_thumbnail: false, idea: ''};
 
 async function loadVideoMeta(){
-  VIDEO_META = await ch_get('/api/video_meta').catch(() => ({titles:[], selected_title:'', thumbnail_prompt:'', has_thumbnail:false}));
+  VIDEO_META = await ch_get('/api/video_meta').catch(() => ({titles:[], selected_title:'', thumbnail_prompt:'', has_thumbnail:false, idea:''}));
+  if($('ideaInput')) $('ideaInput').value = VIDEO_META.idea || '';
+  renderTitleListStep();
+  renderThumbnailStep();
+}
+
+async function saveIdea(){
+  const idea = ($('ideaInput') || {}).value || '';
+  VIDEO_META.idea = idea;
+  await ch_api('/api/save_idea', {idea});
+}
+
+function renderTitleListStep(){
+  const c = $('titleListStep'); if(!c) return;
+  c.innerHTML = '';
+  if(!VIDEO_META.titles || !VIDEO_META.titles.length){
+    c.innerHTML = '<p class="hint" style="margin:0">Noch keine Titel — generieren, sobald ein Thema oder ein Skript vorhanden ist.</p>';
+    return;
+  }
+  VIDEO_META.titles.forEach(t => {
+    const sel = t === VIDEO_META.selected_title;
+    const el = document.createElement('div');
+    el.style.cssText = `padding:9px 12px;border-radius:8px;border:1px solid ${sel?'var(--acc)':'var(--border)'};background:${sel?'var(--acc-soft)':'var(--surface-2)'};font-size:13px;cursor:pointer;display:flex;align-items:center;gap:8px`;
+    el.innerHTML = `<span style="flex-shrink:0">${sel?'✅':'⚪'}</span><span>${t}</span><span class="hint" style="margin-left:auto;flex-shrink:0">${t.length} Zeichen</span>`;
+    el.onclick = () => selectTitleStep(t);
+    c.appendChild(el);
+  });
+}
+
+async function genTitleStep(){
+  const btn = $('genTitlesBtn'); btn.disabled = true; btn.textContent = '⏳ Generiere …';
+  const r = await ch_api('/api/generate_titles', {});
+  btn.disabled = false; btn.textContent = '✍️ Titel generieren';
+  if(!r.ok){ alert('Fehler: '+(r.error||'unbekannt')); return; }
+  VIDEO_META.titles = r.titles;
+  renderTitleListStep();
+  stepperState().invalidate(); // update stepper complete state
+}
+
+async function selectTitleStep(t){
+  VIDEO_META.selected_title = t;
+  renderTitleListStep();
+  await ch_api('/api/select_title', {title: t});
+  stepperState().invalidate(); // update stepper complete state
+}
+
+function renderThumbnailStep(){
+  const slot = $('thumbSlotStep'); if(!slot) return;
+  if(VIDEO_META.has_thumbnail){
+    slot.innerHTML = `<img src="/generated/thumbnail.jpg?t=${Date.now()}&channel=${ACTIVE_CHANNEL}&video=${ACTIVE_VIDEO}" style="width:100%;height:100%;object-fit:cover;">`;
+  } else {
+    slot.innerHTML = `<div class="slot-empty"><span class="slot-icon">🖼</span><span class="slot-label" style="font-size:10px;">Kein Thumbnail</span></div>`;
+  }
+}
+
+async function genThumbnailStep(){
+  const btn = $('genThumbBtn'); btn.disabled = true; btn.textContent = '⏳ Generiere …';
+  $('thumbSlotStep').innerHTML = `<div class="slot-empty"><span class="slot-icon">⏳</span><span class="slot-label" style="font-size:10px;">Wird generiert …</span></div>`;
+  const r = await ch_api('/api/generate_thumbnail', {});
+  btn.disabled = false; btn.textContent = '✨ Thumbnail generieren';
+  if(!r.ok){
+    alert('Fehler: '+(r.error||'unbekannt'));
+    renderThumbnailStep();
+    return;
+  }
+  VIDEO_META.has_thumbnail = true;
+  VIDEO_META.thumbnail_prompt = r.prompt;
+  renderThumbnailStep();
 }
 
 
@@ -1121,7 +1192,6 @@ function switchTopTab(id, btn){
 // Shared zwischen Library- und Editor-Mode. Inline Editor für Master-Prompt,
 // Image-Model, Brand-Color, Char-Ref-Status. Speichert via bestehende
 // endpoints (`/api/master`, `/api/image_model`, `/api/char_ref`, `/api/channels`).
-let _settingsInitialized = false;
 async function openChannelSettings(){
   const modal = $('settingsModal');
   modal.style.display = 'flex';
@@ -1133,30 +1203,40 @@ async function openChannelSettings(){
   }
   modal._escHandler = e => { if (e.key === 'Escape') closeSettingsModal(); };
   document.addEventListener('keydown', modal._escHandler);
-  // Lazy-Init der Settings-Inhalte (Master/Model/Char-Ref wie im alten Tab)
-  if (!_settingsInitialized) {
-    const master    = await ch_get('/api/master').then(r => r.master).catch(() => '');
-    const vidMaster = await ch_get('/api/vid_master').then(r => r.vid_master || '').catch(() => '');
-    const imgModel  = await ch_get('/api/image_model').then(r => r.image_model || 'nano-banana-2').catch(() => 'nano-banana-2');
-    const charRefUrl= await ch_get('/api/char_ref').then(r => r.url || '').catch(() => '');
-    document.getElementById('settingsContent').innerHTML =
-      `<label class="block text-xs font-semibold text-app-mut uppercase tracking-wide mb-2">Bild-Master-Prompt</label>`
-      + `<textarea id="settingsMaster" rows="6" class="w-full px-3 py-2 border border-app-border rounded-md focus:outline-none focus:ring-2 focus:ring-app-acc text-sm">${escHtml(master)}</textarea>`
-      + `<div class="flex justify-end mt-1"><button onclick="saveSettingsMaster()" class="text-xs text-app-acc hover:underline">💾 Speichern</button></div>`
-      + `<label class="block text-xs font-semibold text-app-mut uppercase tracking-wide mb-2 mt-4">Video-Master-Prompt</label>`
-      + `<textarea id="settingsVidMaster" rows="4" class="w-full px-3 py-2 border border-app-border rounded-md focus:outline-none focus:ring-2 focus:ring-app-acc text-sm">${escHtml(vidMaster)}</textarea>`
-      + `<div class="flex justify-end mt-1"><button onclick="saveSettingsVidMaster()" class="text-xs text-app-acc hover:underline">💾 Speichern</button></div>`
-      + `<label class="block text-xs font-semibold text-app-mut uppercase tracking-wide mb-2 mt-4">Image-Modell</label>`
-      + `<select id="settingsImageModel" class="w-full px-3 py-2 border border-app-border rounded-md text-sm">`
-      + `<option value="nano-banana-2">nano-banana-2 (volle Qualität)</option>`
-      + `<option value="nano-banana-2-lite">nano-banana-2-lite (günstiger)</option>`
-      + `</select>`
-      + `<label class="block text-xs font-semibold text-app-mut uppercase tracking-wide mb-2 mt-4">Charakter-Referenz-URL</label>`
-      + `<input id="settingsCharRefUrl" type="url" value="${escHtml(charRefUrl)}" class="w-full px-3 py-2 border border-app-border rounded-md focus:outline-none focus:ring-2 focus:ring-app-acc text-sm" placeholder="https://…">`
-      + `<div class="flex justify-end mt-1"><button onclick="saveSettingsCharRef()" class="text-xs text-app-acc hover:underline">💾 Speichern</button></div>`;
-    document.getElementById('settingsImageModel').value = imgModel;
-    _settingsInitialized = true;
-  }
+  
+  // Hole immer frische Kanal-Settings (Entfernt _settingsInitialized Cache, damit Wechsel funktionieren)
+  const master    = await ch_get('/api/master').then(r => r.master).catch(() => '');
+  const vidMaster = await ch_get('/api/vid_master').then(r => r.vid_master || '').catch(() => '');
+  const imgModel  = await ch_get('/api/image_model').then(r => r.image_model || 'nano-banana-2').catch(() => 'nano-banana-2');
+  const charRefUrl= await ch_get('/api/char_ref').then(r => r.url || '').catch(() => '');
+  document.getElementById('settingsContent').innerHTML =
+    `<label class="block text-xs font-semibold text-app-mut uppercase tracking-wide mb-2">Bild-Master-Prompt</label>`
+    + `<textarea id="settingsMaster" rows="6" class="w-full px-3 py-2 border border-app-border rounded-md focus:outline-none focus:ring-2 focus:ring-app-acc text-sm mb-1">${escHtml(master)}</textarea>`
+    + `<div class="flex justify-end mb-4"><button onclick="saveSettingsMaster()" class="sm ghost">💾 Speichern</button></div>`
+    + `<label class="block text-xs font-semibold text-app-mut uppercase tracking-wide mb-2 mt-4">Video-Master-Prompt</label>`
+    + `<textarea id="settingsVidMaster" rows="4" class="w-full px-3 py-2 border border-app-border rounded-md focus:outline-none focus:ring-2 focus:ring-app-acc text-sm mb-1">${escHtml(vidMaster)}</textarea>`
+    + `<div class="flex justify-end mb-4"><button onclick="saveSettingsVidMaster()" class="sm ghost">💾 Speichern</button></div>`
+    + `<label class="block text-xs font-semibold text-app-mut uppercase tracking-wide mb-2 mt-4">Image-Modell</label>`
+    + `<select id="settingsImageModel" class="w-full px-3 py-2 border border-app-border rounded-md text-sm mb-1" onchange="saveSettingsImageModel()">`
+    + `<option value="nano-banana-2">nano-banana-2 (volle Qualität)</option>`
+    + `<option value="nano-banana-2-lite">nano-banana-2-lite (günstiger)</option>`
+    + `</select>`
+    + `<div class="flex justify-end mb-4"></div>`
+    + `<label class="block text-xs font-semibold text-app-mut uppercase tracking-wide mb-2 mt-4">Charakter-Referenz-URL</label>`
+    + `<input id="settingsCharRefUrl" type="url" value="${escHtml(charRefUrl)}" class="w-full px-3 py-2 border border-app-border rounded-md focus:outline-none focus:ring-2 focus:ring-app-acc text-sm mb-1" placeholder="https://…">`
+    + `<div class="flex justify-end mb-2"><button onclick="saveSettingsCharRef()" class="sm ghost">💾 Speichern</button></div>`
+    + `<div class="row" style="margin-top:8px">`
+    + `<button class="sm ghost" onclick="$('charRefUploadFile').click()" style="flex:1">📁 Bild hochladen</button>`
+    + `<button class="sm ghost" id="btnCharRef" onclick="genCharRef()" style="flex:1">✨ Aus Master generieren</button>`
+    + `<button class="sm ghost" onclick="clearCharRef()" style="color:var(--mut)">✕ Löschen</button>`
+    + `</div>`
+    + `<div id="charRefUploadArea" style="display:none;margin-top:10px;padding:12px;background:var(--surface-2);border-radius:var(--radius-sm)">`
+    + `<p class="hint" style="margin-bottom:8px">Wird direkt hochgeladen und verlinkt.</p>`
+    + `<div class="row"><button class="sm blue" id="charRefUploadBtn" onclick="uploadCharRefImage()">Hochladen & als Referenz setzen</button>`
+    + `<button class="sm ghost" onclick="cancelCharRefUpload()">Abbrechen</button></div>`
+    + `</div>`;
+  document.getElementById('settingsImageModel').value = imgModel;
+
   // Brand-Color pro Channel — wird live aus dem ersten Video / channels-default abgeleitet
   const channels = (await api('/api/channels')).channels || [];
   const cur = channels.find(c => c.id === ACTIVE_CHANNEL) || {};
@@ -1171,6 +1251,10 @@ async function saveSettingsMaster(){
 async function saveSettingsVidMaster(){
   const vm = $('settingsVidMaster').value;
   await ch_api('/api/vid_master', { vid_master: vm });
+  showToast('gespeichert ✓');
+}
+async function saveSettingsImageModel(){
+  await ch_api('/api/image_model', {model: $('settingsImageModel').value});
   showToast('gespeichert ✓');
 }
 async function saveSettingsCharRef(){
@@ -1347,110 +1431,7 @@ function startPlanPoll(){
   _planPollTimer = setInterval(poll, 2000);
 }
 
-// ---- Audio upload ----
-let audioB64=null, audioMime=null, audioName=null;
-
-function audioSelected(file){
-  const f = file || $('audioFile').files[0];
-  if(!f) return;
-  audioName=f.name; audioMime=f.type||'audio/mpeg';
-  $('audioLabel').textContent = f.name+' ('+( f.size/1024/1024).toFixed(1)+' MB)';
-  $('audioLabel').style.display='block';
-  const player=$('audioPlayer');
-  player.src=URL.createObjectURL(f);
-  player.style.display='block';
-  $('transStatus').textContent='Datei wird gelesen …';
-  $('transBtn').disabled=true;
-  const reader=new FileReader();
-  reader.onload=e=>{
-    audioB64=e.target.result.split(',')[1];
-    $('transBtn').disabled=false;
-    $('transStatus').textContent='Bereit – '+f.name;
-    updateProduceCardVisibility();
-  };
-  reader.readAsDataURL(f);
-}
-
-function dragOver(e){ e.preventDefault(); $('dropzone').classList.add('drag'); }
-function dragLeave(){ $('dropzone').classList.remove('drag'); }
-function dropFile(e){
-  e.preventDefault(); $('dropzone').classList.remove('drag');
-  const f=e.dataTransfer.files[0];
-  if(f && f.type.startsWith('audio/')){ audioSelected(f); }
-}
-
-function setStep(n){
-  ['step1','step2','step3'].forEach((id,i)=>{
-    const el=$(id);
-    el.className = i+1<n?'done': i+1===n?'active':'';
-  });
-}
-
-let _pollTimer = null;
-function startStatusPoll(){
-  _pollTimer = setInterval(async()=>{
-    const s = await fetch('/api/transcribe_status').then(r=>r.json()).catch(()=>null);
-    if(!s) return;
-    const pct = Math.round(s.step / s.total * 100);
-    $('transStatus').textContent = s.msg || '…';
-    $('barFill').style.width = pct + '%';
-    const stepMap = {1:'step1', 2:'step2', 3:'step3', 4:'step3'};
-    ['step1','step2','step3'].forEach(id=>$(id).className='');
-    if(stepMap[s.step]) $(stepMap[s.step]).className='active';
-    if(!s.running){ stopStatusPoll(); }
-  }, 1200);
-}
-function stopStatusPoll(){
-  if(_pollTimer){ clearInterval(_pollTimer); _pollTimer=null; }
-}
-
-async function transcribeAudio(){
-  if(!audioB64) return;
-  const btn=$('transBtn');
-  btn.disabled=true;
-  $('transSteps').style.display='flex';
-  $('barFill').style.width='0%';
-  $('planArea').style.display='none';
-
-  setStep(1); $('transStatus').textContent='Datei wird hochgeladen …';
-  const upRes=await fetch('/api/upload_audio',{
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({data:audioB64, mime:audioMime, name:audioName, channel:ACTIVE_CHANNEL, video:ACTIVE_VIDEO})
-  }).then(r=>r.json());
-
-  if(!upRes.ok){
-    $('transStatus').textContent='Upload-Fehler: '+(upRes.error||'unbekannt');
-    btn.disabled=false; return;
-  }
-
-  setStep(2); $('transStatus').textContent='Verbinde mit Gemini …';
-  startStatusPoll();
-
-  const transSec = CURRENT_MODE === 'video' ? +(($('veoDuration')||{}).value||8) : +$('sec').value;
-  const r=await fetch('/api/transcribe',{
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({sec:transSec, channel:ACTIVE_CHANNEL, video:ACTIVE_VIDEO})
-  }).then(r=>r.json());
-
-  stopStatusPoll();
-
-  if(r.error){
-    $('transStatus').textContent='Fehler: '+r.error;
-    $('barFill').style.width='0%';
-    btn.disabled=false; return;
-  }
-
-  $('barFill').style.width='100%';
-  $('transStatus').textContent='Fertig ✓';
-  ['step1','step2','step3'].forEach(id=>$(id).className='done');
-  SCENES=r.scenes||[];
-  renderScenes('audio');
-  $('planArea').style.display=SCENES.length?'block':'none';
-  if(r.characters) suggestCharsFromPlan(r.characters);
-  btn.disabled=false;
-}
-
-// ---- ElevenLabs voiceover (Phase 1) ----------------------------------------------
+// ---- ElevenLabs voiceover (Phase 1) ----
 // Mirrors /api/upload_audio + /api/transcribe: the ElevenLabs generate endpoint is a
 // single POST that mirrors that flow but skips the Gemini transcription step because
 // word timestamps come from the provider. After the call returns, /api/voiceover_status
@@ -2194,31 +2175,16 @@ function downloadFinalVideo(){
 }
 
 // ---- Ein-Knopf-Orchestrator (Phase 4.5) ----
-// Verkettet Plan/Transkription -> Alle Bilder generieren -> Rendern in einem einzigen
-// Server-Job (_produce_worker), exakt dasselbe Muster wie die drei Einzel-Jobs, die es
-// aufruft. Nur im Bild-Modus sichtbar (der Veo/Grok-Pfad hat eine eigene, unangetastete
-// Zusammenschnitt-Logik) und erst, sobald überhaupt Rohmaterial vorliegt: ein bereits
-// bestehender Plan, ein ausgewähltes Audio-File, oder eingetippter Skript-Text.
 function updateProduceCardVisibility(){
   const card = $('produceCard');
   if(!card) return;
   const isVideo = CURRENT_MODE === 'video';
   const hasPlan = SCENES.length > 0;
-  const hasAudio = !!audioB64;
   const hasScript = !!(($('script')||{}).value||'').trim();
-  card.style.display = (!isVideo && (hasPlan || hasAudio || hasScript)) ? '' : 'none';
+  card.style.display = (!isVideo && (hasPlan || hasScript)) ? '' : 'none';
 }
 
 async function produceAll(){
-  // If a freshly chosen audio file hasn't been sent to the server yet, upload it first
-  // — same step transcribeAudio() does — so the orchestrator's "plan" stage finds it.
-  if(audioB64){
-    const upRes = await fetch('/api/upload_audio', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({data: audioB64, mime: audioMime, name: audioName, channel: ACTIVE_CHANNEL, video: ACTIVE_VIDEO})
-    }).then(r => r.json());
-    if(!upRes.ok){ alert('Audio-Upload fehlgeschlagen: ' + (upRes.error||'unbekannt')); return; }
-  }
   const sec = CURRENT_MODE === 'video' ? +(($('veoDuration')||{}).value||8) : +$('sec').value;
   const wpm = +(($('wpm')||{}).value || 150);
   const text = ($('script')||{}).value || '';

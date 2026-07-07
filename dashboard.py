@@ -3897,13 +3897,22 @@ class H(BaseHTTPRequestHandler):
         # ── Title generator ──────────────────────────────────────────────────
         if p == "/api/generate_titles":
             if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
+            # Versuche das Skript zu lesen
+            full_script = ""
             try:
                 plan = json.load(open(v_plan(cid, vid)))
                 full_script = " ".join(s.get("text", "") for s in plan["scenes"])
-            except Exception as e:
-                return self._send(500, {"error": f"Plan lesen: {e}"})
+            except:
+                pass
+            
+            # Falls kein Skript da ist, nimm die Idee aus meta.json
             if not full_script.strip():
-                return self._send(400, {"error": "Kein Skript vorhanden"})
+                meta = load_v_meta(cid, vid)
+                full_script = meta.get("idea", "")
+                
+            if not full_script.strip():
+                return self._send(400, {"error": "Kein Skript und kein Thema vorhanden"})
+            
             print(f"  [Title] Generiere Titel-Optionen …", flush=True)
             titles = generate_titles(full_script, n=5)
             if not titles:
@@ -3920,16 +3929,34 @@ class H(BaseHTTPRequestHandler):
             save_v_meta(cid, vid, meta)
             return self._send(200, {"ok": True})
 
+        if p == "/api/save_idea":
+            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
+            meta = load_v_meta(cid, vid)
+            meta["idea"] = d.get("idea", "").strip()
+            save_v_meta(cid, vid, meta)
+            return self._send(200, {"ok": True})
+
         # ── Thumbnail generator ───────────────────────────────────────────────
         if p == "/api/generate_thumbnail":
             if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
+            # Versuche das Skript zu lesen
+            full_script = ""
             try:
                 plan = json.load(open(v_plan(cid, vid)))
                 full_script = " ".join(s.get("text", "") for s in plan["scenes"])
-            except Exception as e:
-                return self._send(500, {"error": f"Plan lesen: {e}"})
+            except:
+                pass
+            
+            # Falls kein Skript da ist, nimm die Idee aus meta.json
             if not full_script.strip():
-                return self._send(400, {"error": "Kein Skript vorhanden"})
+                meta = load_v_meta(cid, vid)
+                full_script = meta.get("idea", "")
+                # Falls auch Idee leer, nimm ausgewählten Titel
+                if not full_script.strip():
+                    full_script = meta.get("selected_title", "")
+                    
+            if not full_script.strip():
+                return self._send(400, {"error": "Kein Skript, Thema oder Titel vorhanden"})
             mode = get_video_mode(cid, vid)
             try:
                 master_style = (open(ch_vid_master(cid)).read().strip() if mode == "video"

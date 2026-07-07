@@ -1647,3 +1647,22 @@ display:block-Schicht darüber. Die Reihenfolge im OpenVideo/Stepper-Code:
 `tests/test_cinematic_e2e.py::t_phase33_4_2_prep_*` — 2 neue Tests grün (53/53 total):
 - `t_phase33_4_2_prep_no_dead_code` — 7-Tokens Anti-Regression (titleThumbCard, genTitles, genThumbnail, selectTitle, updateTitleThumbCardVisibility, renderTitleList, renderThumbnail)
 - `t_phase33_4_2_prep_central_visibility` — `updateStepVisibility(n)` function + Iteration + Aufruf im goTo()
+
+### 33.4.2 Thema-Card Integration & linearer Script-First Flow (PR 2) (Juli 2026)
+
+**Scope:** Restrukturierung des Wizards zur Durchsetzung eines linearen, Script-First Workflows. Re-Integration von Titel- und Thumbnail-Generierung direkt in Schritt ①, Entfernung der Audio-Upload-Dropzone aus Schritt ②.
+
+#### Thema-Card Restruktur (Schritt ①)
+- **Titel-Generierung:** `genTitleStep()` ruft `/api/generate_titles` auf. Generiert 5 Vorschläge aus dem Thema/der Roh-Idee (`ideaInput`) oder dem Skript, falls bereits vorhanden.
+- **Titel-Auswahl:** `selectTitleStep(t)` setzt das ausgewählte Video-Metadatum.
+- **Thumbnail-Generierung:** `genThumbnailStep()` ruft `/api/generate_thumbnail` auf und rendert eine Vorschau in `thumbSlotStep`. Generiert auf Basis der Idee, des gewählten Titels und des Kanal-Master-Prompts.
+- **Roh-Idee Speicherung:** `saveIdea()` synchronisiert das Thema-Textfeld (`ideaInput`) live an den neuen `/api/save_idea` Backend-Endpoint.
+
+#### Entfernung Audio-Upload (Schritt ②)
+- Da die Script-Analyse (`analyze_script` in `dashboard.py`) die narrative Intelligenz (Pacing, Climax, Crossfade-Übergänge, Whoosh-SFX) steuert, ist das Skript der zwingende Startpunkt der Pipeline.
+- Die Option A ("Voice-Over hochladen") wurde vollständig aus Schritt ② entfernt. Schritt ② ist nun eine reine Skript-Eingabe (oder Skript-Generierung) mit anschließendem "Plan aus Skript erstellen" (`makePlan()`).
+
+#### Tests
+`tests/test_cinematic_e2e.py::t_phase33_4_2_*` — 1 neuer Integrationstest grün (54/54 total):
+- `t_phase33_4_2_thema_card_restructured` — Validiert das Vorhandensein des `ideaInput` Textareas, der `genTitleStep`/`genThumbnailStep` Funktionen, der Container `titleListStep`/`thumbSlotStep` und den Ausschluss der Option A (Audio-Upload) in Schritt ②.
+
