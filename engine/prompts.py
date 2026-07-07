@@ -294,16 +294,18 @@ def _build_image_prompt(scene_prompt, master, char_refs, phase="", is_hook=False
     + PHASE_PROMPT_ADDITIONS hard-injection (Phase C, Juli 2026) + HOOK_PROMPT_ADDITION
     hard-injection (Phase L) + master prompt.
 
-    The phase cue and hook cue are hard-injected (not just hinted to the LLM) so they
-    become real constraints, not soft compliance.
+    Char-Ref-Filter (Phase 1): Müll-Injection-Schutz. Descriptions die wie Test-Müll aussehen
+    (zu kurz, oder explizite Stick-Figure-Markierungen) werden übersprungen — der Master-
+    Prompt würde sonst von inkonsistenten Specs übersteuert.
     """
     char_hint = ""
     if char_refs:
         for cr in char_refs:
             desc = cr.get("description", ""); name = cr.get("name", "Figur")
-            if desc:
-                char_hint += (f"\n\nCHARACTER DESIGN for '{name}': {desc}"
-                              f"\nApply this exact design in whatever pose this scene requires.")
+            if not _is_valid_char_description(desc):
+                continue
+            char_hint += (f"\n\nCHARACTER DESIGN for '{name}': {desc}"
+                          f"\nApply this exact design in whatever pose this scene requires.")
     phase_hint = ""
     if phase:
         phase_cue = _phase_prompt_addition(phase)
@@ -326,18 +328,86 @@ def _build_video_prompt(scene_prompt: str, vid_master: str) -> str:
 
 # ── Character-Sheets ─────────────────────────────────────────────────────────
 
+# ── Phase 1: Müll-Injection-Schutz ──────────────────────────────────────────────
+
+# Test-Stick-Figure-Patterns aus früheren Tests. Diese Strings übersteuern den Master-Prompt
+# und produzieren Strichmännchen statt des gewählten Preset-Stils. Werden als Müll gefiltert.
+_MULL_PATTERNS = (
+    "torso is a single vertical line",
+    "minimalist stick-figure aesthetic",
+    "single lines with rounded joints",
+    "limbs terminate in rounded ends",
+    "no hands or feet",
+)
+
+
+def _is_valid_char_description(desc: str) -> bool:
+    """Müll-Injection-Schutz für charsheet.description.
+
+    Returns False wenn description zu kurz ist (<30 Zeichen) oder explizite
+    Test-Müll-Marker enthält. Echte Char-Beschreibungen sind ≥30 Zeichen.
+    """
+    if not desc:
+        return False
+    desc_stripped = desc.strip()
+    if len(desc_stripped) < 30:
+        return False
+    desc_lower = desc_stripped.lower()
+    if any(p in desc_lower for p in _MULL_PATTERNS):
+        return False
+    return True
+
+
+# ── Phase 2: charsheet-PNGs als data-URL für KIE-Bildreferenz ───────────────────
+
+def _local_png_to_data_url(local_path: str) -> str:
+    """Liest eine lokale PNG-Datei und returnt sie als data:image/png;base64,...
+
+    KIE akzeptiert data-URLs direkt im image_input/image_urls-Parameter. Vermeidet
+    litterbox-Upload (war flaky, 403) und TTL-Probleme. Daten-URL-Größe: ~1.5 MB pro PNG
+    wird zu ~2 MB Base64 — KIE akzeptiert problemlos einzelne Bilder dieser Größe.
+    """
+    with open(local_path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("ascii")
+    return f"data:image/png;base64,{b64}"
+
+
 def load_char_refs(cid="default"):
-    """Load character-sheet metadata from JSON files in the channel's charsheets dir."""
+    """Load character-sheet metadata from JSON files in the channel's charsheets dir.
+
+    Phase 1 (Müll-Injection-Schutz): Jedes Charsheet wird durch _is_valid_char_description
+    validiert. Müll-JSONs werden komplett übersprungen — sonst übersteuern die Test-Stil-Specs
+    den Master-Prompt und produzieren Strichmännchen.
+
+    Phase 2 (Bild-Referenz): Wenn die zugehörige PNG-Datei existiert, wird sie als data:image/png;base64,...
+    an das Bildmodell gehängt (via meta["image_data_url"]). KIE akzeptiert data-URLs direkt —
+    kein litterbox-Upload, kein 403-Risiko, kein TTL-Problem.
+    """
     # Lazy-import to avoid cycle: ch_sheets is in dashboard.py
     from dashboard import ch_sheets
     refs = []
-    for f in os.listdir(ch_sheets(cid)):
-        if f.endswith(".json"):
-            try:
-                meta = json.load(open(os.path.join(ch_sheets(cid), f)))
-                refs.append(meta)
-            except Exception:
-                pass
+    try:
+        files = os.listdir(ch_sheets(cid))
+    except OSError:
+        return refs
+    for f in sorted(files):  # deterministische Reihenfolge
+        if not f.endswith(".json"):
+            continue
+        try:
+            meta = json.load(open(os.path.join(ch_sheets(cid), f)))
+            desc = meta.get("description", "")
+            if not _is_valid_char_description(desc):
+                continue
+            # Phase 2: PNG als data-URL einlesen, wenn vorhanden
+            png_path = os.path.join(ch_sheets(cid), f.replace(".json", ".png"))
+            if os.path.exists(png_path):
+                try:
+                    meta["image_data_url"] = _local_png_to_data_url(png_path)
+                except OSError:
+                    pass
+            refs.append(meta)
+        except Exception:
+            pass
     return refs
 
 
