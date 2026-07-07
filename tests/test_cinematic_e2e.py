@@ -709,6 +709,15 @@ def main():
         summary_section("Phase 33.4.2: Thema-Card integration & linear workflow (PR 2)")
         run(t_phase33_4_2_thema_card_restructured, "33.4.2: Thema-Card restructure & Option A upload removal")
 
+        summary_section("Phase 11 (§11.4): Sequence chain — Doppel-Anker Regressionstests")
+        run(t_seq_double_anchor_refs, "§11.4: _resolve_chain_refs returns 0/1/2 refs correctly")
+        run(t_seq_todo_preserves_scene_order, "§11.3+§11.4 S2: no sort/reverse on `todo` in _batch_generate_worker")
+        run(t_seq_wait_timeout_exceeds_poll_max, "§11.4 S2: _wait timeout > MAX_POLLS*3s")
+        run(t_seq_continuity_prompt_last, "§11.3+§11.4 S3: CONTINUITY block is the last prompt component")
+        run(t_seq_motion_inheritance_precedence, "§11.3+§11.4 R2: _motion_for_scene checks seq_pos FIRST")
+        run(t_seq_renumber_assigns_anchor_zero, "§11.4: _renumber_seq_pos assigns 0,1,2... per seq_id")
+        run(t_seq_batch_worker_docstring_s1_fixed, "§11.4 S1: _batch_generate_worker docstring no longer lies")
+
         print(f"\n=== Result ===")
         print(f"  Passed: {PASSED}")
         print(f"  Failed: {FAILED}")
@@ -1353,6 +1362,209 @@ def t_phase33_4_2_thema_card_restructured():
     # Audio-Upload Dropzone und Option A müssen komplett aus Schritt 2 verschwunden sein
     assert "Option A · Voice-Over hochladen" not in html, "Schritt 2: Option A dropzone must be removed"
     assert "transAudio" not in html or "transcribeAudio" not in html, "Schritt 2: transcribeAudio logic must be removed from Step 2"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 11: Sequence chain (Doppel-Anker) — see CINEMATIC_UPGRADE_PLAN.md §11.4
+# Regression tests for the 4 previously-uncovered functions plus S1 docstring fix.
+# MUST run green BEFORE Phase L (which touches _motion_for_scene, see Schutzregel 2).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def t_seq_double_anchor_refs():
+    """§11.4 (S4 regression): _resolve_chain_refs returns the correct refs.
+
+    seq_pos 1 → exactly 1 ref (anchor; pos-1 == 0 dedup'd)
+    seq_pos 2 → exactly 2 refs (anchor + predecessor, distinct files)
+    seq_pos 0 / no seq_id → empty list, no wait
+    """
+    from engine.scenes import _resolve_chain_refs, _wait_for_chain_scene
+
+    # Plan mit 3-Szenen-Sequenz, Anker + 2 Fortsetzungen, alle mit source_url + file
+    tmp = tempfile.mkdtemp(prefix="seq_test_")
+    try:
+        plan_path = os.path.join(tmp, "plan.json")
+        scenes = [
+            {"i": 0, "seq_id": "s1", "seq_pos": 0, "source_url": "http://a/anchor.jpg", "file": "anchor.jpg"},
+            {"i": 1, "seq_id": "s1", "seq_pos": 1, "source_url": "http://a/cont1.jpg",   "file": "cont1.jpg"},
+            {"i": 2, "seq_id": "s1", "seq_pos": 2, "source_url": "http://a/cont2.jpg",   "file": "cont2.jpg"},
+        ]
+        json.dump({"scenes": scenes}, open(plan_path, "w"))
+
+        # Anchor (seq_pos 0) → no chain refs (normal char_ref only)
+        refs, debug = _resolve_chain_refs(plan_path, scenes[0])
+        assert refs == [], f"anchor must have no chain refs, got {refs}"
+        assert debug == {}, f"anchor must have no chain debug, got {debug}"
+
+        # seq_pos 1 → exactly 1 ref (anchor; prev IS anchor, dedup'd)
+        refs, debug = _resolve_chain_refs(plan_path, scenes[1])
+        assert refs == ["http://a/anchor.jpg"], f"seq_pos 1 must have exactly 1 ref, got {refs}"
+        assert debug.get("chain_anchor_file") == "anchor.jpg"
+        assert "chain_prev_file" not in debug, "seq_pos 1 must NOT have chain_prev_file (dedup'd)"
+
+        # seq_pos 2 → exactly 2 refs (anchor + distinct prev)
+        refs, debug = _resolve_chain_refs(plan_path, scenes[2])
+        assert refs == ["http://a/anchor.jpg", "http://a/cont1.jpg"], f"seq_pos 2 must have 2 refs, got {refs}"
+        assert debug.get("chain_anchor_file") == "anchor.jpg"
+        assert debug.get("chain_prev_file") == "cont1.jpg", f"seq_pos 2 must have chain_prev_file, got {debug}"
+
+        # No seq_id → empty
+        refs, debug = _resolve_chain_refs(plan_path, {"i": 99, "pacing": "calm"})
+        assert refs == []
+        assert debug == {}
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def t_seq_todo_preserves_scene_order():
+    """§11.4 (S2 regression): _batch_generate_worker's `todo` MUST preserve scene order.
+
+    Schutzregel 1: no `sort`/`sorted`/`reverse` on `todo`. If anyone ever sorts
+    `todo` (e.g. "Hook zuerst" in Phase L), anchors and continuations land in
+    parallel batches and deadlock via _wait_for_chain_scene.
+    """
+    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    # Find _batch_generate_worker body
+    i = src.find("def _batch_generate_worker")
+    assert i >= 0, "_batch_generate_worker must still exist in dashboard.py"
+    # Look for `todo` until the function's next def or class
+    # Crude but effective: scan 200 lines after def and check for forbidden calls on `todo`
+    end = src.find("\ndef ", i + 50)
+    if end < 0:
+        end = i + 5000
+    body = src[i:end]
+    # Forbidden: todo.sort(), todo.sorted, sorted(todo), reverse=True on todo, etc.
+    # Allowed: filtering (list comprehensions, `for s in scenes if not s.get("file")`).
+    forbidden = ["todo.sort", "sorted(todo", "todo.reverse", "reversed(todo"]
+    for f in forbidden:
+        assert f not in body, (
+            f"§11.3 Schutzregel 1 violated: _batch_generate_worker contains '{f}'. "
+            f"`todo` MUST preserve original scene order — see CINEMATIC_UPGRADE_PLAN.md §11.3."
+        )
+
+
+def t_seq_wait_timeout_exceeds_poll_max():
+    """§11.4 (S2 regression): _wait_for_chain_scene timeout > IMAGE_JOB_MAX_POLLS * 3s.
+
+    Schutzregel: timeout (170s) must stay > MAX_POLLS * 3s (150s by default).
+    If anyone raises IMAGE_JOB_MAX_POLLS, the wait would silently expire and
+    continuations would lose their chain refs without error.
+    """
+    import re as _re
+    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    # Find IMAGE_JOB_MAX_POLLS
+    m = _re.search(r"IMAGE_JOB_MAX_POLLS\s*=\s*(\d+)", src)
+    assert m, "IMAGE_JOB_MAX_POLLS must be defined"
+    max_polls = int(m.group(1))
+    poll_total_sec = max_polls * 3
+
+    from engine.scenes import _wait_for_chain_scene
+    import inspect
+    sig = inspect.signature(_wait_for_chain_scene)
+    timeout_default = sig.parameters["timeout"].default
+    assert timeout_default > poll_total_sec, (
+        f"_wait_for_chain_scene timeout ({timeout_default}s) must be > "
+        f"IMAGE_JOB_MAX_POLLS * 3s ({poll_total_sec}s). Otherwise continuations "
+        f"silently lose their chain refs."
+    )
+
+
+def t_seq_continuity_prompt_last():
+    """§11.4 (S3 regression): CONTINUITY block is appended LAST to the image prompt.
+
+    Schutzregel 3: master + phase-cue may change, but the CONTINUITY block must
+    stay at the very end — otherwise earlier instructions can dilute or contradict
+    the chain-ref adherence.
+    """
+    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    # Find the CONTINUITY block in _batch_generate_worker
+    i = src.find('"\\n\\nCONTINUITY (STRICT):')
+    assert i >= 0, "CONTINUITY (STRICT) block must still exist in dashboard.py"
+    # Within the next ~80 lines, there must be NO further mutation of full_prompt.
+    # `print()` and `acquire()`/`try:` between CONTINUITY and submit are OK.
+    after = src[i:i+5000]
+    # Any forbidden mutation of full_prompt?
+    forbidden_after_continuity = [
+        'full_prompt += "', 'full_prompt =', 'full_prompt += f',
+    ]
+    for f in forbidden_after_continuity:
+        # Allow only the CONTINUITY line itself (which contains the marker)
+        assert f not in after or after.count(f) == 1, (
+            f"§11.3 Schutzregel 3 violated: full_prompt is mutated AFTER CONTINUITY "
+            f"block (found '{f}' beyond the marker). CONTINUITY must be the LAST "
+            f"prompt component."
+        )
+    # Submit must still happen after CONTINUITY
+    assert "_kie_submit_image(" in after or "gen_image(" in after, (
+        "CONTINUITY block is the last component — submit (_kie_submit_image) must follow"
+    )
+
+
+def t_seq_motion_inheritance_precedence():
+    """§11.4 (Schutzregel 2): _motion_for_scene checks seq_pos FIRST, before any
+    new motion rule (Phase L is_hook, future overrides, etc.).
+    """
+    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    i = src.find("def _motion_for_scene")
+    assert i >= 0, "_motion_for_scene must exist"
+    body_start = src.find("\n", i) + 1
+    # Read until next `def ` at top-level
+    end = src.find("\ndef ", body_start)
+    if end < 0:
+        end = body_start + 3000
+    body = src[body_start:end]
+    # First condition must reference seq_pos (the inheritance check)
+    # Find the first `if ` after the function start
+    first_if = body.find("if ")
+    assert first_if >= 0, "_motion_for_scene must have at least one if"
+    snippet = body[first_if:first_if + 300]
+    assert "seq_pos" in snippet or "seq_id" in snippet, (
+        f"_motion_for_scene: first condition must be the seq_pos inheritance check "
+        f"(Schutzregel 2). Got: {snippet[:200]!r}"
+    )
+
+
+def t_seq_renumber_assigns_anchor_zero():
+    """§11.4 (basic correctness): _renumber_seq_pos assigns 0,1,2,... per seq_id."""
+    from engine.scenes import _renumber_seq_pos
+    scenes = [
+        {"i": 0, "seq_id": "s1"},
+        {"i": 1, "seq_id": "s1"},
+        {"i": 2, "seq_id": "s1"},
+        {"i": 3, "seq_id": "s2"},
+        {"i": 4, "seq_id": "s2"},
+        {"i": 5},  # no seq_id
+    ]
+    _renumber_seq_pos(scenes)
+    assert scenes[0]["seq_pos"] == 0, "first scene of s1 must be anchor"
+    assert scenes[1]["seq_pos"] == 1
+    assert scenes[2]["seq_pos"] == 2
+    assert scenes[3]["seq_pos"] == 0, "first scene of s2 must be anchor"
+    assert scenes[4]["seq_pos"] == 1
+    assert scenes[5]["seq_pos"] == 0, "no seq_id → seq_pos=0 (no anchor, harmless default)"
+
+
+def t_seq_batch_worker_docstring_s1_fixed():
+    """§11.4 (S1 regression): _batch_generate_worker docstring no longer claims
+    'no ordering dependency' — it now correctly notes the chain-ref dependency.
+    """
+    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    i = src.find("def _batch_generate_worker")
+    assert i >= 0
+    # Read the docstring — find the NEXT triple-quote AFTER the opening one
+    open_q = src.find('"""', i)
+    assert open_q > 0
+    close_q = src.find('"""', open_q + 3)
+    assert close_q > 0
+    docstring = src[open_q:close_q + 3]
+    # Old buggy phrase must be gone
+    assert "no ordering dependency" not in docstring, (
+        "S1 bug NOT fixed: _batch_generate_worker docstring still says 'no ordering dependency' "
+        "while the function calls _resolve_chain_refs 70 lines below."
+    )
+    # New correct phrase must be present
+    assert "_resolve_chain_refs" in docstring, (
+        f"S1 fix incomplete: docstring must reference _resolve_chain_refs. Got: {docstring[:300]!r}"
+    )
 
 
 if __name__ == "__main__":
