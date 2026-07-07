@@ -74,7 +74,7 @@ __all__ = [
     "_probe_video_encoder", "_apply_sync_invariant",
     "_build_motion", "_normalize_motion", "_motion_for_scene",
     "_overlay_specs_for_scene",
-    "_render_clip", "_assemble_clips", "_render_selfcheck",
+    "_render_clip", "_assemble_clips", "_mux_audio", "_render_selfcheck",
     "_transition_for_scene", "_transition_after_hook", "_has_transition_before",
     "_clip_duration_sec", "_crossfade_clips",
     "render_text_overlay_png", "render_title_card_png_via_venv",
@@ -483,6 +483,22 @@ def _assemble_clips(clip_paths: list, out_path: str) -> None:
         os.remove(list_path)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg Zusammenschnitt fehlgeschlagen: {result.stderr.decode(errors='replace')[-300:]}")
+
+
+def _mux_audio(silent_path: str, audio_path: str, out_path: str) -> None:
+    """Final mux: one continuous voiceover track over the assembled silent video.
+    -af apad pads the audio with a small buffer if it's a touch shorter than the video —
+    a safety net ON TOP of the integer-frame sync invariant (_apply_sync_invariant), not
+    a replacement for it; if there's still a residual mismatch, the audio gets padded
+    rather than the video getting truncated. -movflags +faststart moves the MP4 metadata
+    to the front so the <video> preview can start playing before the whole file has
+    downloaded — without it the browser waits for the complete file first."""
+    cmd = ["ffmpeg", "-y", "-i", silent_path, "-i", audio_path,
+           "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+           "-af", "apad=pad_dur=0.3", "-shortest", "-movflags", "+faststart", out_path]
+    result = subprocess.run(cmd, capture_output=True, timeout=180)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg Audio-Mux fehlgeschlagen: {result.stderr.decode(errors='replace')[-300:]}")
 
 
 def _render_selfcheck(final_path: str, expected_audio_duration: float) -> dict:
