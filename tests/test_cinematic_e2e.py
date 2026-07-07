@@ -809,6 +809,11 @@ def main():
         run(t_phase_o_no_accent_expr_unchanged, "O.2: ohne accent_t = byte-identisch (Original z_expr als Fallback)")
         run(t_phase_o_accent_zoom_bounded, "O.2: amp=0.05 + sigma=0.06s (Jitter-Bound)")
 
+        summary_section("Phase P: Ink-Style-Grading-Refinement (colorbalance + vignette)")
+        run(t_phase_d_color_filter_present, "P: PHASE_COLOR_FILTER eq/colorbalance für alle 4 Phasen")
+        run(t_phase_p_climax_has_vignette, "P: CLIMAX hat vignette=PI/5 (Plan §3)")
+        run(t_phase_p_legacy_plan_identity, "P: Szenen ohne Phase bekommen keinen Filter")
+
         summary_section("Phase N: Animierte Daten-Overlays (Count-Up)")
         run(t_phase_n_overlay_sequence_mode, "N.1: render_overlay.py counter_anim-Modus + Smoothstep")
         run(t_phase_n_data_visual_prompt_never_invents, "N.3: analyze_script-Prompt hat data_visuals-Schema")
