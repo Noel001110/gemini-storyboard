@@ -2203,6 +2203,16 @@ class H(BaseHTTPRequestHandler):
         vid = qs.get("video", [""])[0]
         if p == "/":
             return self._send(200, open(os.path.join(HERE, "dashboard.html"), encoding="utf-8").read(), "text/html; charset=utf-8")
+        # Phase 38: Stil-Presets abfragen (für UI-Dropdown)
+        if p == "/api/presets":
+            from engine.presets import PRESET_MASTERS, PRESET_DESCRIPTIONS, DEFAULT_PRESET
+            return self._send(200, {
+                "presets": [
+                    {"id": pid, "description": PRESET_DESCRIPTIONS[pid]}
+                    for pid in PRESET_MASTERS
+                ],
+                "default": DEFAULT_PRESET,
+            })
         if p == "/api/channels":
             # UI-Rebuild Phase 33.3 — Sidebar braucht pro Channel einen Video-Counter
             # und Brand-Color. Wir packen die beiden Felder direkt ins channels-Response.
@@ -2447,12 +2457,18 @@ class H(BaseHTTPRequestHandler):
             chs.append({"id": cid_new, "name": name})
             save_channels(chs)
             ensure_channel(cid_new)
-            # copy current channel's master as starting point
-            src = ch_master(cid if cid in ids else "default")
+            # Phase 38: Stil-Preset-Auswahl. Falls 'preset' mitgegeben wird und gültig
+            # ist, wird das entsprechende Master-Preset nach channels/<cid>/master_prompt.txt
+            # geschrieben. Existierende master_prompt.txt wird NIE überschrieben (Q.4).
+            preset_id = d.get("preset")
             dst = ch_master(cid_new)
-            if os.path.exists(src) and not os.path.exists(dst):
-                shutil.copy2(src, dst)
-            return self._send(200, {"ok": True, "id": cid_new, "name": name})
+            if not os.path.exists(dst):
+                from engine.presets import PRESET_MASTERS, DEFAULT_PRESET
+                chosen_preset = preset_id if preset_id in PRESET_MASTERS else DEFAULT_PRESET
+                with open(dst, "w") as f:
+                    f.write(PRESET_MASTERS[chosen_preset])
+            return self._send(200, {"ok": True, "id": cid_new, "name": name,
+                                     "preset": chosen_preset if 'chosen_preset' in dir() else None})
         if p == "/api/channels/delete":
             chs = load_channels()
             if len(chs) <= 1:

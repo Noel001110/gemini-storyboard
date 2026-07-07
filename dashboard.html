@@ -92,6 +92,10 @@
   .ch-new-form input:focus{border-color:var(--acc)}
   .ch-new-form .row{display:flex;gap:4px}
   .ch-new-form button{flex:1;font-size:11px;padding:6px 0}
+  /* Phase 38: Stil-Preset-Select + Description */
+  .ch-new-preset{width:100%;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:12px;padding:7px 9px;outline:none;cursor:pointer}
+  .ch-new-preset:focus{border-color:var(--acc)}
+  .ch-new-preset-desc{font-size:10px;color:var(--mut);padding:2px 4px;line-height:1.35;min-height:24px}
   .main{flex:1;min-width:0;display:flex;flex-direction:column}
   header{padding:14px 28px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;background:var(--surface)}
   header h1{font-size:15px;margin:0;font-weight:600}
@@ -222,6 +226,10 @@
   <div class="ch-add" id="chAddBtn" onclick="showNewChannelForm()">+ Neuer Kanal</div>
   <div class="ch-new-form" id="chNewForm">
     <input type="text" id="chNewName" placeholder="Kanal-Name …" onkeydown="if(event.key==='Enter')confirmNewChannel();if(event.key==='Escape')hideNewChannelForm()">
+    <select id="chNewPreset" class="ch-new-preset" title="Stil-Preset (Phase 38)">
+      <!-- wird von loadPresetOptions() gefüllt -->
+    </select>
+    <div id="chNewPresetDesc" class="ch-new-preset-desc"></div>
     <div class="row">
       <button class="sm" onclick="confirmNewChannel()">Erstellen</button>
       <button class="sm ghost" onclick="hideNewChannelForm()">Abbrechen</button>
@@ -786,6 +794,39 @@ function showNewChannelForm(){
   $('chAddBtn').style.display='none';
   const form=$('chNewForm'); form.style.display='flex';
   $('chNewName').value=''; $('chNewName').focus();
+  loadPresetOptions();  // Phase 38: Preset-Dropdown füllen
+}
+
+// Phase 38: Stil-Preset-Dropdown initialisieren
+let PRESET_OPTIONS = [];  // cached, wird bei jedem Form-Open re-loaded
+async function loadPresetOptions(){
+  try {
+    const r = await api('/api/presets', 'GET');
+    PRESET_OPTIONS = r.presets || [];
+    const sel = $('chNewPreset');
+    if (!sel) return;
+    sel.innerHTML = '';
+    for (const p of PRESET_OPTIONS) {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.id.replace(/_/g, ' ');
+      if (p.id === r.default) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    // Description für Default anzeigen
+    updatePresetDescription();
+    sel.onchange = updatePresetDescription;
+  } catch (e) {
+    console.warn('[Phase 38] loadPresetOptions failed:', e);
+  }
+}
+function updatePresetDescription(){
+  const sel = $('chNewPreset');
+  const desc = $('chNewPresetDesc');
+  if (!sel || !desc) return;
+  const id = sel.value;
+  const opt = PRESET_OPTIONS.find(p => p.id === id);
+  desc.textContent = opt ? opt.description : '';
 }
 function hideNewChannelForm(){
   $('chNewForm').style.display='none';
@@ -793,8 +834,9 @@ function hideNewChannelForm(){
 }
 async function confirmNewChannel(){
   const name=$('chNewName').value.trim(); if(!name) return;
+  const preset = $('chNewPreset')?.value || null;
   hideNewChannelForm();
-  const r = await api('/api/channels','POST',{name, channel: ACTIVE_CHANNEL});
+  const r = await api('/api/channels','POST',{name, channel: ACTIVE_CHANNEL, preset});
   if(r.ok){ await switchChannel(r.id, r.name); }
 }
 
