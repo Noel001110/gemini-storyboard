@@ -79,7 +79,8 @@
   .ch-item:hover{background:var(--surface-2)}
   .ch-item.active{background:var(--acc-soft);color:var(--acc);font-weight:600}
   /* Brand-Color-Dot — 8px statt 6px (33.3: bessere Sichtbarkeit) */
-  .ch-dot{width:8px;height:8px;border-radius:50%;background:var(--ch-brand, var(--border));flex-shrink:0;border:1.5px solid var(--ch-brand, var(--border));box-shadow:0 0 0 1px var(--surface)}
+  .ch-dot{width:8px;height:8px;border-radius:50%;background:var(--ch-brand, var(--mut));flex-shrink:0;border:1.5px solid var(--ch-brand, var(--mut));box-shadow:0 0 0 1px var(--surface)}
+  /* Phase 33.7/33.8: kein brand_color → neutrales Graphit (--mut), nicht mehr Border-Farbe. */
   .ch-item.active .ch-dot{box-shadow:0 0 0 2px var(--acc-soft)}
   .ch-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   /* Counter-Badge rechts: Video-Anzahl + Active-Count-Indikator */
@@ -143,6 +144,16 @@
   .video-card-new{border:1.5px dashed var(--border);display:flex;flex-direction:column;align-items:center;justify-content:center;aspect-ratio:16/9;color:var(--mut);gap:6px;background:transparent}
   .video-card-new:hover{border-color:var(--acc);color:var(--acc);background:var(--acc-soft)}
   .video-card-new .plus{font-size:26px;line-height:1}
+  /* Phase 33.8 — "Weiterarbeiten"-Karte ganz oben in der Video-Liste */
+  .continue-card{background:linear-gradient(135deg, var(--acc-soft), var(--surface));border:1.5px solid var(--acc);border-radius:var(--radius);padding:18px 20px;margin-bottom:14px;display:flex;flex-direction:column;gap:6px;align-items:flex-start}
+  .continue-label{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--acc);font-weight:700}
+  .continue-name{font-size:18px;font-weight:600;color:var(--text);line-height:1.3}
+  .continue-hint{font-size:11px;color:var(--mut);line-height:1.4;margin-bottom:4px}
+  .continue-card .sm.primary{background:var(--acc);color:#fff;border:none;font-weight:600;padding:8px 16px;font-size:13px;cursor:pointer;border-radius:var(--radius-sm)}
+  .continue-card .sm.primary:hover{background:var(--acc-hover)}
+  /* Phase 33.8 — Empty-State-Hint wenn Channel keine Videos hat */
+  .video-empty-hint{background:var(--surface);border:1px dashed var(--border);border-radius:var(--radius);padding:14px 16px;margin-bottom:14px;color:var(--mut);font-size:12px;line-height:1.5}
+  .video-empty-hint strong{color:var(--text);display:block;margin-bottom:4px;font-size:13px}
   .video-actions{display:flex;gap:4px;padding:0 14px 12px}
   .video-actions button{flex:1;font-size:11px;padding:5px 0}
   .back-link{display:inline-flex;align-items:center;gap:6px;color:var(--mut);font-size:13px;cursor:pointer;margin-bottom:14px;font-weight:500}
@@ -320,6 +331,10 @@
     </div>
 
     <div class="tab-pane active" id="toptab-videos">
+      <div id="videoEmptyHint" class="video-empty-hint" style="display:none">
+        <strong>Noch kein Video in diesem Kanal.</strong>
+        Klick auf <em>+ Neues Video</em> unten rechts oder oben auf <em>Thema & Idee</em>.
+      </div>
       <div class="video-grid" id="videoGrid"></div>
     </div>
 
@@ -755,14 +770,15 @@ async function loadChannels(){
   channels.forEach(ch=>{
     const el = document.createElement('div');
     el.className = 'ch-item' + (ch.id===ACTIVE_CHANNEL?' active':'');
-    // Phase 33.3 — Brand-Color-Dot (links) + Video-Counter + Active-Counter.
-    // Wenn keine brand_color gesetzt, generiert HSL aus dem Channel-Namen einen
-    // konsistenten Farbton. Damit hat jeder Channel eine visuell unterscheidbare
-    // Sidebar-Identität ohne explizite Konfiguration.
+    // Phase 33.3 + 33.7: Brand-Color-Dot. Wenn brand_color explizit gesetzt → verwende sie.
+    // Sonst (nameToHsl gibt jetzt null zurück per 33.7) → CSS-Default 'var(--mut)'
+    // (neutrales Graphit), kein hässlicher Background:null-Bug.
     const color = ch.brand_color || nameToHsl(ch.name || ch.id);
-    el.style.setProperty('--ch-brand', color);
+    if (color) el.style.setProperty('--ch-brand', color);
+    // CSS-Variable setzen wir nur wenn explizit eine Farbe da ist; sonst greift
+    // der CSS-Default aus '.ch-dot { background: var(--ch-brand, var(--mut)); }'
     el.innerHTML =
-      `<span class="ch-dot" style="background:${escHtml(color)}"></span>`
+      `<span class="ch-dot${color ? '' : ' default'}"></span>`
       + `<span class="ch-name">${escHtml(ch.name)}</span>`
       + `<span class="ch-cnt">${ch.video_count ?? 0}</span>`
       + (ch.active_count ? `<span class="ch-active" title="Aktive Videos">${ch.active_count}</span>` : '')
@@ -872,10 +888,33 @@ async function loadVideoList(){
   const r = await ch_get('/api/videos');
   VIDEOS = r.videos || [];
   renderVideoGrid();
+  // Phase 33.8: Onboarding-Hint, wenn Channel noch keine Videos hat.
+  // Nicht aufdringlich (kein Modal), sondern ein kleiner Hinweis in der Liste selbst
+  // — das '+ Neues Video'-Card ist visuell schon ein Anker.
+  const hint = $('videoEmptyHint');
+  if (hint) hint.style.display = VIDEOS.length === 0 ? '' : 'none';
 }
 
 function renderVideoGrid(){
   const g = $('videoGrid'); g.innerHTML = '';
+  // Phase 33.8 — "Weiterarbeiten"-Karte ganz oben.
+  // Heuristik: das neueste Video (höchstes created_ts) gilt als "in Bearbeitung".
+  // Sortierung absteigend nach created_ts; bei fehlendem Timestamp fällt's auf Index 0 zurück.
+  const sorted = [...VIDEOS].sort((a,b) => (b.created_ts||0) - (a.created_ts||0));
+  const lastActive = sorted[0];
+
+  if (lastActive) {
+    const continueCard = document.createElement('div');
+    continueCard.className = 'continue-card';
+    continueCard.innerHTML = `
+      <div class="continue-label">↪ Weiterarbeiten an</div>
+      <div class="continue-name">${escHtml(lastActive.name)}</div>
+      <div class="continue-hint">Klick öffnet das Video dort, wo du aufgehört hast</div>
+      <button class="sm primary" onclick="openVideo('${escHtml(lastActive.id).replace(/'/g,"&#39;")}', '${escHtml(lastActive.name).replace(/'/g,"&#39;")}')">▶ Video öffnen</button>
+    `;
+    g.appendChild(continueCard);
+  }
+
   VIDEOS.forEach(v=>{
     const card = document.createElement('div');
     card.className = 'video-card';
