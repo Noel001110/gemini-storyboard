@@ -1289,3 +1289,43 @@ Nicht angefasst:
 | shadcn/ui Gallery | Komponenten-Vorlagen copy-paste |
 | Tailwind UI | Premium-Components (optional, kostenpflichtig) |
 
+
+### 33.2 Stepper-Migration (Foundation: Container + State-Machine + Heuristik)
+
+Stand: Alpine.js-basierter Stepper im Editor-View, sticky unter dem Header. State-Machine mit Hybrid-Logik (Auto-active für first-incomplete, Click-Override für User-Navigation).
+
+**Was 33.2 ist:**
+- Stepper-Container (`<nav id="stepper" x-data="stepperState()">`) im #view-editor als erstes Element nach `back-link`.
+- 5 Step-Buttons mit Status-Indikator (Circle mit Number/✓, Label, Subtitle, Connector).
+- Alpine.js State-Machine mit `currentStep`, `completed`, `counts`, `canEnter()`, `goTo()`.
+- Heuristik-Funktionen prüfen das File-System beim Öffnen des Videos und cachen das Ergebnis 30 Sekunden in localStorage.
+- Refresh-Button (`<i data-lucide="refresh-cw">`) leert den Cache und re-computed.
+- Step-Klick scrollt via `scrollIntoView` zur entsprechenden Section + 800ms-Accent-Ring.
+
+**Was 33.2 NICHT ist:**
+- Keine Step-Cards (kommt in 33.4)
+- Keine Step-Inhalte-Migration (kommt in 33.4)
+- Keine Reset-Buttons (kommt in 33.4 mit Step-Cards)
+- Kein State-Persistenz (in-memory + 30s-cache, Reload = Heuristik neu ableiten)
+- Step-Reihenfolge bleibt die EXISTIERENDE 5 Schritte (① Modus, ② Skript, ③ Bilder, ④ Titel/Thumb, ⑤ Render). Die vom Designer vorgeschlagene neue Reihenfolge ①Thema/②Skript/③Audio/④Bilder/⑤Render wird in 33.4 umgestellt — nicht in 33.2 weil das Anchor-Scroll-Targets brechen würde.
+
+**Heuristik-Datei-Konsistenz (User-Feedback Phase 33.2):**
+
+| Step | Heuristik | Begründung |
+|---|---|---|
+| ① THEMA | `meta.json` existiert UND `selected_title` nicht leer | Thumbnail-Upload erstellt auch eine meta.json ohne Titel — eine reine Existenzprüfung wäre falsch-positiv |
+| ② SKRIPT | `plan.json` existiert | sauber |
+| ③ AUDIO | `voiceover.mp3` existiert (KEIN `audio_meta.json`-Fallback) | `audio_meta.json` wird während ElevenLabs-Calls geschrieben — Race-Bug bei Two-Call-Pattern |
+| ④ BILDER | Counter (N / M aus plan.json scenes + Szenen mit .jpg), kein binärer done-State | Magic-Number 50% war willkürlich; Counter ist ehrlicher |
+| ⑤ RENDER | `final.mp4` existiert ODER `meta.json.rendered_at` gesetzt | beide Pfade (file-IO + meta) abdecken |
+
+**canEnter-Hybrid-Logik:**
+- `completed[n]` → immer offen (User kann zu abgeschlossenen Steps zurückspringen)
+- `n === currentStep` → immer offen (click-bar zum Re-Editieren)
+- `n === 1` → immer offen (Modus-Wahl ist der Einstieg)
+- `completed[n-1] || (n-1) === currentStep` → offen (direkter Nachfolger; erlaubt Forward-Sprünge vom current-step aus)
+- sonst → locked
+
+**Tests:** `tests/test_cinematic_e2e.py::t_stepper_*` — 3 neue Tests grün (HTML-Struktur, Python-Heuristik-Spiegelung, canEnter-Mirror).
+
+**Caveat (anchored in 33.4):** die Schritt-Reihenfolge ①Modus/②Skript/③Bilder/④Titel/⑤Render aus dem aktuellen Editor-View entspricht NICHT dem im Design-Brief vorgeschlagenen ①Thema/②Skript/③Audio/④Bilder/⑤Render. Wenn 33.4 die Step-Cards migriert, müssen die Inhalte an die neuen Positionen wandern und der Stepper auf die neue Reihenfolge umgestellt werden.

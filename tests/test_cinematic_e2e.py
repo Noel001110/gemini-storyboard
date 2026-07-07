@@ -666,6 +666,11 @@ def main():
         run(t_round5_image_job_worker_race_detect, "R5-Fix4: _batch_generate_worker ACTIVE_SCENE_JOBS dedup")
         run(t_round5_whisper_word_count_mismatch_warn, "R5-Fix5: align_scenes_to_whisper word-count-drift warning")
 
+        summary_section("Phase 33.2: UI Stepper (Heuristik + State-Machine)")
+        run(t_stepper_html_structure, "33.2: #stepper nav + x-data + 5 data-step-section attributes")
+        run(t_stepper_heuristic_python_mirror, "33.2: Heuristik (5 Regeln, race-bug-safe)")
+        run(t_stepper_state_machine_canEnter, "33.2: canEnter State-Machine (Hybrid active-State)")
+
         print(f"\n=== Result ===")
         print(f"  Passed: {PASSED}")
         print(f"  Failed: {FAILED}")
@@ -757,6 +762,144 @@ def t_round5_whisper_word_count_mismatch_warn():
         "Round-5 Fix-5 missing: drift_ratio computation not present in align_scenes_to_whisper"
     assert "WARNUNG" in body, \
         "Round-5 Fix-5 missing: warning-log not emitted on word-count mismatch"
+
+
+# ─── Phase 33.2 — Stepper Tests ────────────────────────────────────────────
+
+def t_stepper_html_structure():
+    """Phase 33.2: Stepper-Container ist im #view-editor als erstes Element nach
+    back-link, mit Alpine x-data="stepperState()" gebunden. Die 5 Step-Cards
+    müssen data-step-section="N" Attribute haben (Anchor-Scroll-Targets)."""
+    src = open(os.path.join(ROOT, "dashboard.html")).read()
+    # Stepper-Container muss existieren + mit Alpine gebunden sein
+    assert '<nav id="stepper"' in src, "Phase 33.2 missing: #stepper nav element"
+    assert 'x-data="stepperState()"' in src, \
+        "Phase 33.2 missing: x-data binding to stepperState()"
+
+    # data-step-section auf allen 5 Steps
+    for n in (1, 2, 3, 4, 5):
+        assert f'data-step-section="{n}"' in src, \
+            f"Phase 33.2 missing: data-step-section=\"{n}\" auf Step {n} card"
+
+    # Step-Definitionen (die 5 Label-Texte) müssen in der JS-Funktion vorhanden sein
+    for label in ("'Thema'", "'Skript'", "'Audio'", "'Bilder'", "'Render'"):
+        assert label in src, \
+            f"Phase 33.2 missing: stepperState() definiert step '{label.strip(chr(39))}'"
+
+
+def t_stepper_heuristic_python_mirror():
+    """Phase 33.2: Heuristik-Spiegelung in Python (gleiche Regeln wie die JS-Heuristik
+    in dashboard.html). Verifiziert:
+    - ① THEMA: meta.json + selected_title NOT empty
+    - ② SKRIPT: plan.json existiert
+    - ③ AUDIO: voiceover.mp3 existiert (KEIN audio_meta.json als Fallback)
+    - ⑤ RENDER: final.mp4 ODER meta.json.rendered_at
+    """
+    # Pure-Python-Spiegelung der JS-Heuristik aus stepperState().
+    def heuristic(files: dict) -> dict:
+        """files = {'meta.json': str, 'plan.json': str, 'voiceover.mp3': None,
+                   'audio_meta.json': str, 'final.mp4': None}
+        Returns {step_n: completed_bool}"""
+        completed = {}
+        # ① THEMA: meta.json + selected_title
+        meta = json.loads(files.get('meta.json', '{}'))
+        if files.get('meta.json') and (meta.get('selected_title') or '').strip():
+            completed[1] = True
+        # ② SKRIPT
+        if files.get('plan.json'):
+            completed[2] = True
+        # ③ AUDIO: NUR voiceover.mp3, KEIN audio_meta.json-Fallback
+        if files.get('voiceover.mp3') is not None:
+            completed[3] = True
+        # ⑤ RENDER: final.mp4 OR rendered_at
+        if files.get('final.mp4') is not None or meta.get('rendered_at'):
+            completed[5] = True
+        return completed
+
+    # Test 1: empty video — nothing done
+    assert heuristic({}) == {}, "empty: nothing should be done"
+
+    # Test 2: only meta.json without selected_title → ① NOT done
+    assert heuristic({'meta.json': '{}'}) == {}, \
+        "empty meta without selected_title → ① must NOT be completed"
+
+    # Test 3: meta.json with selected_title → ① done
+    assert heuristic({'meta.json': '{"selected_title": "Yeonmi V3"}'}) == {1: True}, \
+        "selected_title → ① completed"
+
+    # Test 4: plan.json exists → ② done (regardless of audio)
+    assert heuristic({'plan.json': '{}'}) == {2: True}, \
+        "plan.json → ② completed"
+
+    # Test 5: audio_meta.json alone → ③ NOT done (race-bug prevention)
+    assert heuristic({'audio_meta.json': '{}'}) == {}, \
+        "audio_meta.json without voiceover.mp3 → ③ must NOT be completed (race-bug prevention)"
+
+    # Test 6: voiceover.mp3 alone → ③ done
+    assert heuristic({'voiceover.mp3': 'binary-mp3-blob'}) == {3: True}, \
+        "voiceover.mp3 → ③ completed"
+
+    # Test 7: audio_meta.json + voiceover.mp3 → ③ done
+    assert 3 in heuristic({'voiceover.mp3': 'x', 'audio_meta.json': '{}'}), \
+        "voiceover.mp3 wins regardless of audio_meta.json"
+
+    # Test 8: meta.json with rendered_at → ⑤ done (without final.mp4)
+    assert 5 in heuristic({'meta.json': '{"rendered_at": "2026-07-01"}'}), \
+        "rendered_at alone → ⑤ completed"
+
+    # Test 9: final.mp4 alone → ⑤ done (without meta)
+    assert 5 in heuristic({'final.mp4': 'binary-mp4-blob'}), \
+        "final.mp4 alone → ⑤ completed"
+
+    # Test 10: complete pipeline — all 5 steps done
+    full = {
+        'meta.json': '{"selected_title": "T", "rendered_at": "2026"}',
+        'plan.json': '{}',
+        'voiceover.mp3': 'x',
+        'final.mp4': 'x',
+    }
+    result = heuristic(full)
+    assert all(result.get(n) for n in (1, 2, 3, 5)), \
+        f"full pipeline should complete 5 steps; got {result}"
+
+
+def t_stepper_state_machine_canEnter():
+    """Phase 33.2: Alpine.js State-Machine canEnter() / currentStep-Hybrid.
+    Pure-Python-Mirror der JS-Logik in stepperState()."""
+    # Mirror der canEnter-Methode (siehe dashboard.html stepperState().canEnter)
+    def canEnter(n, completed, current):
+        if completed.get(n): return True
+        if n == current: return True
+        if n == 1: return True
+        # direkter Nachfolger eines completed-ODER-current-steps
+        if completed.get(n - 1) or (n - 1) == current: return True
+        return False
+
+    # Fall 1: nichts done → current=1, alle anderen locked außer 1 und seinem direkten Nachfolger ②
+    completed = {}
+    assert canEnter(1, completed, 1) is True,  "step ① always open"
+    assert canEnter(2, completed, 1) is True,  "step ② als Nachfolger des current-steps"
+    assert canEnter(3, completed, 1) is False, "step ③ locked (kein completed davor und nicht current)"
+    assert canEnter(5, completed, 1) is False, "step ⑤ locked when nothing done"
+
+    # Fall 2: ① done, current=2 → ② + ③ frei (③ als Nachfolger von ②), ④/⑤ nicht
+    completed = {1: True}
+    assert canEnter(1, completed, 2) is True,  "completed step always open"
+    assert canEnter(2, completed, 2) is True,  "current step"
+    assert canEnter(3, completed, 2) is True,  "③ als Nachfolger von ② (current) frei"
+    assert canEnter(4, completed, 2) is False, "④ locked (kein completed davor)"
+    assert canEnter(5, completed, 2) is False, "⑤ locked"
+
+    # Fall 3: ①+②+③ done → ④/⑤ als Nachfolger frei
+    completed = {1: True, 2: True, 3: True}
+    assert canEnter(4, completed, 4) is True, "④ als Nachfolger von ③"
+    assert canEnter(5, completed, 4) is True, "⑤ als Nachfolger von ④"
+
+    # Fall 4: alle done → alle unlocked
+    completed = {n: True for n in (1, 2, 3, 4, 5)}
+    for n in (1, 2, 3, 4, 5):
+        assert canEnter(n, completed, 5) is True, \
+            f"all completed → step {n} unlocked"
 
 
 if __name__ == "__main__":

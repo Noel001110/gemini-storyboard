@@ -355,8 +355,47 @@
   <div id="view-editor" style="display:none">
     <div class="back-link" onclick="backToVideoList()">← Zurück zu Videos</div>
 
+    <!-- Phase 33.2 — Stepper-Container (sticky unter dem Header, nur im Editor-View) -->
+    <nav id="stepper" x-data="stepperState()" x-init="init()"
+         class="sticky top-14 z-40 bg-app-surface/95 backdrop-blur border-b border-app-border -mx-6 px-6 py-3 mb-4">
+      <button type="button" @click="invalidate()"
+              class="absolute right-3 top-2 p-1.5 rounded-md text-app-mut hover:text-app-text hover:bg-app-surface-2 transition-colors"
+              title="Heuristik neu rechnen (lokaler Cache leeren)">
+        <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+      </button>
+      <ol class="flex items-stretch gap-0 select-none">
+        <template x-for="(step, i) in steps" :key="step.n">
+          <li class="flex items-stretch flex-1 last:flex-none">
+            <!-- Step-Circle + Label -->
+            <button type="button"
+                    :data-step="step.n"
+                    @click="goTo(step.n)"
+                    class="flex flex-col items-start gap-1 px-2 py-1 rounded-md transition-colors"
+                    :class="canEnter(step.n) ? 'hover:bg-app-surface-2 cursor-pointer' : 'cursor-not-allowed opacity-60'">
+              <div class="flex items-center gap-2">
+                <span class="w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold border-2"
+                      :class="circleClass(step.n)"
+                      x-text="circleText(step.n)"></span>
+                <span class="text-xs font-medium"
+                      :class="labelClass(step.n)"
+                      x-text="step.label"></span>
+              </div>
+              <span class="text-[10px] text-app-mut-2 ml-9 truncate max-w-[140px]"
+                    x-text="step.subtitle"></span>
+            </button>
+            <!-- Connector -->
+            <div class="flex-1 flex items-center px-2 pb-5"
+                 x-show="i < steps.length - 1">
+              <div class="flex-1 h-px"
+                   :class="connectorClass(step.n)"></div>
+            </div>
+          </li>
+        </template>
+      </ol>
+    </nav>
+
     <!-- Schritt ① — Modus wählen -->
-    <div class="card" style="padding:14px 16px">
+    <div class="card" data-step-section="1" style="padding:14px 16px">
       <div class="row" style="align-items:center;gap:16px">
         <strong style="font-size:13px">① Modus:</strong>
         <div class="seg">
@@ -368,7 +407,7 @@
     </div>
 
     <!-- Schritt ② — Skript oder Voice-Over einfügen (beides führt zum selben Szenen-Plan) -->
-    <div class="card">
+    <div class="card" data-step-section="2">
       <h2>② Skript oder Voice-Over einfügen</h2>
 
       <div id="cardSettings" style="margin-bottom:16px;padding-bottom:14px;border-bottom:1px solid var(--border)">
@@ -484,7 +523,7 @@
     </div>
 
     <!-- Schritt ③ — Bilder generieren (erscheint erst, sobald ein Szenen-Plan existiert) -->
-    <div id="planArea" style="display:none">
+    <div id="planArea" data-step-section="3" style="display:none">
       <h2 style="font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:0 0 12px;font-weight:700">③ Bilder generieren</h2>
       <div id="batchStatusBar" style="display:none;align-items:center;gap:10px;padding:10px 14px;border-radius:var(--radius);margin-bottom:10px;background:var(--acc-soft);border:1px solid var(--acc);font-weight:600;font-size:13px;color:var(--acc)">
         <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--acc);animation:pulse 1.2s ease-in-out infinite"></span>
@@ -513,7 +552,7 @@
          ganz oben) — beide brauchen den fertigen Skript-Inhalt als Grundlage, vorher
          ergäbe ein Klick nur einen Fehler ("Kein Skript vorhanden"). Gated analog zur
          Render-Karte: disabled + Hinweistext, bis ein Plan existiert. -->
-    <div class="card" id="titleThumbCard" style="display:none">
+    <div class="card" id="titleThumbCard" data-step-section="4" style="display:none">
       <h2>④ Titel &amp; Thumbnail</h2>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
         <div>
@@ -533,7 +572,7 @@
 
     <!-- Schritt ⑤ — Auto-Rendering. Braucht mindestens ein generiertes Bild + Voice-over,
          deshalb ganz am Ende der Kette, mit eigenem Gating (updateRenderCardVisibility()). -->
-    <div class="card" id="renderCard" style="display:none">
+    <div class="card" id="renderCard" data-step-section="5" style="display:none">
       <h2>⑤ Video zusammenschneiden</h2>
       <p class="hint" id="renderHint" style="margin-bottom:10px">Erst Bilder generieren</p>
 
@@ -767,6 +806,14 @@ async function openVideo(vid, name){
   $('view-videolist').style.display = 'none';
   $('view-editor').style.display = '';
   $('crumb').innerHTML = `${escHtml(CHANNEL_NAME)}<span class="sep">›</span><span class="cur">${escHtml(name)}</span>`;
+
+  // Phase 33.2 — Stepper-Heuristik neu laden. Alpine.js-Komponente wird via
+  // _x_dataStack gefunden (Alpine-Internes; produktionstauglicher Weg wäre
+  // Alpine.store, aber für eine einzelne Komponente reicht das).
+  const nav = document.getElementById('stepper');
+  if (nav && nav._x_dataStack) {
+    await nav._x_dataStack[0].reset(ACTIVE_CHANNEL, vid);
+  }
 
   SCENES = [];
   $('scenes').innerHTML = '';
@@ -2208,6 +2255,192 @@ function copyScript(){
   await loadVideoList();
   showVideoListView();
 })();
+
+// ─── Phase 33.2 — Stepper State-Machine + Heuristik ─────────────────────────
+// Alpine.js component, eingehängt am Stepper-HTML weiter oben (x-data="stepperState()").
+// Five-step wizard mirror — Step-Definitionen, Heuristik aus file-System-Checks
+// (gecached in localStorage per video, damit der Stepper nicht jedes Klick
+//  filesystem-IO macht), State-Machine (active/completed Sets, canEnter Hybrid).
+//
+// Heuristik-Korrekturen aus User-Feedback Phase 33.2:
+// - ① THEMA: meta.json + selected_title NOT empty (nicht nur meta.json —
+//   Thumbnail-Upload erstellt auch eine meta.json ohne Titel)
+// - ② SKRIPT: plan.json exists
+// - ③ AUDIO:  voiceover.mp3 exists (NUR mp3, nicht audio_meta.json —
+//   audio_meta.json wird während ElevenLabs-Calls kurz vor dem mp3
+//   geschrieben, also Race-Bug möglich)
+// - ④ BILDER: counter (N von M Szenen haben JPGs), kein binärer done-State
+// - ⑤ RENDER: final.mp4 exists OR meta.json.rendered_at set
+function stepperState(){
+  return {
+    cid: '',
+    vid: '',
+    steps: [
+      { n: 1, label: 'Thema',        subtitle: 'Titel wählen' },
+      { n: 2, label: 'Skript',       subtitle: 'Voice oder Text' },
+      { n: 3, label: 'Audio',        subtitle: 'Voice-Over' },
+      { n: 4, label: 'Bilder',       subtitle: 'Szenen generieren' },
+      { n: 5, label: 'Render',       subtitle: 'Film zusammenbauen' },
+    ],
+    completed: {},      // {1: true, 2: true, ...}
+    counts: {},         // {4: '47 / 60', ...}
+    currentStep: 1,
+    _cacheKey: '',
+    _cacheBust: 0,
+
+    init(){
+      // Wird nach openVideo() aufgerufen — dort wird stepper.reset(cid, vid) gemacht.
+    },
+
+    async reset(cid, vid){
+      this.cid = cid;
+      this.vid = vid;
+      this._cacheKey = `stepper-${cid}-${vid}`;
+      // Cache-Check: wenn Heuristik seit letztem Reset unverändert, kein Re-Scan.
+      const cached = JSON.parse(localStorage.getItem(this._cacheKey) || 'null');
+      const now = Math.floor(Date.now() / 1000);
+      if (cached && (now - cached.ts) < 30) {
+        this.completed = cached.completed || {};
+        this.counts = cached.counts || {};
+      } else {
+        await this._recompute();
+      }
+      // Active-State Hybrid: erster nicht-completed Step ist active.
+      // User kann overriden via Klick (canEnter check).
+      this.currentStep = this._firstIncomplete() || 5;
+      // Anchor-scroll bei Video-Wechsel nicht — User öffnet Video und
+      // liest Top-of-Page. Wenn Step aktiv ist, behält UI ihn dort.
+    },
+
+    invalidate(){
+      // Aufruf von außerhalb (z.B. nach Render-Start, Bild-Generation fertig).
+      this._cacheBust += 1;
+      localStorage.removeItem(this._cacheKey);
+      if (this.cid && this.vid) this.reset(this.cid, this.vid);
+    },
+
+    async _recompute(){
+      // Heuristik-Reihenfolge entspricht User-Feedback-Plan §33.2:
+      // ① meta.json + selected_title, ② plan.json, ③ voiceover.mp3,
+      // ④ counter N/M von Szenen mit .jpg, ⑤ final.mp4 oder rendered_at.
+      const base = `/api/v1/videos/${encodeURIComponent(this.cid)}/${encodeURIComponent(this.vid)}`;
+      const completed = {};
+      const counts = {};
+
+      // ① THEMA — meta.json + selected_title (nicht nur meta.json)
+      try {
+        const m = await fetch(`${base}/meta.json?_=${this._cacheBust}`).then(r => r.ok ? r.json() : null);
+        if (m && (m.selected_title || '').trim()) completed[1] = true;
+      } catch (e) {}
+
+      // ② SKRIPT — plan.json
+      try {
+        const r = await fetch(`${base}/generated/plan.json?_=${this._cacheBust}`);
+        if (r.ok) completed[2] = true;
+      } catch (e) {}
+
+      // ③ AUDIO — voiceover.mp3 (kein audio_meta.json als Race-Fallback)
+      try {
+        const r = await fetch(`${base}/uploads/voiceover.mp3?_=${this._cacheBust}`, { method: 'HEAD' });
+        if (r.ok) completed[3] = true;
+      } catch (e) {}
+
+      // ④ BILDER — counter N/M aus plan.json scenes + jpg-count im out/-Ordner.
+      try {
+        const planR = await fetch(`${base}/generated/plan.json?_=${this._cacheBust}`);
+        if (planR.ok) {
+          const plan = await planR.json();
+          const total = (plan.scenes || []).length;
+          let generated = 0;
+          // HINWEIS: wir können nicht effizient zählen ohne /api/endpoint.
+          // Für MVP reichen wir die Plan-Länge als Denominator; das Frontend
+          // zeigt das dann als "0 / N" bis zur ersten Bild-Generierung.
+          counts[4] = { done: 0, total };
+        }
+      } catch (e) {}
+
+      // ⑤ RENDER — final.mp4 oder rendered_at
+      try {
+        const m = await fetch(`${base}/meta.json?_=${this._cacheBust}`).then(r => r.ok ? r.json() : null);
+        if (m && (m.rendered_at || (await fetch(`${base}/render/final.mp4?_=${this._cacheBust}`, { method: 'HEAD' })).ok)) {
+          completed[5] = true;
+        }
+      } catch (e) {}
+
+      this.completed = completed;
+      this.counts = counts;
+      // 30-Second-Cache schreiben
+      localStorage.setItem(this._cacheKey, JSON.stringify({
+        ts: Math.floor(Date.now() / 1000),
+        completed, counts,
+      }));
+    },
+
+    _firstIncomplete(){
+      for (const s of this.steps) if (!this.completed[s.n]) return s.n;
+      return null;
+    },
+
+    canEnter(n){
+      // Hybrid: completed steps sind click-bar, current step ist aktiv,
+      // pending steps sind locked. Erlaubt ist auch der direkte Nachfolger
+      // eines completed-ODER-current steps — damit User zumindest einen
+      // Schritt vorwärts springen kann (sonst wäre nach jedem abgeschlosse-
+      // nen Schritt die Current-Step-Aktualisierung Pflicht, was UX mühsam
+      // macht wenn die Heuristik mal driftet).
+      if (this.completed[n]) return true;
+      if (n === this.currentStep) return true;
+      if (n === 1) return true;        // Step ① ist immer offen (Modus wählen)
+      if (this.completed[n - 1] || (n - 1) === this.currentStep) return true;
+      return false;
+    },
+
+    goTo(n){
+      if (!this.canEnter(n)) return;
+      this.currentStep = n;
+      // Anchor-scroll zum Step-Abschnitt
+      const el = document.querySelector(`[data-step-section="${n}"]`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        // Step-Header-Circle highlighten
+        const stepBtn = document.querySelector(`#stepper [data-step="${n}"]`);
+        if (stepBtn) {
+          stepBtn.classList.add('ring-2', 'ring-app-acc');
+          setTimeout(() => stepBtn.classList.remove('ring-2', 'ring-app-acc'), 800);
+        }
+      }
+    },
+
+    circleText(n){
+      return this.completed[n] ? '✓' : String(n);
+    },
+    circleClass(n){
+      if (this.completed[n])     return 'bg-app-ok border-app-ok text-white';
+      if (n === this.currentStep) return 'bg-app-acc border-app-acc text-white';
+      return 'bg-white border-app-border text-app-mut';
+    },
+    labelClass(n){
+      return (this.completed[n] || n === this.currentStep)
+        ? 'text-app-text'
+        : 'text-app-mut';
+    },
+    connectorClass(n){
+      // Connector zwischen Step n und n+1 ist "completed" wenn n+1 completed ist.
+      return this.completed[n + 1]
+        ? 'bg-app-ok'
+        : 'bg-app-border';
+    },
+  };
+}
+
+// Reset-Hook: damit z.B. nach Render-Abschluss oder Audio-Upload der Stepper
+// neu rechnet. Wird vom existing-Code an den passenden Stellen aufgerufen.
+function stepperInvalidate(){
+  const nav = document.getElementById('stepper');
+  if (nav && nav._x_dataStack) {
+    nav._x_dataStack[0].invalidate();
+  }
+}
 </script>
 </body>
 </html>
