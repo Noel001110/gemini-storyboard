@@ -3015,9 +3015,18 @@ class H(BaseHTTPRequestHandler):
             try:    desc = analyze_char_image(img_bytes, mime)
             except Exception as e:
                 desc = ""; print(f"  [Char] Analyse-Fehler: {e}", flush=True)
-            json.dump({"name": name, "description": desc, "safe": safe, "mime": "image/png"},
+            # Öffentliche URL erzeugen: das Frontend erwartet `uri` (set_char_ref +
+            # _applyCharRef), und die char_ref_url wird als KIE-Bildreferenz benutzt —
+            # muss also public-http sein (set_char_ref lehnt Nicht-http-URLs ab).
+            # Ohne diesen Upload bekam das Frontend `undefined` → Referenz wurde nie
+            # gesetzt (Kern von Bug B-1: Upload "tat nichts").
+            try:
+                public_uri = upload_image_public(img_path)
+            except Exception as e:
+                return self._send(502, {"error": f"Public-Upload fehlgeschlagen: {e}"})
+            json.dump({"name": name, "description": desc, "safe": safe, "mime": "image/png", "uri": public_uri},
                       open(meta_path, "w"), ensure_ascii=False)
-            return self._send(200, {"ok": True, "name": name, "safe": safe, "description": desc})
+            return self._send(200, {"ok": True, "name": name, "safe": safe, "description": desc, "uri": public_uri})
 
         if p == "/api/gen_charsheet":
             name = d.get("name", "").strip(); desc = d.get("description", "").strip()
