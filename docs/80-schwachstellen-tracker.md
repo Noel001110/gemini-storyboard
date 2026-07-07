@@ -50,11 +50,11 @@ Quelle: `docs/Architekturanalyse und Schwachstellenbericht — Storyboard Genera
 ### 2.1 Atomare Schreibvorgänge
 | ID | Maßnahme | Status | Beleg / Lücke |
 |:----|:----|:----|:----|
-| #6 | Temp-Datei + os.replace für plan.json | 🔄 | Direkter `json.dump(open(p,"w"))` überall — bei Crash korrupt |
-| #7 | fsync vor rename | ❌ | Nicht implementiert |
-| #36 | Channels.json atomar schreiben | ❌ | Selbes Pattern |
-| #60 | Videos.json atomar | ❌ | — |
-| #68 | SIGTERM-Handler für Graceful Shutdown | ❌ | Kein Handler registriert |
+| #6 | Temp-Datei + os.replace für plan.json | ✅ | `90cf2db` _atomic_write_json() + 15 Aufrufstellen | | Direkter `json.dump(open(p,"w"))` überall — bei Crash korrupt |
+| #7 | fsync vor rename | ✅ | `90cf2db` os.fsync() in _atomic_write_json | | Nicht implementiert |
+| #36 | Channels.json atomar schreiben | ✅ | `90cf2db` _atomic_write_json für channels.json | | Selbes Pattern |
+| #60 | Videos.json atomar | ✅ | `90cf2db` _atomic_write_json für videos.json | | — |
+| #68 | SIGTERM-Handler für Graceful Shutdown | ✅ | `90cf2db` signal.signal(SIGTERM, _graceful_shutdown) | | Kein Handler registriert |
 
 ### 2.2 State-Schema & Versionierung
 | ID | Maßnahme | Status | Beleg / Lücke |
@@ -197,18 +197,17 @@ Aus den 80 IDs sind in der MD-Tabelle **69 dokumentiert**. Die folgenden 11 IDs 
 | Phase | Done | Partial | In Progress | Open | Unbekannt | Total |
 |:----|:----:|:----:|:----:|:----:|:----:|:----:|
 | 1 (Architektur) | 1 | 2 | 0 | 9 | — | 12 |
-| 2 (Daten) | 0 | 0 | 1 | 9 | — | 10 |
+| 2 (Daten) | 5 | 0 | 0 | 5 | — | 10 |
 | 3 (Sicherheit) | 2 | 2 | 0 | 13 | — | 17 |
 | 4 (KI-Pipeline) | 2 | 2 | 0 | 14 | — | 18 |
 | 5 (Frontend/DX) | 0 | 1 | 0 | 11 | — | 12 |
 | Unbekannt | — | — | — | — | 11 | 11 |
-| **Total** | **5** | **7** | **1** | **56** | **11** | **80** |
+| **Total** | **10** | **7** | **0** | **52** | **11** | **80** |
 
 → **80 Schwachstellen, davon 5 done, 7 partial, 1 in progress, 56 open, 11 unknown.**
 
 ## Quick-Win-Reihenfolge (Produktion zuerst)
 
-1. **#6** Atomare plan.json Writes (Temp + os.replace) — *in Arbeit*
 2. **#38** /health-Endpoint
 3. **#14** Exponential Backoff für KIE.ai
 4. **#50/#49** Path-Traversal + kein shell=True (teilweise ✅)
