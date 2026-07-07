@@ -526,6 +526,8 @@ def analyze_script(beats):
         '  "visual_sequences": [{"seq_id": N, "beats": [N, N, N], "reason": string, '
         '"camera": "slow push-in" | "pan" | "static series"}],\n'
         '  "callouts": [{"beat": N, "text": "short number/date/stat, max ~6 chars"}],\n'
+        '  "data_visuals": [{"beat": N, "kind": "counter", "from": 0, "to": 3.2, '
+        '"format": "3,2 Mio.", "label": "verhungert 1994-1998"}],\n'
         '  "phases": [{"beat": N, "phase": "OPENING" | "RISING_ACTION" | "CLIMAX" | "RESOLUTION"}],\n'
         '  "act_breaks": [N],\n'
         '  "climax_beat": N,\n'
@@ -560,6 +562,19 @@ def analyze_script(beats):
         "beat entirely if nothing concrete fits; most beats will have no callout at all. "
         "Keep 'text' extremely short — the exact figure only (e.g. \"1969\", \"3.2M\", "
         "\"47%\"), no surrounding words.\n\n"
+        "DATA_VISUALS (Phase N) — animated count-up overlay for statistics the script "
+        "states literally. STRICT RULE: only use data_visuals when the beat text contains "
+        "a concrete number that should be highlighted visually (e.g. '3,2 Millionen Menschen "
+        "verhungerten' → counter from=0 to=3.2 format='3,2 Mio.' label='verhungert'). "
+        "NEVER invent numbers — if the script says 'viele' or 'tausende' without precise "
+        "figures, OMIT data_visual entirely. The number must appear literally in the "
+        "beat text — paraphrase or inference is forbidden. Optional schema:\n"
+        "- kind: 'counter' (only counter implemented in Phase N.1; 'bar'/'timeline' planned)\n"
+        "- from: starting value (usually 0)\n"
+        "- to: ending value (the concrete number from the beat text)\n"
+        "- format: Python f-string-style format for the displayed value (e.g. '3,2 Mio.' "
+        "  becomes '{:.1f} Mio.')\n"
+        "- label: optional subtitle below the counter (max ~40 chars)\n\n"
         "DRAMATURGY (Story-Phase-Engine, Phase 3):\n"
         "Assign a STORY-PHASE to every beat — one of exactly four values: "
         "\"OPENING\", \"RISING_ACTION\", \"CLIMAX\", \"RESOLUTION\". These reflect the "

@@ -137,6 +137,74 @@ def render_chapter(width, height, text):
     return img
 
 
+# ── Phase N: Animierte Daten-Overlays (Count-Up) ──────────────────────────────
+
+def _smoothstep(t: float) -> float:
+    """3t²-2t³ easing curve, matching _render_clip in dashboard.py."""
+    t = max(0.0, min(1.0, t))
+    return 3 * t * t - 2 * t * t * t
+
+
+def render_counter_anim_frame(width, height, from_val, to_val, t, fmt, label=""):
+    """Phase N: Ein einzelnes Frame einer Count-Up-Sequenz.
+
+    t: 0.0..1.0 (Position in der Animation, smoothstep-interpoliert)
+    from_val/to_val: Zahlenwerte für Count-Up (z.B. 0 → 3.2)
+    fmt: Format-String (z.B. "3,2 Mio." → ".1f")
+    label: Optionaler Untertitel (z.B. "verhungert 1994–1998")
+
+    Phase N.1: identische Optik zum statischen counter (rote Letter-Fill, schwarzer Stroke)
+    damit die Animation als „Variante des gleichen Stils" lesbar bleibt.
+    """
+    val = from_val + (to_val - from_val) * _smoothstep(t)
+    text = fmt.format(val)
+
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # Counter-Look: große Schrift, mittig, rot mit schwarzem Stroke (wie render_counter)
+    font_size = round(height * 0.22)
+    font = _font(font_size)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+    cx = (width - text_w) / 2
+    # Position leicht oberhalb Mitte, damit Platz für Label bleibt
+    cy = (height - text_h) / 2 - (round(height * 0.06) if label else 0)
+    draw.text((cx, cy), text, font=font,
+              fill=(220, 38, 38, 255),
+              stroke_width=max(4, font_size // 12),
+              stroke_fill=(0, 0, 0, 255))
+
+    if label:
+        label_font_size = round(height * 0.035)
+        label_font = _font(label_font_size)
+        label_bbox = draw.textbbox((0, 0), label, font=label_font)
+        label_w = label_bbox[2] - label_bbox[0]
+        label_x = (width - label_w) / 2
+        label_y = cy + text_h + round(height * 0.02)
+        draw.text((label_x, label_y), label, font=label_font,
+                  fill=(255, 255, 255, 255),
+                  stroke_width=2,
+                  stroke_fill=(0, 0, 0, 220))
+    return img
+
+
+def render_counter_anim_sequence(width, height, from_val, to_val, n_frames, fmt, label, out_dir):
+    """Phase N.1: rendert N Frames als PNG-Sequenz (ov_0000.png, ov_0001.png, ...).
+
+    ffmpeg liest sie später mit `-framerate 30 -i ov_%04d.png` (Plan §4.3 N.2).
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    paths = []
+    for i in range(n_frames):
+        t = i / max(1, n_frames - 1) if n_frames > 1 else 1.0
+        path = os.path.join(out_dir, f"ov_{i:04d}.png")
+        render_counter_anim_frame(width, height, from_val, to_val, t, fmt, label).save(path)
+        paths.append(path)
+    return paths
+
+
 RENDERERS = {"caption": render_caption, "callout": render_callout,
               "chapter": render_chapter, "counter": render_counter}
 
@@ -195,6 +263,23 @@ def main():
         # title_card can take an optional 7th arg = phase (for accent color)
         phase = sys.argv[6] if len(sys.argv) > 6 else ""
         render_title_card(width, height, text, phase).save(out_path)
+        return
+    if style == "counter_anim":
+        # Phase N: Counter-Anim-Sequenz-Modus
+        # argv: out_path, width, height, "counter_anim", fmt_b64,
+        #        from_val, to_val, n_frames, label_b64
+        if len(sys.argv) < 10:
+            print("usage: render_overlay.py <out_dir> <width> <height> counter_anim "
+                  "<fmt_b64> <from_val> <to_val> <n_frames> <label_b64>",
+                  file=sys.stderr)
+            sys.exit(1)
+        fmt = base64.b64decode(sys.argv[6]).decode("utf-8")
+        from_val = float(sys.argv[7])
+        to_val = float(sys.argv[8])
+        n_frames = int(sys.argv[9])
+        label_b64 = sys.argv[10]
+        label = base64.b64decode(label_b64).decode("utf-8") if label_b64 else ""
+        render_counter_anim_sequence(width, height, from_val, to_val, n_frames, fmt, label, out_path)
         return
     fn = RENDERERS.get(style)
     if not fn:

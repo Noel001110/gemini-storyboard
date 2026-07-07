@@ -778,6 +778,11 @@ def main():
         run(t_phase_o_no_accent_expr_unchanged, "O.2: ohne accent_t = byte-identisch (Original z_expr als Fallback)")
         run(t_phase_o_accent_zoom_bounded, "O.2: amp=0.05 + sigma=0.06s (Jitter-Bound)")
 
+        summary_section("Phase N: Animierte Daten-Overlays (Count-Up)")
+        run(t_phase_n_overlay_sequence_mode, "N.1: render_overlay.py counter_anim-Modus + Smoothstep")
+        run(t_phase_n_data_visual_prompt_never_invents, "N.3: analyze_script-Prompt hat data_visuals-Schema")
+        run(t_phase_n_static_callout_fallback, "N: data_visual hat Vorrang vor statischem callout")
+
         print(f"\n=== Result ===")
         print(f"  Passed: {PASSED}")
         print(f"  Failed: {FAILED}")
@@ -2361,6 +2366,73 @@ def t_phase_o_no_accent_expr_unchanged():
     assert "amp*exp(-pow((on-{f_a})/{sigma},2))" in body or \
            "amp*exp(-pow((on-f_a)/sigma,2))" in body, \
         "Gauß-Puls-Term muss im Code existieren"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase N: Animierte Daten-Overlays (CINEMATIC_UPGRADE_PLAN.md §4.3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def t_phase_n_overlay_sequence_mode():
+    """N.1: render_overlay.py hat counter_anim-Modus der PNG-Sequenzen rendert."""
+    src = open(os.path.join(ROOT, "render_overlay.py")).read()
+    assert "counter_anim" in src, \
+        "render_overlay.py muss counter_anim-Modus unterstützen (Phase N.1)"
+    assert "render_counter_anim_sequence" in src, \
+        "render_counter_anim_sequence Funktion muss existieren"
+    assert "render_counter_anim_frame" in src, \
+        "render_counter_anim_frame (Einzel-Frame) muss existieren"
+    assert "_smoothstep" in src, \
+        "Smoothstep-Easing muss für Count-Up-Interpolation vorhanden sein"
+    # Smoothstep-Formel: 3t²-2t³
+    assert "3 * t * t - 2 * t * t * t" in src or "3*t*t-2*t*t*t" in src, \
+        "Smoothstep-Formel 3t²-2t³ muss korrekt implementiert sein"
+
+
+def t_phase_n_data_visual_prompt_never_invents():
+    """N.3: analyze_script-Prompt hat data_visuals-Schema + strikte Nie-Erfinden-Regel."""
+    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    # Suche analyze_script-Funktion
+    i = src.find("def analyze_script(beats):")
+    end = src.find('"BEATS:\\n"', i)
+    if end < 0:
+        end = i + 5000
+    template = src[i:end]
+    assert "data_visuals" in template, \
+        "analyze_script-Prompt muss data_visuals-Schema enthalten (Phase N.3)"
+    # Strikt-nur-für-Zahlen-im-Text Regel
+    assert ("NEVER invent" in template
+            or "NEVER" in template
+            or "omit data_visual" in template.lower()
+            or "appear literally" in template), \
+        "data_visuals muss strikt nur für Zahlen verwendet werden, die wörtlich im Beat stehen"
+
+
+def t_phase_n_static_callout_fallback():
+    """N: Ohne data_visual fällt der Counter-Overlay-Pfad weg → statischer callout
+    bleibt der Fallback. Regression-Schutz gegen versehentliche Verhaltensänderung."""
+    from engine.render import _overlay_specs_for_scene
+    # Scene OHNE data_visual, MIT callout, MIT punchy → statischer counter-style Overlay
+    scene = {
+        "i": 0, "dur": 3.0, "pacing": "punchy",
+        "callout": "3,2 Mio.", "text": "Beispieltext",
+    }
+    specs = _overlay_specs_for_scene(scene, 3.0, {"callouts": True, "captions": True})
+    # counter (statisch) sollte da sein, NICHT counter_anim
+    styles = [s[0] for s in specs]
+    assert "counter" in styles, f"Statischer counter muss im callout-Fallback sein, war: {styles}"
+    assert "counter_anim" not in styles, \
+        f"counter_anim darf nicht ohne data_visual erscheinen, war: {styles}"
+
+    # Scene MIT data_visual → counter_anim hat Vorrang vor statischem callout
+    scene_dv = {
+        "i": 0, "dur": 3.0, "pacing": "punchy",
+        "callout": "3,2 Mio.", "text": "Beispieltext",
+        "data_visual": {"kind": "counter", "from": 0, "to": 3.2, "format": "3,2 Mio.", "label": "verhungert"},
+    }
+    specs_dv = _overlay_specs_for_scene(scene_dv, 3.0, {"callouts": True, "captions": True})
+    styles_dv = [s[0] for s in specs_dv]
+    assert "counter_anim" in styles_dv, \
+        f"counter_anim muss mit data_visual erscheinen, war: {styles_dv}"
 
 
 def t_phase_o_accent_zoom_bounded():

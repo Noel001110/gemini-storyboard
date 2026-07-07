@@ -278,13 +278,23 @@ def _overlay_specs_for_scene(scene: dict, clip_dur: float, overlay_opts: dict) -
     window. Returns a list of (style, text, t0, t1) tuples, evaluated in the order they
     should be layered (chapter title first/bottom-most, caption last/top-most is NOT
     required here since they occupy different screen regions and never overlap).
+
+    Phase N: data_visual (additive, kein Ersatz für callout) — wenn analyze_script
+    data_visual erkennt, wird ein animierter Counter-Overlay gerendert. Statischer callout
+    bleibt Fallback, falls data_visual fehlt.
     """
     if not overlay_opts:
         return []
     specs = []
     if overlay_opts.get("chapters") and scene.get("seq_pos") == 0 and scene.get("seq_reason"):
         specs.append(("chapter", scene["seq_reason"], 0.0, min(2.0, clip_dur)))
-    if overlay_opts.get("callouts") and scene.get("callout"):
+    # Phase N: data_visual hat Vorrang vor statischem callout (Counter-Anim)
+    if scene.get("data_visual") and scene["data_visual"].get("kind") == "counter":
+        dv = scene["data_visual"]
+        anim_dur = min(1.5, clip_dur - 0.2) if clip_dur > 0.5 else clip_dur
+        if anim_dur > 0.3:
+            specs.append(("counter_anim", dv, 0.1, 0.1 + anim_dur))
+    elif overlay_opts.get("callouts") and scene.get("callout"):
         # Phase F: punchy + callout → switch to the dramatic "counter" style (big number,
         # centered, red letter-fill) instead of the standard callout.
         if scene.get("pacing") == "punchy":
@@ -366,24 +376,59 @@ def _render_clip(img_path: str, scene: dict, out_path: str, fps: int = RENDER_FP
         f"{eq_suffix}[base]"
     ]
     overlay_pngs = []
+    overlay_seq_dirs = []  # Phase N: temp dirs mit PNG-Sequenzen
     last_label = "base"
     try:
         for idx, (style, text, t0, t1) in enumerate(overlay_specs):
             png_path = f"{out_path}.ov{idx}.png"
-            render_text_overlay_png(png_path, RENDER_WIDTH, RENDER_HEIGHT, style, text)
-            overlay_pngs.append(png_path)
-            inputs += ["-loop", "1", "-i", png_path]
-            in_idx = idx + 1
-            fade_dur = min(0.3, max(0.05, (t1 - t0) / 4))
-            fade_out_st = max(t0, t1 - fade_dur)
-            faded_label = f"ov{idx}f"
-            filter_parts.append(
-                f"[{in_idx}:v]format=rgba,"
-                f"fade=t=in:st={t0}:d={fade_dur}:alpha=1,"
-                f"fade=t=out:st={fade_out_st}:d={fade_dur}:alpha=1[{faded_label}]"
-            )
+            # Phase N: counter_anim nutzt PNG-Sequenz statt statisches PNG
+            if style == "counter_anim":
+                # text ist hier das data_visual-dict (siehe _overlay_specs_for_scene)
+                dv = text
+                seq_dir = f"{out_path}.ovseq{idx}"
+                n_frames = max(2, int(round((t1 - t0) * fps)))
+                from_val = float(dv.get("from", 0))
+                to_val = float(dv.get("to", 0))
+                fmt = str(dv.get("format", "{:.1f}"))
+                label = str(dv.get("label", ""))
+                _render_counter_anim_sequence(
+                    seq_dir, RENDER_WIDTH, RENDER_HEIGHT,
+                    from_val, to_val, n_frames, fmt, label,
+                )
+                overlay_seq_dirs.append(seq_dir)
+                # ffmpeg-Input: PNG-Sequenz mit vorgegebener Framerate
+                inputs += ["-framerate", str(fps), "-i", f"{seq_dir}/ov_%04d.png"]
+                in_idx = idx + 1
+                # Sequenz hat eigene Timing-Semantik: erstes Frame = Szene t0,
+                # letztes Frame = Szene t1. ffmpeg wiederholt die Sequenz für
+                # längere Szenen via -stream_loop, bzw. stoppt wenn clip_dur
+                # überschritten — die Dauer hier ist bewusst = n_frames/fps.
+                faded_label = f"ov{idx}f"
+                # Kurzer Fade-in am Anfang (0.1s)
+                fade_dur = 0.1
+                filter_parts.append(
+                    f"[{in_idx}:v]format=rgba,"
+                    f"fade=t=in:st={t0}:d={fade_dur}:alpha=1"
+                    f"[{faded_label}]"
+                )
+            else:
+                render_text_overlay_png(png_path, RENDER_WIDTH, RENDER_HEIGHT, style, text)
+                overlay_pngs.append(png_path)
+                inputs += ["-loop", "1", "-i", png_path]
+                in_idx = idx + 1
+                fade_dur = min(0.3, max(0.05, (t1 - t0) / 4))
+                fade_out_st = max(t0, t1 - fade_dur)
+                faded_label = f"ov{idx}f"
+                filter_parts.append(
+                    f"[{in_idx}:v]format=rgba,"
+                    f"fade=t=in:st={t0}:d={fade_dur}:alpha=1,"
+                    f"fade=t=out:st={fade_out_st}:d={fade_dur}:alpha=1[{faded_label}]"
+                )
             is_last = idx == len(overlay_specs) - 1
             next_label = "outv" if is_last else f"comp{idx}"
+            # overlay mit enable='between(t,t0,t1)' — gilt für beide Fälle
+            # Bei counter_anim: Sequenz wird ohnehin nur t1-t0 lang gezeigt,
+            # davor/nachher ist die PNG transparent → kein sichtbarer Effekt.
             filter_parts.append(
                 f"[{last_label}][{faded_label}]overlay=enable='between(t,{t0},{t1})'[{next_label}]"
             )
@@ -406,6 +451,10 @@ def _render_clip(img_path: str, scene: dict, out_path: str, fps: int = RENDER_FP
     finally:
         for p in overlay_pngs:
             try: os.remove(p)
+            except: pass
+        for d in overlay_seq_dirs:
+            import shutil
+            try: shutil.rmtree(d, ignore_errors=True)
             except: pass
         if title_card_temp and os.path.exists(title_card_temp):
             try:    os.remove(title_card_temp)
@@ -535,6 +584,26 @@ def _crossfade_clips(clip_a: str, clip_b: str, out_path: str, duration: float, t
 
 
 # ── PNG-Helper (via .venv_whisper Subprocess) ─────────────────────────────────
+
+def _render_counter_anim_sequence(out_dir, width, height, from_val, to_val, n_frames, fmt, label):
+    """Phase N.1: ruft render_overlay.py im counter_anim-Modus auf und erzeugt
+    n_frames PNG-Dateien (ov_0000.png ... ov_{n-1:04d}.png).
+
+    Sequenz wird vom ffmpeg-Schritt in _render_clip via
+    `-framerate {fps} -i {out_dir}/ov_%04d.png` eingelesen.
+    """
+    fmt_b64 = base64.b64encode(fmt.encode("utf-8")).decode("ascii")
+    label_b64 = base64.b64encode(label.encode("utf-8")).decode("ascii")
+    args = [
+        WHISPER_VENV_PY, OVERLAY_SCRIPT, out_dir,
+        str(width), str(height), "counter_anim",
+        fmt_b64,
+        str(from_val), str(to_val), str(n_frames), label_b64,
+    ]
+    result = subprocess.run(args, capture_output=True, text=True, timeout=90)
+    if result.returncode != 0:
+        raise RuntimeError(f"Counter-Anim-Sequenz fehlgeschlagen: {result.stderr[-500:]}")
+
 
 def render_text_overlay_png(out_path: str, width: int, height: int, style: str, text: str) -> None:
     """style: 'caption' | 'callout' | 'chapter'. Text wird base64-kodiert übergeben,
