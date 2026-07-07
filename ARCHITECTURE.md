@@ -1198,3 +1198,94 @@ Die nächsten Refaktor-Wellen (Phase J.2, Phase J.3 etc.) sollten z.B. `engine_r
   - `t_phase_j_engine_refactor_globals_intact` — alle wild-exported Symbole kommen aus `engine_elevenlabs` (nicht aus dashboard.py-Resten)
   - `t_phase_j_dashboard_unchanged_callers_still_work` — Caller wie `dashboard.save_voice_settings(...)`, `dashboard._assign_phases(...)`, `dashboard.elevenlabs_key(...)` funktionieren weiterhin ohne Code-Änderung im Caller
 
+
+## 33. UI-Rebuild (Phase 33, Juli 2026 — IN PROGRESS)
+
+Migration des Frontends von handgeschriebener Vanilla-HTML/CSS auf einen **shadcn-Pattern-Stack**: Tailwind CSS (Utility-Classes), Lucide Icons, Alpine.js (Mini-Reaktivität). Ziel: enterprise-grade Optik ohne Build-Pipeline.
+
+### 33.1 Stack-Entscheidung (Foundation in `dashboard.html:<head>`)
+
+```html
+<script src="https://cdn.tailwindcss.com/3.4.16"></script>
+<script>tailwind.config = { corePlugins: { preflight: false }, ... }</script>
+<script src="https://unpkg.com/lucide@latest"></script>
+<script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+```
+
+| Wahl | Begründung |
+|---|---|
+| **Tailwind via CDN** statt npm-Build | Single-HTML-File bleibt, kein Build-Step. Lokales Tooling bevorzugt. |
+| `corePlugins.preflight: false` | Tailwind-Resets würden die existierende Custom-CSS zerschießen (Buttons, Scenes, etc.). Mit Preflight off ist Tailwind nur eine Utility-Class-Bibliothek. |
+| **Lucide Icons** statt Font-Awesome/Material | Konsistent mit shadcn-Pattern, sieht modern aus, SVG-basiert (klein, scharf). |
+| **Alpine.js** statt React/Vue | 15 KB, keine Build-Pipeline, ausreichend für Stepper-State + Modals. |
+| **Kein React/Vue/Svelte** | Overkill für Single-Page-App mit Stepper. |
+
+### 33.2 Design-Tokens (CSS-Variablen in `:root`)
+
+```css
+:root {
+  --bg, --surface, --surface-2, --border
+  --text, --mut, --mut-2
+  --acc, --acc-soft, --acc-hover
+  --ok, --warn, --danger
+  --radius, --radius-sm
+}
+```
+
+Tailwind config erweitert diese als `app-bg`, `app-surface`, `app-acc`, `app-acc-soft`, `app-radius` etc. — so dass `class="bg-app-acc text-white rounded-app"` direkt im Markup funktioniert, ohne Custom-CSS-Klassen zu duplizieren.
+
+### 33.3 Phasen der UI-Migration
+
+| Phase | Scope | Status |
+|---|---|---|
+| 33.1 Foundation (Tailwind + Lucide + Alpine + Tokens) | head, top-bar | ✅ in Commit (Head-Refactor only) |
+| 33.2 Stepper-Migration | horizontal-stepper HTML/JS, statt 5 verstreute `.steps` | ⏳ offen |
+| 33.3 Sidebar (Channel-Switcher + Library) | shadcn-Sidebar-Pattern | ⏳ offen |
+| 33.4 Step-Cards (5 Cards als primary Content) | Step-First-Layout | ⏳ offen |
+| 33.5 Empty/Loading/Error-States | Pattern für alle Components | ⏳ offen |
+| 33.6 Polish: Responsive + Keyboard-Nav | Mobile/Tablet | ⏳ offen |
+
+Jede Phase ist ein eigener PR. Bis 33.x fertig sind, existieren Tailwind-Utilities und Custom-CSS parallel — neue Components nutzen Tailwind, alte bleiben funktional.
+
+### 33.4 Design-Prinzipien (Progressive Disclosure)
+
+1. **Visibility of system status** — Stepper-Bar zeigt IMMER wo User ist
+2. **Match between system and real world** — Domain-Sprache (Skript, Voice-Over), nicht "payload/job/entity"
+3. **User control and freedom** — User kann jederzeit zu jedem Step springen (State-Machine)
+4. **Consistency** — Buttons gleicher Form, gleiches Spacing, gleiche Farben
+5. **Error prevention** — Disabled-States statt "du hast was falsch gemacht"
+6. **Recognition rather than recall** — Nummerierte Steps statt "was kommt als nächstes?"
+7. **Aesthetic and minimalist design** — Whitespace + reduzierte Farbpalette (4–5 Farben max)
+
+### 33.5 Head-Refactor (Phase 33.1 — dieser Commit)
+
+Konkret refactored:
+- `<header>` Z. 177–180: vanilla-CSS → Tailwind-Utilities (`sticky top-0 z-50 bg-app-surface/95 backdrop-blur`)
+- Lucide-Icon `<i data-lucide="film">` im Brand-Badge
+- Settings-Icon-Button im Header
+- `<script>if (window.lucide) lucide.createIcons();</script>` initialisiert Lucide
+- `.wrap` Padding-Top 24px → 80px (Platz für sticky header)
+
+Nicht angefasst:
+- Top-Tabs (Videos/Stil/Skript-Generator)
+- Step-Inhalte (alle 5 Steps funktional wie vorher)
+- Sidebars (Channels, Characters, Library)
+- JS-Funktionen (`$`, `api`, `ch_api`, `renderScenes`, etc.)
+- ID-Attribute (alle `$('id')`-Lookups funktionieren unverändert)
+
+### 33.6 Test-Strategy
+
+- E2E-Tests (`tests/test_cinematic_e2e.py`) testen nur backend — ändern sich NICHT durch UI-Refactor
+- Manuelle visuelle Verifikation: Browser öffnen, Header muss sticky sein, Lucide-Icon sichtbar, keine JS-Errors in der Console
+- ID-Attribute werden in jedem Step gegengeprüft (Custom-IDs wie `crumb`, `scenes`, `videoGrid` bleiben erhalten)
+
+### 33.7 Inspiration für zukünftige PRs
+
+| Reference | Was wir übernehmen |
+|---|---|
+| Stripe Checkout | Stepper-Pattern, "Speichern & weiter"-Button |
+| Linear.app | Sidebar-Layout, ruhige Farben |
+| Vercel Dashboard | Minimalist, viel Whitespace |
+| shadcn/ui Gallery | Komponenten-Vorlagen copy-paste |
+| Tailwind UI | Premium-Components (optional, kostenpflichtig) |
+

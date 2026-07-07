@@ -4,6 +4,46 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Storyboard Generator</title>
+
+<!-- ─── UI-Rebuild Foundation (Phase 33, Juli 2026) ─────────────────────────
+  - Tailwind via CDN (corePlugins.preflight: false, sonst überschreibt es
+    die existierende Custom-CSS im <style>-Block und zerschießt das Layout)
+  - Lucide Icons via CDN — für Stepper/Badges/etc. sobald die Komponenten
+    schrittweise migriert werden
+  - Alpine.js deferred — für spätere State-Machine ohne React
+  Bestandscode bleibt UNVERÄNDERT funktional; nur die Optik wird Stück für
+  Stück migriert (Phase 33.x in ARCHITECTURE.md).
+-->
+<script src="https://cdn.tailwindcss.com/3.4.16"></script>
+<script>
+  // Tailwind-Config: preflight OFF (keine Reset-Überschreibung) + Theme-Tokens.
+  tailwind.config = {
+    corePlugins: { preflight: false },
+    theme: {
+      extend: {
+        colors: {
+          'app-bg':       '#f7f7f8',
+          'app-surface':  '#ffffff',
+          'app-surface-2':'#f2f3f5',
+          'app-border':   '#e5e7eb',
+          'app-text':     '#111827',
+          'app-mut':      '#6b7280',
+          'app-mut-2':    '#9ca3af',
+          'app-acc':      '#4f46e5',
+          'app-acc-soft': '#eef2ff',
+          'app-ok':       '#16a34a',
+          'app-warn':     '#d97706',
+          'app-danger':   '#dc2626',
+        },
+        borderRadius: { 'app': '10px', 'app-sm': '6px' },
+      },
+    },
+  };
+</script>
+<script src="https://unpkg.com/lucide@latest"></script>
+<script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+
+<style>
 <style>
   :root{
     --bg:#f7f7f8; --surface:#ffffff; --surface-2:#f2f3f5; --border:#e5e7eb;
@@ -46,6 +86,9 @@
   header .crumb .sep{color:var(--mut-2)}
   header .crumb .cur{color:var(--text);font-weight:600}
   .wrap{max-width:1100px;margin:0 auto;padding:24px 28px 80px;width:100%}
+/* UI-Rebuild Phase 33: header ist sticky, .wrap braucht mehr Top-Padding
+   damit der Content nicht unter dem fixed-header verschwindet. */
+.wrap{padding-top:80px}
   .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:18px;margin-bottom:16px;box-shadow:var(--shadow)}
   .card h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:0 0 12px;font-weight:700}
   textarea{width:100%;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;font:13px/1.5 ui-monospace,Menlo,monospace;resize:vertical}
@@ -174,10 +217,27 @@
 
 <!-- ── Main ───────────────────────────────────────── -->
 <div class="main">
-<header>
-  <span class="dot"></span><h1>Storyboard Generator</h1>
-  <span class="crumb" id="crumb"></span>
+<header class="sticky top-0 z-50 border-b border-app-border bg-app-surface/95 backdrop-blur flex items-center gap-3 px-6 h-14">
+  <span class="dot"></span>
+  <div class="flex items-center gap-2">
+    <div class="w-7 h-7 rounded-md bg-app-acc flex items-center justify-center">
+      <i data-lucide="film" class="w-4 h-4 text-white"></i>
+    </div>
+    <h1 class="font-semibold text-sm tracking-tight">Storyboard Generator</h1>
+  </div>
+  <span class="crumb text-sm text-app-mut ml-4" id="crumb"></span>
+  <div class="ml-auto flex items-center gap-2">
+    <button class="p-2 hover:bg-app-surface-2 rounded-md text-app-mut" title="Settings">
+      <i data-lucide="settings" class="w-4 h-4"></i>
+    </button>
+  </div>
 </header>
+<script>
+  // Lucide-Icons initialisieren — Tailwind/Lucide beide geladen, jetzt sind die
+  // <i data-lucide="..."> Tags ersetzbar. Idempotent: createIcons() läuft mehrfach
+  // sicher, ersetzt nur <i>-Tags die noch nicht konvertiert sind.
+  if (window.lucide) lucide.createIcons();
+</script>
 <div class="wrap">
 
   <!-- ══════════ VIEW: Video list for active channel ══════════ -->
