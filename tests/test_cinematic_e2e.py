@@ -744,6 +744,13 @@ def main():
         run(t_phase38_backend_preset_endpoint, "38-Backend: GET /api/presets liefert 5 Presets + Default")
         run(t_phase38_channel_creation_with_preset, "38-Backend: POST /api/channels mit preset → master_prompt.txt")
 
+        summary_section("Phase 33.7: Theme Tusche-Rot + Stepper-Kontrast (Werkstatt-UI)")
+        run(t_phase33_7_no_purple_tokens, "33.7: keine Lila-Tokens (#4f46e5/#4338ca/#eef2ff) mehr")
+        run(t_phase33_7_stepper_circle_contrast, "33.7: Stepper-Kreise Tusche-Rot (WCAG-AA-Kontrast)")
+        run(t_phase33_7_nameToHsl_removed, "33.7: nameToHsl() returnt null (kein Zufalls-HSL)")
+        run(t_phase33_7_brand_color_cosmetic_only, "33.7: Brand-Color-Picker-Label '(rein kosmetisch)'")
+        run(t_phase33_7_stepepr_visible_label, "33.7: Stepper-Labels lesbar (text-app-text/-mut)")
+
         print(f"\n=== Result ===")
         print(f"  Passed: {PASSED}")
         print(f"  Failed: {FAILED}")
@@ -1854,6 +1861,140 @@ def t_phase38_backend_preset_endpoint():
 
 
 def t_phase38_channel_creation_with_preset():
+    """Phase 38 Backend: POST /api/channels mit preset-Feld schreibt das richtige
+    master_prompt.txt. Ohne preset → DEFAULT_PRESET (flat_cartoon_doc)."""
+    import subprocess
+    import urllib.request
+    import time as _time
+    import shutil
+
+    port = 18704
+    proc = subprocess.Popen(
+        ["python3", os.path.join(ROOT, "dashboard.py"), "--port", str(port)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=ROOT,
+    )
+    _time.sleep(2.5)
+    try:
+        # Test 1: kein preset → DEFAULT
+        payload1 = json.dumps({"name": "p38test_default"}).encode()
+        req1 = urllib.request.Request(
+            f"http://localhost:{port}/api/channels",
+            data=payload1, headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req1, timeout=10) as r:
+            body = json.loads(r.read())
+        assert body["ok"]
+        assert body["preset"] == "flat_cartoon_doc"
+        master = os.path.join(ROOT, "channels", body["id"], "master_prompt.txt")
+        content = open(master).read()
+        assert "flat 2d cartoon" in content.lower()
+        shutil.rmtree(os.path.join(ROOT, "channels", body["id"]), ignore_errors=True)
+
+        # Test 2: explizites Preset
+        payload2 = json.dumps({"name": "p38test_charcoal", "preset": "charcoal_noir"}).encode()
+        req2 = urllib.request.Request(
+            f"http://localhost:{port}/api/channels",
+            data=payload2, headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req2, timeout=10) as r:
+            body = json.loads(r.read())
+        assert body["ok"]
+        assert body["preset"] == "charcoal_noir"
+        master = os.path.join(ROOT, "channels", body["id"], "master_prompt.txt")
+        content = open(master).read()
+        assert "charcoal" in content.lower()
+        shutil.rmtree(os.path.join(ROOT, "channels", body["id"]), ignore_errors=True)
+
+        # Test 3: unbekanntes Preset → Fallback auf DEFAULT
+        payload3 = json.dumps({"name": "p38test_invalid", "preset": "does_not_exist"}).encode()
+        req3 = urllib.request.Request(
+            f"http://localhost:{port}/api/channels",
+            data=payload3, headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req3, timeout=10) as r:
+            body = json.loads(r.read())
+        assert body["ok"]
+        assert body["preset"] == "flat_cartoon_doc"  # Fallback
+        shutil.rmtree(os.path.join(ROOT, "channels", body["id"]), ignore_errors=True)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+
+def t_phase33_7_no_purple_tokens():
+    """Phase 33.7: keine Lila-Token mehr im HTML. SaaS-Lila ist raus, Tusche-Rot rein.
+    WCAG AA verlangt ≥4.5:1 Kontrast — Lila mit hellerem Lila-Soft-Background hatte
+    das nicht für alle Text-Kombinationen."""
+    html = open(os.path.join(ROOT, "dashboard.html")).read()
+    # Lila-Tokens explizit verbannt
+    forbidden_purples = ("#4f46e5", "#4338ca", "#6366f1", "#eef2ff")
+    for purple in forbidden_purples:
+        assert purple not in html, \
+            f"Phase 33.7: Lila-Token {purple!r} muss aus dashboard.html raus (Tusche-Rot statt SaaS-Lila)"
+    # Tusche-Rot-Akzent MUSS da sein (PHASE_ACCENT["CLIMAX"])
+    assert "#c13838" in html, "Phase 33.7: Tusche-Rot #c13838 als Akzent fehlt"
+    # Werkstatt-Farben: Papierweiß + Tiefschwarz
+    assert "#fafaf9" in html, "Phase 33.7: Papierweiß #fafaf9 als bg fehlt"
+    assert "#111827" in html, "Phase 33.7: Tiefschwarz #111827 als Text fehlt"
+
+
+def t_phase33_7_stepper_circle_contrast():
+    """Phase 33.7: Stepper-Kreise haben WCAG-AA-konformen Kontrast.
+
+    Active + Completed: bg-app-acc (Tusche-Rot #c13838) + text-white = ~5.5:1 → AA ✓
+    Inactive: bg-app-surface (weiß) + text-app-mut (#374151) = ~10:1 → AAA ✓
+    """
+    src = open(os.path.join(ROOT, "dashboard.html")).read()
+    # Tusche-Rot muss als Stepper-Akzent verwendet werden
+    assert "bg-app-acc border-app-acc text-white" in src, \
+        "Phase 33.7: aktiver Stepper-Kreis muss Tusche-Rot-Akzent nutzen"
+    # Grün darf NICHT mehr für Stepper-Completed sein (Kontrast-Problem)
+    stepper_funcs = src[src.find("circleClass(n)"):src.find("circleClass(n)") + 500]
+    assert "bg-app-ok border-app-ok" not in stepper_funcs, \
+        "Phase 33.7: bg-app-ok für Stepper entfernt (Kontrast-Problem — text-white auf #16a34a = 3.4:1)"
+
+
+def t_phase33_7_nameToHsl_removed():
+    """Phase 33.7: nameToHsl-Zufallsfallback ist raus (verwirrte Nutzer, F3-Befund).
+
+    Neuer Vertrag: nameToHsl() returnt null; Caller fallen auf CSS-Default zurück.
+    """
+    src = open(os.path.join(ROOT, "dashboard.html")).read()
+    # function nameToHsl muss noch existieren (für Caller-Kompatibilität)
+    i = src.find("function nameToHsl(")
+    assert i >= 0
+    # Body muss 'return null' enthalten — Zufallsberechnung raus
+    end = src.find("\nfunction ", i + 30)
+    if end < 0: end = i + 500
+    body = src[i:end]
+    assert "return null" in body, \
+        "Phase 33.7: nameToHsl() muss return null sein (kein hsl(${...}, ...) mehr)"
+
+
+def t_phase33_7_brand_color_cosmetic_only():
+    """Phase 33.7: Brand-Color-Picker-Label sagt explizit 'rein kosmetisch' (F3, F6)."""
+    html = open(os.path.join(ROOT, "dashboard.html")).read()
+    # Label 'rein kosmetisch' muss im Settings-Modal stehen
+    assert "rein kosmetisch" in html, \
+        "Phase 33.7: Brand-Color-Picker-Label muss '(rein kosmetisch)' ergänzt haben"
+
+
+def t_phase33_7_stepepr_visible_label():
+    """Phase 33.7: Stepper-Labels sind lesbar (nicht mehr 'heller Text auf hellem Lila').
+
+    labelClass setzt text-app-text für active/completed, text-app-mut für inactive.
+    Beide müssen mindestens WCAG-AA-Kontrast haben:
+      text-app-text (#111827) auf bg-app-surface (#ffffff) = ~16:1 → AAA ✓
+      text-app-mut (#374151) auf bg-app-surface (#ffffff) = ~10:1 → AAA ✓
+    """
+    src = open(os.path.join(ROOT, "dashboard.html")).read()
+    # Stepper-Label-Class
+    assert "'text-app-text'" in src and "'text-app-mut'" in src, \
+        "Stepper-Labels müssen text-app-text (active/completed) oder text-app-mut (inactive) nutzen"
     """Phase 38 Backend: POST /api/channels mit preset-Feld schreibt das richtige
     master_prompt.txt. Ohne preset → DEFAULT_PRESET (flat_cartoon_doc)."""
     import subprocess
