@@ -816,6 +816,7 @@ KIE_SUBMIT_RATE_LIMIT = 12
 KIE_SUBMIT_RATE_WINDOW = 10.0
 
 def _kie_rate_limit_wait():
+    """Sliding-window Rate-Limit (Phase H). Bewegt Calls in 10s-Fenster auf max 12."""
     while True:
         with _KIE_SUBMIT_LOCK:
             now = time.time()
@@ -826,6 +827,80 @@ def _kie_rate_limit_wait():
                 return
             wait_for = KIE_SUBMIT_RATE_WINDOW - (now - _KIE_SUBMIT_TIMES[0]) + 0.05
         time.sleep(max(wait_for, 0.05))
+
+
+# Phase 1.3 (#14): Exponential Backoff + Circuit Breaker für externe APIs
+# Circuit-Breaker-State: nach N_FAILURES_THRESHOLD Fehlern in FAILURE_WINDOW_S Sekunden
+# → CIRCUIT_OPEN_DURATION_S Sekunden keine Calls mehr (verhindert Thundering-Herd)
+_KIE_FAILURE_TIMES = collections.deque(maxlen=20)
+KIE_FAILURE_WINDOW_S = 60.0
+KIE_FAILURES_THRESHOLD = 10
+KIE_CIRCUIT_OPEN_DURATION_S = 60.0
+_KIE_CIRCUIT_OPENED_AT = 0.0  # 0 = closed; sonst time.time() der Öffnung
+
+
+def _kie_circuit_status():
+    """True wenn Circuit geschlossen (Calls erlaubt), False wenn offen (Calls blockiert)."""
+    global _KIE_CIRCUIT_OPENED_AT
+    if _KIE_CIRCUIT_OPENED_AT == 0.0:
+        return True
+    if time.time() - _KIE_CIRCUIT_OPENED_AT > KIE_CIRCUIT_OPEN_DURATION_S:
+        # Halb-offen: probieren lassen, aber Erfolg schließt den Circuit
+        return True
+    return False
+
+
+def _kie_record_failure():
+    """Zählt Fehler. Bei Threshold → Circuit öffnen."""
+    global _KIE_CIRCUIT_OPENED_AT
+    now = time.time()
+    while _KIE_FAILURE_TIMES and now - _KIE_FAILURE_TIMES[0] > KIE_FAILURE_WINDOW_S:
+        _KIE_FAILURE_TIMES.popleft()
+    _KIE_FAILURE_TIMES.append(now)
+    if len(_KIE_FAILURE_TIMES) >= KIE_FAILURES_THRESHOLD and _KIE_CIRCUIT_OPENED_AT == 0.0:
+        _KIE_CIRCUIT_OPENED_AT = now
+        print(f"  [KIE Circuit Breaker] GEÖFFNET nach {KIE_FAILURES_THRESHOLD} Fehlern in {KIE_FAILURE_WINDOW_S}s — "
+              f"keine Calls für {KIE_CIRCUIT_OPEN_DURATION_S}s", flush=True)
+
+
+def _kie_record_success():
+    """Schließt Circuit bei Erfolg."""
+    global _KIE_CIRCUIT_OPENED_AT
+    if _KIE_CIRCUIT_OPENED_AT != 0.0:
+        print("  [KIE Circuit Breaker] geschlossen nach Erfolg", flush=True)
+        _KIE_CIRCUIT_OPENED_AT = 0.0
+    _KIE_FAILURE_TIMES.clear()
+
+
+def _kie_retry_with_backoff(fn, max_attempts: int = 4, base_sleep_s: float = 2.0):
+    """Phase 1.3 (#14): Exponential Backoff für einen KIE-Call.
+
+    fn: callable() → (success_bool, result_or_error)
+    - True → Result wird zurückgegeben
+    - False → Error wird geloggt, Backoff, nächster Versuch
+    Wirft RuntimeError nach max_attempts-Versuchen.
+    Respektiert Circuit-Breaker: wenn offen, wirft sofort.
+    """
+    if not _kie_circuit_status():
+        raise RuntimeError(f"KIE Circuit Breaker ist offen — kein Call erlaubt (warte {KIE_CIRCUIT_OPEN_DURATION_S}s)")
+    last_err = None
+    for attempt in range(max_attempts):
+        _kie_rate_limit_wait()
+        try:
+            ok, result = fn()
+            if ok:
+                _kie_record_success()
+                return result
+            last_err = result
+        except Exception as e:
+            last_err = str(e)
+            _kie_record_failure()
+        if attempt < max_attempts - 1:
+            wait = base_sleep_s ** (attempt + 1)   # 2s, 4s, 8s
+            print(f"  [KIE Backoff] Versuch {attempt+1}/{max_attempts} fehlgeschlagen ({last_err[:80] if last_err else "-"}); "
+                  f"warte {wait}s", flush=True)
+            time.sleep(wait)
+    raise RuntimeError(f"KIE nach {max_attempts} Versuchen aufgegeben: {last_err}")
 
 def _kie_submit_image(full_prompt: str, model: str = "nano-banana-2", ref_urls: list = None) -> str:
     """Submit image task to KIE, return task_id.

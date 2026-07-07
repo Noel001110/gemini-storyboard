@@ -764,6 +764,14 @@ def main():
         run(t_bug_b1_charref_upload_validates_base64, "B-1: handler hat try/except + validate=False + name-check + mkdir")
         run(t_bug_b1_charref_upload_roundtrip, "B-1 E2E: valid upload schreibt PNG+JSON, keine 5xx")
 
+        summary_section("Phase 1.3 — KIE Exponential Backoff + Circuit Breaker (#14)")
+        run(t_phase1_kie_backoff_basic, "#14: _kie_retry_with_backoff erfolgreich beim ersten Versuch")
+        run(t_phase1_kie_backoff_retries_on_failure, "#14: Backoff wiederholt bei Fehler bis max_attempts")
+        run(t_phase1_kie_backoff_throws_after_max, "#14: RuntimeError nach max_attempts")
+        run(t_phase1_kie_circuit_breaker_opens, "#15: Circuit Breaker öffnet nach Threshold-Fehlern")
+        run(t_phase1_kie_circuit_breaker_blocks, "#15: geschlossener Circuit blockiert Calls")
+        run(t_phase1_kie_circuit_breaker_resets, "#15: Circuit resettet nach Erfolg")
+
         summary_section("Phase 3.4 — /health-Endpoint (Schwachstellenbericht #38/#40/#65/#67)")
         run(t_phase3_health_endpoint_returns_ok, "#38: /health liefert status=ok + uptime + active counts")
         run(t_phase3_health_includes_git_commit, "#38: /health enthält version mit Git-Commit")
@@ -2722,6 +2730,108 @@ def t_char_filter_load_char_refs():
             shutil.rmtree(test_ch_dir, ignore_errors=True)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 1.3 — KIE Exponential Backoff + Circuit Breaker (#14, #15)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def t_phase1_kie_backoff_basic():
+    """#14: _kie_retry_with_backoff: erfolgreicher Call beim ersten Versuch."""
+    import dashboard
+    dashboard._kie_record_success()  # reset state
+    calls = []
+    def fn():
+        calls.append(1)
+        return (True, "ok")
+    result = dashboard._kie_retry_with_backoff(fn, max_attempts=4, base_sleep_s=0.001)
+    assert result == "ok", f"Muss 'ok' returnen, war: {result}"
+    assert len(calls) == 1, f"Erfolgreicher Call darf nur 1× aufgerufen werden, war: {len(calls)}"
+
+
+def t_phase1_kie_backoff_retries_on_failure():
+    """#14: bei Fehler wird erneut versucht (mit Backoff)."""
+    import dashboard
+    dashboard._kie_record_success()
+    calls = []
+    def fn():
+        calls.append(1)
+        return (False, "network timeout")
+    # Sollte 4× versuchen und dann RuntimeError werfen
+    try:
+        dashboard._kie_retry_with_backoff(fn, max_attempts=4, base_sleep_s=0.001)
+        assert False, "Muss RuntimeError werfen"
+    except RuntimeError as e:
+        assert "4 Versuchen" in str(e), f"Error muss 4 Versuche erwähnen: {e}"
+    assert len(calls) == 4, f"Muss 4× aufgerufen werden, war: {len(calls)}"
+
+
+def t_phase1_kie_backoff_throws_after_max():
+    """#14: nach max_attempts wird RuntimeError geworfen."""
+    import dashboard
+    dashboard._kie_record_success()
+    def fn():
+        return (False, "persistent failure")
+    raised = False
+    try:
+        dashboard._kie_retry_with_backoff(fn, max_attempts=3, base_sleep_s=0.001)
+    except RuntimeError as e:
+        raised = True
+        assert "persistent failure" in str(e), f"Original-Error muss in Message stehen: {e}"
+    assert raised, "RuntimeError muss geworfen werden"
+
+
+def t_phase1_kie_circuit_breaker_opens():
+    """#15: Circuit Breaker öffnet nach Threshold Fehlern."""
+    import dashboard
+    # Reset state
+    dashboard._kie_record_success()
+    dashboard._KIE_CIRCUIT_OPENED_AT = 0.0
+    dashboard._KIE_FAILURE_TIMES.clear()
+
+    # Simuliere 10 Fehler (Threshold = 10)
+    for _ in range(10):
+        dashboard._kie_record_failure()
+
+    # Circuit sollte jetzt offen sein
+    assert dashboard._KIE_CIRCUIT_OPENED_AT > 0,         "Circuit muss nach 10 Fehlern offen sein"
+    assert not dashboard._kie_circuit_status(),         "_kie_circuit_status() muss False zurückgeben wenn offen"
+
+
+def t_phase1_kie_circuit_breaker_blocks():
+    """#15: offener Circuit blockiert Calls (wirft RuntimeError)."""
+    import dashboard
+    dashboard._KIE_CIRCUIT_OPENED_AT = dashboard.time.time() if hasattr(dashboard, "time") else 1.0
+    import time
+    dashboard._KIE_CIRCUIT_OPENED_AT = dashboard.time.time()  # gerade geöffnet
+    raised = False
+    try:
+        dashboard._kie_retry_with_backoff(lambda: (True, "ok"), max_attempts=2, base_sleep_s=0.001)
+    except RuntimeError as e:
+        raised = True
+        assert "Circuit Breaker" in str(e), f"Error muss Circuit Breaker erwähnen: {e}"
+    assert raised, "Offener Circuit muss Call blockieren"
+    # State reset
+    dashboard._KIE_CIRCUIT_OPENED_AT = 0.0
+
+
+def t_phase1_kie_circuit_breaker_resets():
+    """#15: Erfolg bei halb-offenem Circuit resettet den Breaker."""
+    import dashboard
+    import time
+    # Halb-offen: vor langer Zeit geöffnet → cooldown vorbei, status True
+    dashboard._KIE_CIRCUIT_OPENED_AT = dashboard.time.time() - dashboard.KIE_CIRCUIT_OPEN_DURATION_S - 1
+    dashboard._KIE_FAILURE_TIMES.clear()
+
+    # Erfolgreicher Call sollte Circuit komplett schließen
+    def fn():
+        return (True, "ok")
+    dashboard._kie_retry_with_backoff(fn, max_attempts=2, base_sleep_s=0.001)
+
+    assert dashboard._KIE_CIRCUIT_OPENED_AT == 0.0,         "Circuit muss nach Erfolg geschlossen werden"
+    assert len(dashboard._KIE_FAILURE_TIMES) == 0,         "Failure-Times müssen nach Erfolg gecleart werden"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 3.4 — Health-Endpoint (Schwachstellenbericht #38, #40, #65, #67)
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 3.4 — Health-Endpoint (Schwachstellenbericht #38, #40, #65, #67)
 # ─────────────────────────────────────────────────────────────────────────────
