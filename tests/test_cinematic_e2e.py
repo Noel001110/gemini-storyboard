@@ -764,6 +764,12 @@ def main():
         run(t_bug_b1_charref_upload_validates_base64, "B-1: handler hat try/except + validate=False + name-check + mkdir")
         run(t_bug_b1_charref_upload_roundtrip, "B-1 E2E: valid upload schreibt PNG+JSON, keine 5xx")
 
+        summary_section("Phase 3.4 — Strukturiertes JSON-Logging (#40)")
+        run(t_phase3_log_text_mode_by_default, "#40: Default-Modus ist menschenlesbar (backward-compat)")
+        run(t_phase3_log_json_mode_via_env, "#40: LOG_JSON=1 → JSON-Modus aktiv")
+        run(t_phase3_log_with_fields, "#40: _log() mit key=value-Format (Text-Modus)")
+        run(t_phase3_log_serializes_complex_types, "#40: JSON-Serialisierung mit komplexen Feldern")
+
         summary_section("Phase 1.3 — KIE Exponential Backoff + Circuit Breaker (#14)")
         run(t_phase1_kie_backoff_basic, "#14: _kie_retry_with_backoff erfolgreich beim ersten Versuch")
         run(t_phase1_kie_backoff_retries_on_failure, "#14: Backoff wiederholt bei Fehler bis max_attempts")
@@ -2730,6 +2736,102 @@ def t_char_filter_load_char_refs():
             shutil.rmtree(test_ch_dir, ignore_errors=True)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 3.4 — Strukturiertes JSON-Logging (#40)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def t_phase3_log_text_mode_by_default():
+    """#40: Default-Modus ist menschenlesbar (Text, backward-compat)."""
+    import os
+    # Sicherstellen dass LOG_JSON NICHT gesetzt ist
+    os.environ.pop("LOG_JSON", None)
+    # Re-import dashboard mit gelöschter Env-Var
+    import importlib, sys
+    if "dashboard" in sys.modules: del sys.modules["dashboard"]
+    if "engine" in sys.modules:
+        for k in list(sys.modules):
+            if k.startswith("engine."): del sys.modules[k]
+        del sys.modules["engine"]
+    import dashboard
+    assert dashboard._LOG_JSON_MODE is False, \
+        f"LOG_JSON_MODE muss False sein wenn Env nicht gesetzt, war: {dashboard._LOG_JSON_MODE}"
+
+
+def t_phase3_log_json_mode_via_env():
+    """#40: LOG_JSON=1 → JSON-Modus aktiv (für Docker / Log-Aggregation)."""
+    import os, sys, json
+    os.environ["LOG_JSON"] = "1"
+    if "dashboard" in sys.modules: del sys.modules["dashboard"]
+    for k in list(sys.modules):
+        if k.startswith("engine."): del sys.modules[k]
+    if "engine" in sys.modules: del sys.modules["engine"]
+    try:
+        import dashboard
+        assert dashboard._LOG_JSON_MODE is True, \
+            f"LOG_JSON_MODE muss True sein, war: {dashboard._LOG_JSON_MODE}"
+        # JSON-Modus-Output prüfen
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            dashboard._log("INFO", "test_event", foo="bar", count=42)
+        out = buf.getvalue().strip()
+        parsed = json.loads(out)  # muss gültiges JSON sein
+        assert parsed["event"] == "test_event", f"event falsch: {parsed}"
+        assert parsed["level"] == "INFO", f"level falsch: {parsed}"
+        assert parsed["foo"] == "bar", f"foo falsch: {parsed}"
+        assert parsed["count"] == 42, f"count falsch: {parsed}"
+        assert "ts" in parsed, "ts fehlt"
+    finally:
+        os.environ.pop("LOG_JSON", None)
+
+
+def t_phase3_log_with_fields():
+    """#40: _log() im Text-Modus → key=value-Format."""
+    import os
+    os.environ.pop("LOG_JSON", None)
+    import sys
+    if "dashboard" in sys.modules: del sys.modules["dashboard"]
+    for k in list(sys.modules):
+        if k.startswith("engine."): del sys.modules[k]
+    if "engine" in sys.modules: del sys.modules["engine"]
+    import dashboard
+    import io
+    from contextlib import redirect_stdout
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        dashboard._log("INFO", "render_complete", video_id="v1", duration_s=42.5)
+    out = buf.getvalue()
+    assert "[INFO]" in out, f"Level-Prefix fehlt: {out!r}"
+    assert "render_complete" in out, f"Event-Name fehlt: {out!r}"
+    assert "video_id='v1'" in out, f"key=value fehlt: {out!r}"
+    assert "duration_s=42.5" in out, f"Zahl-Wert fehlt: {out!r}"
+
+
+def t_phase3_log_serializes_complex_types():
+    """#40: JSON-Modus serialisiert auch Listen/Dicts (über json.dumps)."""
+    import os
+    os.environ["LOG_JSON"] = "1"
+    import sys
+    if "dashboard" in sys.modules: del sys.modules["dashboard"]
+    for k in list(sys.modules):
+        if k.startswith("engine."): del sys.modules[k]
+    if "engine" in sys.modules: del sys.modules["engine"]
+    try:
+        import dashboard, json, io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            dashboard._log("INFO", "complex", items=[1, 2, 3], meta={"a": "b"})
+        parsed = json.loads(buf.getvalue().strip())
+        assert parsed["items"] == [1, 2, 3], f"Liste nicht serialisiert: {parsed}"
+        assert parsed["meta"] == {"a": "b"}, f"Dict nicht serialisiert: {parsed}"
+    finally:
+        os.environ.pop("LOG_JSON", None)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 1.3 — KIE Exponential Backoff + Circuit Breaker (#14, #15)
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 1.3 — KIE Exponential Backoff + Circuit Breaker (#14, #15)
 # ─────────────────────────────────────────────────────────────────────────────
