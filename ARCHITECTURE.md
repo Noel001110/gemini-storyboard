@@ -1,6 +1,6 @@
 # Storyboard Generator — Architektur-Überblick
 
-Stand: Juli 2026. Referenz-Dokument, damit man nach längerer Pause wieder reinfindet, ohne den ganzen Code neu lesen zu müssen. Alle Zeilenangaben beziehen sich auf den aktuellen Stand von `dashboard.py` / `dashboard.html` — bei größeren Änderungen können sie sich verschieben, die Funktionsnamen bleiben der verlässlichere Anker.
+Stand: Juli 2026. Referenz-Dokument, damit man nach längerer Pause wieder reinfindet, ohne den ganzen Code neu lesen zu müssen. **Zeilenangaben in den historischen Abschnitten (§4–§32) sind nach dem Engine-Refactor (Phase J + M) veraltet** — die zustandslose Kern-Logik lebt jetzt im `engine/`-Paket, nicht mehr im `dashboard.py`-Monolithen. Die verlässlichen Anker sind die **Funktionsnamen**; die aktuelle Modul-Landkarte steht in **§3.1**.
 
 ## 1. Was das Programm macht
 
@@ -8,19 +8,19 @@ Lokales Tool (läuft auf `localhost:8765`), das aus einem Sprecher-Skript automa
 
 ## 2. Tech-Stack — bewusst minimal
 
-- **Backend**: `dashboard.py`, ein einziges File, nur Python-Stdlib (`http.server.ThreadingHTTPServer`, kein Flask/FastAPI). ~3745 Zeilen (Stand nach Aufräumen toter Pfade, Juli 2026 — wächst mit jeder Phase, Zeilenangabe hier bewusst nur eine grobe Orientierung, kein exakter Wert zum Nachhalten).
-- **Frontend**: `dashboard.html`, ein einziges File — Vanilla JS, kein Build-Step, kein Framework. Wird bei **jedem** Request frisch von der Platte gelesen (Zeile 2034: `open(... "dashboard.html").read()`), d.h. Frontend-Änderungen brauchen **keinen Server-Neustart**, Backend-Änderungen (`dashboard.py`) schon.
-- **Externe Dienste**: alles über **KIE.ai** als zentralen API-Broker — Bildgenerierung (nano-banana-2/-lite), Textgenerierung (Gemini 2.5 Flash + Gemini 3.5 Flash native), Video (Veo 3.1, Grok Imagine T2V/I2V).
+- **Backend**: `dashboard.py` (~3360 Z., Orchestrator: HTTP-Server + Jobs + Worker) **plus das `engine/`-Paket** (`scenes`, `prompts`, `render`, `audio`, `presets`) und `engine_elevenlabs.py` — nur Python-Stdlib (`http.server.ThreadingHTTPServer`, kein Flask/FastAPI). Vollständige Modul-Aufteilung: **§3.1**. War ursprünglich ein ~4.700-Zeilen-Monolith, seit Phase J + M aufgeteilt.
+- **Frontend**: `dashboard.html`, ein einziges File — Vanilla JS + Tailwind (CDN) + Alpine.js, kein Build-Step. Wird bei **jedem** Request frisch von der Platte gelesen, d.h. Frontend-Änderungen brauchen **keinen Server-Neustart**, Backend-Änderungen (`dashboard.py` / `engine/`) schon.
+- **Externe Dienste**: alles über **KIE.ai** als zentralen API-Broker — Bildgenerierung (nano-banana-2/-lite), Textgenerierung (Gemini 2.5 Flash + Gemini 3.5 Flash native), Video (Veo 3.1 I2V; T2V deprecated, Plan Phase 39). TTS zusätzlich über ElevenLabs/MiniMax (`engine_elevenlabs.py`).
 - **Datenhaltung**: keine Datenbank — alles als JSON-Dateien im Filesystem unter `channels/`.
 
 ## 3. Verzeichnisstruktur (Datenmodell)
 
 ```
-channels/
-  channels.json                       # Liste aller Kanäle [{id, name}]
+channels/                             # gitignored — lokale Nutzerdaten, nicht im Repo
+  channels.json                       # Liste aller Kanäle [{id, name, brand_color?}]
   <cid>/                              # ein Kanal
     master_prompt.txt                 # Bild-Stil (Charakter/Farben/Linienführung)
-    video_master_prompt.txt           # Video-Stil (für T2V-Modus)
+    video_master_prompt.txt           # Video-Stil (nur T2V — deprecated, Phase 39 entfernt T2V)
     char_ref_url.txt                  # EIN globales Referenzbild fürs ganze Kanal (Veo-Konsistenz)
     char_ref.png                      # lokale Kopie davon
     charsheets/                       # benannte Charakter-Referenzen (mehrere möglich)
@@ -56,7 +56,30 @@ channels/
   "render": {"file": "final.mp4", "ts": 173..., "checks": {"duration_ok": true, "audio_ok": true, "frames_ok": true}}
 }
 ```
-`status` ∈ `geplant | läuft | fertig | fehler`. Jeder Schreibzugriff auf `plan.json` läuft über `_PLAN_WRITE_LOCK` (dashboard.py:35) — siehe Abschnitt 6.3, das war ein echter Bug. Alle Felder ab `concrete_entity` sind **additiv/optional** (Feature A/B, siehe Abschnitt 12/13) — alte Pläne ohne diese Felder bleiben ohne Änderung ladbar.
+`status` ∈ `geplant | läuft | fertig | fehler`. Jeder Schreibzugriff auf `plan.json` läuft über `_PLAN_WRITE_LOCK` (dashboard.py) — siehe Abschnitt 6.3, das war ein echter Bug. Alle Felder ab `concrete_entity` sind **additiv/optional** (Feature A/B, siehe Abschnitt 12/13) — alte Pläne ohne diese Felder bleiben ohne Änderung ladbar. Neuere additive Felder (ab Phase K–P): `is_hook`, `throughline_question` (L), `data_visual` (N), `accent_t` (O), `music_plan` (K).
+
+### 3.1 Code-Struktur — Python-Module (Stand nach Phase M, Juli 2026)
+
+Ursprünglich war **alles** ein Monolith in `dashboard.py` (~4.700 Z.). Phase J + M haben die
+zustandslose Kern-Logik in ein `engine/`-Paket extrahiert; `dashboard.py` (~3.360 Z.) bleibt
+der **Orchestrator** (HTTP-Server, Job-Dicts, Worker-Threads, LLM-/KIE-Calls). Alle Extrakte
+laufen über `from engine.<modul> import *` + `__all__`, mit Lazy-Imports gegen Zyklen.
+
+| Datei | Zeilen | Rolle |
+|---|---|---|
+| `dashboard.py` | ~3360 | Orchestrator: `ThreadingHTTPServer` + `H`-Handler (do_GET/do_POST), alle Job-Dicts + Locks, `_render_worker`/`_batch_generate_worker`/Orchestrator, KIE/Veo/Gemini-Calls (`_kie_submit_image`, `gen_veo`, `gen_video`, `post_gemini_native`), `analyze_script`, `_assign_phases`, `align_scenes_to_whisper`, `upload_image_public` |
+| `engine/scenes.py` | ~350 | Szenen-Logik: `split_units`, `segment_by_pacing`, `_is_accent_eligible`, `_compute_accent_t` (Phase O), Sequenz-Ketten-Helfer |
+| `engine/prompts.py` | ~590 | Prompt-Komposition: `visual_prompts`, `_build_image_prompt`, `HOOK_PROMPT_ADDITION` (L), Char-Sheet-Pipeline |
+| `engine/render.py` | ~660 | Visuelle Render-Pipeline: `_render_clip` (zoompan/Grading/Overlays), `_assemble_clips`, `_mux_audio`, `_crossfade_clips`, `_render_selfcheck`, Motion-/Transition-Vokabular, `MOTION_LIBRARY`/`TRANSITION_LIBRARY` |
+| `engine/audio.py` | ~450 | Sound-Design: `_build_final_audio`, `_build_music_track` (K), `_phase_modulate_music`, `_duck_music_under_voice`, `_place_sfx`, `MUSIC_BEDS`/`PHASE_TO_TIER`/`SFX_FILES` |
+| `engine/presets.py` | ~185 | Stil-Preset-Library (Phase 38): `PRESET_MASTERS`, `DEFAULT_PRESET` |
+| `engine_elevenlabs.py` | ~675 | TTS-Provider (ElevenLabs/MiniMax) + Phasen-Konstanten (`PHASE_PROMPT_ADDITIONS`, `PHASE_COLOR_FILTER`, `PHASE_VOLUME`) |
+| `render_overlay.py` | ~290 | PIL-Overlays: Untertitel, Counter (statisch + `counter_anim`-Sequenz, Phase N), Title-Cards — läuft im venv-Subprozess |
+
+**Wichtig für Doku-Pflege (Plan §8.4/2):** Die Zeilennummern in den historischen Abschnitten
+§4–§32 stammen aus dem Vor-M-Monolithen und sind **nicht** mehr verlässlich. Stabile Anker sind
+die **Funktionsnamen** — obige Tabelle sagt, in welchem Modul sie heute leben. Bei Bedarf greppen,
+nie blind auf alte Zeilennummern patchen.
 
 ## 4. High-Level-Datenfluss
 
@@ -87,10 +110,16 @@ Für Videos (T2V/Veo) ist der Pfad separat und **on-demand pro Szene**, nicht Te
 
 ## 5. Die zwei Betriebsmodi (`mode`: `"image"` | `"video"`)
 
-Pro Video (`videos.json` → `mode`-Feld) einstellbar, im Frontend über den Segmented-Control oben im Editor (`setMode()`, dashboard.html:930).
+> **Stand Juli 2026:** Die gesamte Cinematic-Pipeline (Phasen A–P) ist **Bild-first**. Der
+> **Video-/T2V-Modus ist deprecated** und für die vollständige Entfernung vorgesehen (Plan
+> Phase 39, „T2V raus / I2V rein"). `gen_veo` **bleibt** — es akzeptiert `image_urls` und trägt
+> damit den I2V-Pfad; nur der reine Text→Video-Modus (`make_t2v_prompt`, `/api/preview_t2v_prompt`,
+> `/api/generate_t2v`, UI-Mode „🎬 Video (T2V)") entfällt.
 
-- **Bild-Modus** (Standard): Skript → Szenen → **Bilder** (nano-banana-2). Optional pro Szene per I2V ("Animieren"-Button) zu einem kurzen Grok-Video animiert (`gen_video()`, dashboard.py:2649 — **nicht** Veo, sondern `grok-imagine/image-to-video`).
-- **Video-Modus** (T2V): Skript → Szenen → **direkt Videos**, kein Bild-Zwischenschritt, über **Veo 3.1** (`gen_veo`/`extend_veo`, dashboard.py:2533/2564, verdrahtet über `/api/generate_t2v`, dashboard.py:3251), inkl. Chain-Extend (Abschnitt 7.2). Ein früher zusätzlich vorhandener, nie verdrahteter zweiter Pfad über Grok T2V (`gen_t2v`, Modell `grok-imagine/text-to-video`) wurde beim Aufräumen toter Pfade (Juli 2026) entfernt, siehe Abschnitt 11.
+Pro Video (`videos.json` → `mode`-Feld) einstellbar, im Frontend über den Segmented-Control oben im Editor (`setMode()`).
+
+- **Bild-Modus** (Standard, empfohlen): Skript → Szenen → **Bilder** (nano-banana-2). Optional pro Szene per I2V ("Animieren"-Button) zu einem kurzen Grok-Video animiert (`gen_video()`, dashboard.py — **nicht** Veo, sondern `grok-imagine/image-to-video`).
+- **Video-Modus** (T2V, deprecated): Skript → Szenen → **direkt Videos** über **Veo 3.1** (`gen_veo`/`extend_veo`, dashboard.py, verdrahtet über `/api/generate_t2v`), inkl. Chain-Extend (Abschnitt 7.2).
 
 `renderScenes()` im Frontend (dashboard.html:1131) rendert je nach `CURRENT_MODE` komplett unterschiedliches HTML pro Szene (zwei Spalten Bild+Video im Bild-Modus vs. eine Video-Spalte + Prompt-Textarea im Video-Modus).
 
@@ -451,6 +480,8 @@ Gemini generiert im Rahmen dieses Projekts bereits den gesamten Text-Content (Sk
 | `"user_upload"` oder fehlt | `transcribe_words_whisper()` | `_render_worker` Z. ~2318, identisch zur bisherigen Pipeline | §16.4/§16.5 |
 
 Der Pause-Trim (`_compute_pause_trims` / `_trim_audio_pauses` / `_adjust_words_for_trims`) und das Alignment (`align_scenes_to_whisper`) laufen in beiden Fällen identisch — die Übergabe ist einheitlich `[{word, start, end}, ...]`. Die einzige Verzweigung findet **vor** `transcribe_words_whisper()` statt: ist `voiceover_word_timestamps` vorhanden, wird diese Liste direkt verwendet (mit `language="elevenlabs"`, `language_probability=1.0` als Audit-Marker im Log); sonst Whisper.
+
+**Wichtige Korrektur (Juli 2026):** Der ElevenLabs-`/with-timestamps`-Endpoint (`eleven_multilingual_v2`) liefert **zeichen**-basiertes Alignment — `alignment.characters` + `character_start_times_seconds` + `character_end_times_seconds` — **NICHT** `alignment.words`. `elevenlabs_generate()` erwartete fälschlich `alignment.words`, wodurch jede Preview/Generierung mit „ElevenLabs antwortete ohne alignment.words" scheiterte. Fix: `_el_words_from_alignment()` (engine_elevenlabs.py) aggregiert die Zeichen an Whitespace-Grenzen zu Wörtern (mit fertigem `words`-Feld als Fallback für andere Schemata). **v3 wird bewusst nicht genutzt** — es liefert keine verlässlichen Timestamps, die die Szenen-Sync + Phase-O-Mikrotiming brauchen.
 
 **End-to-End verifiziert** (Juli 2026), beide Pfade getrennt:
 - **Option A** (Audio-Transkription): `/api/transcribe` liefert jetzt wieder reine geschätzte Szenen ohne `start_aligned` (4 Stufen, kein Whisper mehr an dieser Stelle) — korrektes Verhalten, die Ausrichtung folgt beim Rendern.
@@ -1282,6 +1313,118 @@ Definition of Done (Plan §3 Phase K):
 - [x] Tests grün
 
 
+## 32c. Phase P — Ink-Style-Grading-Feintuning (2026-07)
+
+Refinement des bestehenden Phase-Color-Gradings (§26). Grund (Plan §0 + §2 Kriterium 6): `eq=saturation=1.2` ist auf schwarz-auf-weiß-Tusche-Zeichnungen mathematisch fast ein No-Op (kaum Sättigung zu verstärken), `contrast` „dramatisiert" nicht. Für diesen Stil wirken **Papier-Tönung** (`colorbalance`) und **Vignette** deutlich stärker.
+
+### 32c.1 `PHASE_COLOR_FILTER` — von `eq` auf `colorbalance`
+
+`engine_elevenlabs.py` — pro Phase eine kleine Farbtönung auf Mitteltöne/Lichter (`rm`/`gm`/`bm`), Werte bewusst klein (−0.05..+0.08), damit kein Frame „defekt" wirkt (§26.3):
+
+- **OPENING**: `colorbalance=rm=-0.02:gm=0.0:bm=+0.04` — kühl (neutral-neugieriger Einstieg)
+- **RISING_ACTION**: `colorbalance=rm=0.0:gm=0.0:bm=+0.02` — leicht kühl (steigende Spannung)
+- **CLIMAX**: `colorbalance=rm=+0.05:gm=+0.02:bm=-0.02` — warm (gebrochenes Orange/Beige) + Vignette
+- **RESOLUTION**: `colorbalance=rm=-0.01:gm=+0.02:bm=-0.01` — leicht grünlich (Nachklang)
+
+### 32c.2 Vignette nur für CLIMAX
+
+`vignette` ist ffmpeg-seitig ein **separater** Filter, kein `colorbalance`-Parameter. Daher hängt `_render_clip` (`engine/render.py`) ihn nur bei CLIMAX per Komma an: `colorbalance=...,vignette=PI/5`. Position unverändert wie bei `eq` (§26.1): am `[base]`-Label nach `zoompan`, vor den Overlays. Filtergraph vorab am lokalen ffmpeg-Build verifiziert (Plan §3, Lehre aus dem `drawtext`-Fund §18.1) — `colorbalance` + `vignette` sind kompiliert.
+
+### 32c.3 Rückwärtskompatibilität
+
+Szene ohne `phase` → `PHASE_COLOR_FILTER.get(scene.get("phase",""), "")` liefert `""` → kein Suffix → byte-identisch zu vor Phase P. Legacy-Pläne rendern unverändert.
+
+### 32c.4 Verifikation
+
+- `tests/test_cinematic_e2e.py` — 106 Tests grün:
+  - `t_phase_d_color_filter_present` — akzeptiert jetzt `eq=` **oder** `colorbalance=` (eq-Dimensions-Check nur noch für Legacy-eq-Format)
+  - `t_phase_p_climax_has_vignette` — Source-Grep: `vignette=PI/5` nur für CLIMAX (`scene.get("phase") == "CLIMAX"`)
+  - `t_phase_p_legacy_plan_identity` — Phase-freie Szene → leerer Filter → keine Grading-Filter
+
+Definition of Done (Plan §3 Phase P):
+- [x] `colorbalance` (Papier-Tönung) für alle 4 Phasen
+- [x] `vignette` nur für CLIMAX (dezent, PI/5)
+- [x] Filter am lokalen ffmpeg-Build verifiziert (kein Laufzeit-Crash)
+- [x] Legacy-Identität (Szene ohne Phase rendert wie vor P)
+- [x] Tests grün
+- [ ] Optional-Experiment Fokus-Rahmen (Rand-Unschärfe) — bewusst verworfen (Plan §3: nur bei überzeugendem A/B)
+
+Offen (Tuning, kein Blocker): `vignette=PI/5` ist der ffmpeg-Default und relativ kräftig; falls die §6-A/B-Probe zu dunkle Ränder zeigt, Richtung `PI/4` schwächen.
+
+
+## 32d. Phase L — Hook + Leitfrage + Render-Kopplung (2026-07)
+
+Plan §3/§4.2: Cold Open (Hook) und Leitfrage (throughline_question) waren nur im Generator-Prompt (`SCRIPT_SYSTEM`) impliziert, wurden aber weder extrahiert noch beim Rendern genutzt. Phase L macht sie zu geprüften Datenfeldern + koppelt sie an die Render-Pipeline. Additiv: alte Pläne ohne `hook`-Feld rendern unverändert.
+
+### 32d.1 Analyse-Schema (`analyze_script`)
+
+`dashboard.py` erweitert das `analyze_script`-JSON additiv:
+- `hook`: `{"beat": N, "type": "quote"|"scene"|"thesis"|"none", "strength": "strong"|"weak"}`
+- `throughline_question`: Ein-Satz-Frage (max 200 Zeichen), die das ganze Video trägt — **oder leerer String**
+
+Strikte Nie-Erfinden-Regel analog CALLOUTS: `type="none"`, wenn Beats 0–2 mit Kontext/Definitionen statt Person/Szene/Zahl/These beginnen; Leitfrage niemals erfinden (leerer String ist valide).
+
+### 32d.2 `is_hook`-Flag + Render-Kopplung
+
+`_assign_phases` setzt `is_hook = (beat == hook.beat and strength == "strong")`. Drei Kopplungsstellen (je Ein-Zeilen-Priorität vor der bestehenden Auswahl):
+
+1. **Motion** (`engine/render.py:256`): `if scene.get("is_hook") and not is_seq_continuation: return _build_motion("snap_zoom_in", 1.2)` — kräftiger Einstiegs-Zoom
+2. **Transition** (`engine/render.py:553`): die **Folgeszene** nach einem Hook erzwingt Hard Cut (xfade duration=0), damit der Hook auf einem Schnitt endet, nicht auf einem weichen Fade — via `prev_is_hook`-Logik im Render-Worker
+3. **Image-Prompt** (`engine/prompts.py:313`): `HOOK_PROMPT_ADDITION` („single striking focal subject, maximum negative space, poster-like composition") wird bei `is_hook=True` injiziert, analog `PHASE_PROMPT_ADDITIONS`
+
+### 32d.3 Verifikation
+
+- `t_phase_l_hook_fields_in_analyze_prompt` — Prompt enthält hook + throughline_question Schema
+- `t_phase_l_is_hook_motion_override` — is_hook → snap_zoom_in
+- `t_phase_l_transition_after_hook` — Folgeszene nach Hook = Hard Cut
+- `t_phase_l_hook_throughline_in_prompt` / `t_phase_l_no_hook_no_behavior_change` — Prompt-Injection + Legacy-Identität
+
+
+## 32e. Phase N — Animierte Daten-Overlays: Count-Up (2026-07)
+
+Plan §3/§4.3: statische Counter (§28) werden um animierte Count-Up-Overlays erweitert. Umsetzung ohne Framework-Bruch: PIL rendert eine **PNG-Frame-Sequenz**, ffmpeg liest sie als `image2`-Input — `overlay`/`fade` bleiben unverändert. Karten bleiben bewusst ausgeschlossen (Geodaten = Framework durch die Hintertür).
+
+### 32e.1 Datenmodell + Vorrang
+
+`analyze_script` additiv: `data_visuals: [{"beat": N, "kind": "counter", "from": 0, "to": 3.2, "format": ..., "label": ...}]`. Strikte Regel: nur wenn die Zahl **wörtlich** im Beat-Text steht, sonst `data_visual` weglassen. Der Plan-Worker ordnet `s["data_visual"]` zu. `_overlay_specs_for_scene` (`engine/render.py:292`) prüft `data_visual` **vor** `callout` — statischer Callout bleibt Fallback.
+
+### 32e.2 Sequenz-Render
+
+`_render_counter_anim_sequence` (`engine/render.py:594`) ruft `render_overlay.py` im `counter_anim`-Modus auf und schreibt `ov_%04d.png` (Smoothstep-interpolierter Wert 0→Ziel, Line-Art-Optik). In `_render_clip` ersetzt für diesen Input `-framerate {fps} -i {dir}/ov_%04d.png` das bisherige `-loop 1 -i {png}`; Wert-Interpolation nutzt dieselbe Smoothstep-Formel (3t²−2t³) wie die Kamera, damit Zahl und Bewegung dieselbe Sprache sprechen.
+
+### 32e.3 Verifikation
+
+- `t_phase_n_overlay_sequence_mode` — counter_anim-Modus + Smoothstep vorhanden
+- `t_phase_n_data_visual_prompt_never_invents` — Prompt-Text erzwingt „number must appear literally"
+- `t_phase_n_static_callout_fallback` — data_visual hat Vorrang, callout bleibt Fallback
+
+
+## 32f. Phase O — Wort-Akzent-Puls (Mikro-Timing) (2026-07)
+
+Plan §3/§4.4: Innerhalb einer Szene passierte bisher genau eine gleichförmige Kamerabewegung („Slideshow-Gefühl"). Phase O addiert **einen** betonungsgenauen Zoom-Impuls pro geeigneter Szene — deterministisch aus Whisper-Wort-Timestamps, kein LLM im Render-Pfad.
+
+### 32f.1 Akzent-Berechnung (`engine/scenes.py`)
+
+`_render_worker` verwirft die pro Szene konsumierten Whisper-Wörter nicht mehr, sondern:
+- `_is_accent_eligible(scene)`: nur `pacing=="punchy"` **oder** `phase=="CLIMAX"`/`is_climax`, und Dauer ≥ 2s (calm-Szenen brauchen Bildruhe)
+- `_compute_accent_t(...)`: Betonungs-Proxy = Wort mit der **längsten Folgepause ≥ 0.25s**; Tiebreak: Wörter ≥ 8 Zeichen oder Zahlen gewinnen. Rückgabe: Sekunden relativ zum Clip-Start, additiv als `scene["accent_t"]` persistiert (Resume-stabil)
+
+### 32f.2 Gauß-Puls im Zoom-Ausdruck (`engine/render.py:346`)
+
+Nur wenn `accent_t` gesetzt (sonst byte-identischer Ausdruck):
+```
+z_expr = "{z0}+({z1}-{z0})*{smoothstep} + {amp}*exp(-pow((on-{f_a})/{sigma},2))"
+```
+`amp=0.05` (+5% Zoom, unter der 1.2×-Jitter-Grenze), `sigma≈0.06·fps` (~0.2s Puls-Breite), `f_a = round(accent_t·fps)`. Der Gauß-Term ist beidseitig glatt (kein Ruckeln), symmetrisch (Zoom-in + Zoom-out in einem); mit `z1 ≤ 1.25` bleibt der Crop sicher im Bild.
+
+### 32f.3 Verifikation
+
+- `t_phase_o_accent_rule_deterministic` — längste-Pause-Regel
+- `t_phase_o_accent_only_punchy_or_climax` — Eligibility nur punchy/CLIMAX + ≥2s
+- `t_phase_o_no_accent_expr_unchanged` — ohne accent_t byte-identischer Fallback
+- `t_phase_o_accent_zoom_bounded` — Puls-Amplitude hält Crop im Bild
+
+
 ## 33. UI-Rebuild (Phase 33, Juli 2026 — IN PROGRESS)
 
 Migration des Frontends von handgeschriebener Vanilla-HTML/CSS auf einen **shadcn-Pattern-Stack**: Tailwind CSS (Utility-Classes), Lucide Icons, Alpine.js (Mini-Reaktivität). Ziel: enterprise-grade Optik ohne Build-Pipeline.
@@ -1695,16 +1838,26 @@ intakt (wird vom Backend `/api/video_meta` befüllt und ist Vorlage für 33.4.2-
 
 #### D — Zentrale Step-Card-Visibility
 
-Vorher waren alle 5 Step-Cards (`data-step-section="1..5"`) gleichzeitig sichtbar
-und der User scrollte 4+ Bildschirmhöhen durch. Mit 33.4.2-prep wird der Wizard
-einklappbar: pro Step-Klick wird die aktive Card sichtbar, alle anderen `display:none`.
+> **⚠ ÜBERHOLT (Juli 2026, Nutzerwunsch):** Der hier beschriebene einklappbare Tab-Wizard
+> wurde **zurückgenommen** — die App ist wieder ein **Single-Page-Flow**: alle Schritte laufen
+> von oben nach unten durch (Thema → Skript → Audio → Bilder → Render), fertige Schritte bleiben
+> sichtbar, `goTo()` scrollt nur noch smooth zum Schritt (Scroll-Nav statt Tab-Switch).
+> `updateStepVisibility()` versteckt **nicht** mehr — es hält Sektion 1–3 immer sichtbar und
+> blendet 4 (Plan) + 5 (Render) ein, sobald Szenen existieren (`SCENES.length`). Der Abschnitt
+> unten bleibt als Historie des Zwischenstands 33.4.2-prep stehen.
+
+Vorher (33.4.2-prep D): alle 5 Step-Cards (`data-step-section="1..5"`) gleichzeitig sichtbar,
+User scrollte 4+ Bildschirmhöhen. 33.4.2-prep machte den Wizard einklappbar: pro Step-Klick
+die aktive Card sichtbar, alle anderen `display:none`. **Heute wieder Single-Page (siehe Banner).**
 
 ```js
+// HEUTIGE Version (Single-Page-Flow):
 function updateStepVisibility(currentStep){
-  for (let n = 1; n <= 5; n++) {
+  const hasScenes = Array.isArray(SCENES) && SCENES.length > 0;
+  const vis = { 1:'', 2:'', 3:'', 4: hasScenes?'':'none', 5: hasScenes?'':'none' };
+  for (let n = 1; n <= 5; n++){
     const card = document.querySelector(`[data-step-section="${n}"]`);
-    if (!card) continue;
-    card.style.display = (n === currentStep) ? '' : 'none';
+    if (card) card.style.display = vis[n];
   }
 }
 ```
@@ -1748,4 +1901,78 @@ display:block-Schicht darüber. Die Reihenfolge im OpenVideo/Stepper-Code:
 #### Tests
 `tests/test_cinematic_e2e.py::t_phase33_4_2_*` — 1 neuer Integrationstest grün (54/54 total):
 - `t_phase33_4_2_thema_card_restructured` — Validiert das Vorhandensein des `ideaInput` Textareas, der `genTitleStep`/`genThumbnailStep` Funktionen, der Container `titleListStep`/`thumbSlotStep` und den Ausschluss der Option A (Audio-Upload) in Schritt ②.
+
+
+## 35. Session-Fixes + UX-Verbesserungen (Juli 2026)
+
+Sammel-Session nach Phase P: Runtime-Bugfixes (mehrere via Pyright entdeckt) plus
+UX-Verbesserungen aus direktem Nutzer-Feedback. Alle Änderungen gegen den echten Code
+verifiziert; Testsuite durchgehend 106/106.
+
+### 35.1 Regressions-/Runtime-Fixes
+
+| Fix | Ursache | Datei |
+|---|---|---|
+| **`_mux_audio` NameError** (KRITISCH) | Beim Phase-M.3-Refactor aus dashboard.py entfernt, nie nach `engine/` übernommen → jeder Render crashte in Stage „audio", `final.mp4` nie erzeugt | `engine/render.py` (wiederhergestellt + `__all__` + Import) |
+| **`VIDEO_PROMPT_MIN_LEN`** undefiniert | Nie definiert (T2V-Pfad) — T2V ist deprecated (Phase 39) | `dashboard.py` (Minimal-Konstante) |
+| **`v_render` → `v_out`** | Typo; `final.mp4` liegt in `v_out`, Status-GET crashte für Videos ohne `rendered_at` | `dashboard.py` |
+| **`d` in `/api/tts_provider`** | Handler lag in `do_GET`, las aber POST-Body → GET-Crash, POST-Zweig tot | `dashboard.py` (GET=lesen, POST nach `do_POST`) |
+| **`ensure_video` NameError** | `_tts_persist_and_schedule` rief es ohne Lazy-Import auf (Schwester-Funktionen hatten ihn) → Voiceover crashte | `engine_elevenlabs.py` |
+| **ElevenLabs `alignment.words`** | `/with-timestamps` liefert Zeichen-Alignment, Code erwartete `words` → siehe §23-Korrektur | `engine_elevenlabs.py` (`_el_words_from_alignment`) |
+
+Die 3 verbleibenden Pyright-„possibly unbound" (`task_id`, `audio_meta`, `chosen_preset`)
+sind verifizierte False-Positives (defensiv korrekt, nur nicht beweisbar).
+
+### 35.2 Charakter-Referenz — Upload + Settings-Modal
+
+- **Public-Upload:** `/api/upload_charref` gibt jetzt eine öffentliche `uri` zurück
+  (`upload_image_public` → litterbox/tmpfiles). `set_char_ref` braucht http-URLs (die
+  char_ref_url dient als KIE-Bildreferenz). Vorher bekam das Frontend `undefined` →
+  Referenz wurde nie gesetzt (Kern von Bug B-1).
+- **Doppelte IDs behoben:** Es gab zwei Char-Ref-UIs — ein verstecktes statisches Markup
+  (view-videolist) mit den kanonischen IDs und das Settings-Modal mit abweichenden IDs +
+  doppeltem `btnCharRef`. Klicks im Modal zielten auf die versteckten Elemente → sichtbar
+  passierte nichts. Fix: Modal-UI selbst-enthaltend mit kanonischen IDs, statisches
+  Duplikat entfernt, jede ID nur noch 1×, `openChannelSettings` ruft `loadCharRefStatus`.
+
+### 35.3 UI: Single-Page-Flow statt Tab-Wizard
+
+Nutzerwunsch: kein Tab-Umschalten, alle Schritte von oben nach unten. `updateStepVisibility`
+versteckt nicht mehr alle Cards außer der aktiven (Phase 33.4.2-prep), sondern zeigt
+Sektion 1–3 immer und 4 (Plan) + 5 (Render), sobald `SCENES` existieren. Der separate
+Stepper-Balken oben ist ausgeblendet (die nummerierten Sektionen ①–⑤ sind die Navigation);
+`goTo()` scrollt smooth zum Schritt. Siehe §33.4.2-prep D (als überholt markiert).
+
+### 35.4 Skript-Persistenz
+
+`#script` wurde nirgends gespeichert → ging bei jedem Reload verloren. Jetzt localStorage
+pro Kanal+Video: `saveScriptLocal()` (beim Tippen + beim Auto-Fill aus Szenen),
+`restoreScriptLocal()` (beim Video-Öffnen). Zusätzlich `fillScriptFromScenesIfEmpty()` —
+bei aus Titel/Thema generiertem Plan ist `#script` leer; das Feld wird aus den Szenen-Texten
+(= Narration) rekonstruiert, damit der Voiceover-Button aktiv wird (überschreibt nie
+getippten Text).
+
+### 35.5 „Alle Bilder neu generieren" (force)
+
+`_batch_generate_worker(cid, vid, force=False)`: `force=True` → `todo = list(scenes)`
+(auch bereits generierte Bilder), sonst nur offene. Reihenfolge bleibt erhalten (§11.3).
+`/api/generate_all_start` liest das `force`-Flag; neuer Button „🔄 Alle neu generieren"
+(`genAll(true)`) mit Bestätigungsdialog (kostet Credits).
+
+### 35.6 Test-Hygiene
+
+`t_phase38_channel_creation_with_preset` + `t_phase_l_hook_throughline_in_prompt` erzeugten
+echte Kanäle über `POST /api/channels` und löschten nur das Verzeichnis (`shutil.rmtree`),
+nicht den `channels.json`-Eintrag → bei jedem Lauf akkumulierten `p38test_*`-Kanäle in der
+echten Sidebar. Fix: channels.json vor dem Test sichern, im `finally` exakt wiederherstellen.
+
+### 35.7 Bekannte offene Punkte
+
+- **Status-Stage-Bug (kosmetisch):** `voiceover_status` bleibt auf `elevenlabs-generate`
+  hängen, während `_transcribe_generate_worker` bereits durch die TX-Stages (1–4) läuft —
+  die Stage wird dort nicht aktualisiert. Im UI wirkt der Job „hängend", obwohl er arbeitet
+  (Voiceover-Rebuild des Plans).
+- **Race Bild-Gen ↔ Plan-Rebuild:** Voiceover-Generierung baut den Plan aus dem echten
+  Audio neu (re-segmentiert + re-promptet). Parallel laufende Bildgenerierung arbeitet auf
+  dem alten Plan → Bilder erst nach dem Rebuild generieren.
 

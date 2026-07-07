@@ -41,7 +41,7 @@ from engine.render import (  # noqa: F401,F403
     MOTION_LIBRARY, _PACING_MOTION_CANDIDATES, _PHASE_MOTION_CANDIDATES, TRANSITION_LIBRARY,
     _probe_video_encoder, _apply_sync_invariant,
     _build_motion, _normalize_motion, _motion_for_scene, _overlay_specs_for_scene,
-    _render_clip, _assemble_clips, _render_selfcheck,
+    _render_clip, _assemble_clips, _mux_audio, _render_selfcheck,
     _transition_for_scene, _transition_after_hook, _has_transition_before,
     _clip_duration_sec, _crossfade_clips,
     render_text_overlay_png, render_title_card_png_via_venv,
@@ -906,7 +906,7 @@ def _image_job_worker_inner(job_id: str, task_id: str, out_path: str, plan_path:
     _mark_scene_error(plan_path, scene_i)
 
 
-def _batch_generate_worker(cid: str, vid: str):
+def _batch_generate_worker(cid: str, vid: str, force: bool = False):
     """Runs 'Alle Bilder generieren' entirely server-side — survives page reloads and
     tab closes. Dispatches up to MAX_CONCURRENT_IMAGE_GENS scenes at once (KIE's real
     limits support 100+ concurrent tasks, see IMAGE_GEN_SEMAPHORE) instead of one at a
@@ -938,7 +938,10 @@ def _batch_generate_worker(cid: str, vid: str):
 
     scenes = plan["scenes"]
     total = len(scenes)
-    todo = [s for s in scenes if not s.get("file")]
+    # force=True: ALLE Szenen neu generieren (auch bereits vorhandene Bilder);
+    # sonst nur die offenen. Reihenfolge bleibt erhalten (§11.3 Schutzregel 1 —
+    # kein sort/reverse auf todo).
+    todo = list(scenes) if force else [s for s in scenes if not s.get("file")]
     with _BATCH_JOBS_LOCK:
         BATCH_JOBS[key] = {"running": True, "stop_requested": False,
                             "done": total - len(todo), "total": total,
@@ -1673,6 +1676,12 @@ def upload_image_public(local_path: str) -> str:
         raise ValueError(f"Upload fehlgeschlagen: {resp}")
 
 
+# T2V-Mindest-Promptlänge. HINWEIS: Der gesamte T2V-Pfad (make_t2v_prompt +
+# /api/preview_t2v_prompt + /api/generate_t2v + UI-Mode) soll laut Plan-Phase 39
+# entfernt werden ("T2V raus / I2V rein"). Bis dahin verhindert diese Konstante
+# den NameError (war nie definiert, Regression-Fund 2026-07).
+VIDEO_PROMPT_MIN_LEN = 150
+
 T2V_PROMPT_SYSTEM = """\
 You are a video scene director. Your job: take ONE narrator line and write a precise AI video generation prompt that makes that line VISIBLE — no more, no less.
 
@@ -2338,7 +2347,7 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 generated_count = 0
             rendered = bool(meta.get("rendered_at")) or \
-                os.path.exists(os.path.join(v_render(cid, vid), "final.mp4"))
+                os.path.exists(os.path.join(v_out(cid, vid), "final.mp4"))
             return self._send(200, {
                 # ① THEMA: meta.json + selected_title nicht leer (siehe 33.2-Heuristik)
                 "thema_done": bool((meta.get("selected_title") or "").strip()),
@@ -2402,21 +2411,8 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send(200, {"voices": [], "error": str(e)})
         if p == "/api/tts_provider":
-            # Phase 34: GET gibt aktuelle Provider-Config zurück, POST setzt sie.
-            # Provider-Auswahl wird in voice_settings.json:tts_provider persistiert.
-            if d.get("tts_provider") is not None:
-                # POST: Provider wechseln
-                new_provider = d.get("tts_provider", "").strip()
-                if new_provider not in ("elevenlabs", "minimax", ""):
-                    return self._send(400, {"error": f"Unknown tts_provider: {new_provider}"})
-                s = load_voice_settings(cid)
-                s["tts_provider"] = new_provider
-                # Bei Provider-Wechsel voice_id NICHT automatisch zurücksetzen —
-                # gleicher voice_id-String kann bei beiden Providern identisch
-                # sein (zufällig) oder halt Müll sein. User sieht es im Dropdown.
-                save_voice_settings(cid, s)
-                return self._send(200, {"ok": True, "tts_provider": new_provider})
-            # GET
+            # Phase 34: GET gibt aktuelle Provider-Config zurück. Das Setzen läuft
+            # über POST /api/tts_provider (siehe do_POST) — do_GET hat keinen Body-`d`.
             s = load_voice_settings(cid)
             return self._send(200, {"tts_provider": s.get("tts_provider", "elevenlabs")})
         if p == "/api/elevenlabs_settings":
@@ -2483,6 +2479,19 @@ class H(BaseHTTPRequestHandler):
         except: return self._send(400, {"error": "bad json"})
         cid = d.get("channel", "default")
         vid = d.get("video", "")
+
+        # ── Phase 34: TTS-Provider setzen (GET-Pendant liegt in do_GET) ────────
+        if p == "/api/tts_provider":
+            new_provider = d.get("tts_provider", "").strip()
+            if new_provider not in ("elevenlabs", "minimax", ""):
+                return self._send(400, {"error": f"Unknown tts_provider: {new_provider}"})
+            s = load_voice_settings(cid)
+            s["tts_provider"] = new_provider
+            # Bei Provider-Wechsel voice_id NICHT automatisch zurücksetzen —
+            # gleicher voice_id-String kann bei beiden Providern identisch sein
+            # (zufällig) oder halt Müll sein. User sieht es im Dropdown.
+            save_voice_settings(cid, s)
+            return self._send(200, {"ok": True, "tts_provider": new_provider})
 
         # ── Video management (one video = one script/plan within a channel) ────
         if p == "/api/videos":
@@ -3009,9 +3018,18 @@ class H(BaseHTTPRequestHandler):
             try:    desc = analyze_char_image(img_bytes, mime)
             except Exception as e:
                 desc = ""; print(f"  [Char] Analyse-Fehler: {e}", flush=True)
-            json.dump({"name": name, "description": desc, "safe": safe, "mime": "image/png"},
+            # Öffentliche URL erzeugen: das Frontend erwartet `uri` (set_char_ref +
+            # _applyCharRef), und die char_ref_url wird als KIE-Bildreferenz benutzt —
+            # muss also public-http sein (set_char_ref lehnt Nicht-http-URLs ab).
+            # Ohne diesen Upload bekam das Frontend `undefined` → Referenz wurde nie
+            # gesetzt (Kern von Bug B-1: Upload "tat nichts").
+            try:
+                public_uri = upload_image_public(img_path)
+            except Exception as e:
+                return self._send(502, {"error": f"Public-Upload fehlgeschlagen: {e}"})
+            json.dump({"name": name, "description": desc, "safe": safe, "mime": "image/png", "uri": public_uri},
                       open(meta_path, "w"), ensure_ascii=False)
-            return self._send(200, {"ok": True, "name": name, "safe": safe, "description": desc})
+            return self._send(200, {"ok": True, "name": name, "safe": safe, "description": desc, "uri": public_uri})
 
         if p == "/api/gen_charsheet":
             name = d.get("name", "").strip(); desc = d.get("description", "").strip()
@@ -3032,6 +3050,8 @@ class H(BaseHTTPRequestHandler):
         # ── "Alle Bilder generieren" — runs server-side, survives reloads ──────
         if p == "/api/generate_all_start":
             if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
+            # force=True: auch bereits generierte Bilder neu erzeugen ("Alle neu generieren")
+            force = bool(d.get("force", False))
             key = (cid, vid)
             with _BATCH_JOBS_LOCK:
                 if BATCH_JOBS.get(key, {}).get("running"):
@@ -3044,7 +3064,7 @@ class H(BaseHTTPRequestHandler):
                 # concurrent generation loops hammering KIE in parallel.
                 BATCH_JOBS[key] = {"running": True, "stop_requested": False, "done": 0,
                                     "total": 0, "current_i": [], "error": None}
-            threading.Thread(target=_batch_generate_worker, args=(cid, vid), daemon=True).start()
+            threading.Thread(target=_batch_generate_worker, args=(cid, vid, force), daemon=True).start()
             return self._send(200, {"ok": True, "already_running": False})
 
         if p == "/api/generate_all_stop":

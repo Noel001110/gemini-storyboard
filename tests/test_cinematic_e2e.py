@@ -170,12 +170,43 @@ def t_phase_c_prompt_additions_present():
 
 
 def t_phase_d_color_filter_present():
-    """Phase D: PHASE_COLOR_FILTER has valid ffmpeg eq filters for all 4 phases."""
+    """Phase D: PHASE_COLOR_FILTER hat für alle 4 Phasen einen Color-Grading-Filter.
+
+    Phase P hat absichtlich von `eq` auf `colorbalance` gewechselt (Plan §0: "eq ist fast
+    wirkungslos für Tusche-Look, colorbalance deutlich stärker"). Test akzeptiert BEIDE
+    Formate.
+    """
     for ph, f in el.PHASE_COLOR_FILTER.items():
-        assert f.startswith("eq="), f"Filter for {ph} not ffmpeg eq"
-        # Verify all 3 dimensions present
-        for dim in ("contrast", "saturation", "brightness"):
-            assert dim in f, f"Phase {ph} filter missing {dim}"
+        assert f.startswith("eq=") or f.startswith("colorbalance="), \
+            f"Filter for {ph} not ffmpeg eq/colorbalance: {f!r}"
+        if f.startswith("eq="):
+            # Verify all 3 dimensions present (legacy eq-Format)
+            for dim in ("contrast", "saturation", "brightness"):
+                assert dim in f, f"Phase {ph} eq-filter missing {dim}"
+
+
+def t_phase_p_climax_has_vignette():
+    """Plan §3 Phase P: CLIMAX-Szenen bekommen zusätzlich zum colorbalance einen
+    Vignette-Filter (PI/5 = dezent, ~36° Vignette-Winkel)."""
+    # Source-Grep: _render_clip hängt für CLIMAX den vignette-Filter an
+    src = open(os.path.join(ROOT, "engine", "render.py")).read()
+    assert "vignette=PI/5" in src, \
+        "Phase P: CLIMAX muss vignette=PI/5 bekommen (Plan §3)"
+    # Logik: nur CLIMAX, nicht andere Phasen
+    assert 'scene.get("phase") == "CLIMAX"' in src, \
+        "vignette muss nur für CLIMAX (nicht global) angewendet werden"
+
+
+def t_phase_p_legacy_plan_identity():
+    """Plan §3 Phase P: Szenen OHNE Phase bekommen keinen Filter (legacy identity).
+    Phase-freie Szenen rendern byte-identisch zu vor Phase P."""
+    from engine_elevenlabs import PHASE_COLOR_FILTER
+    src = open(os.path.join(ROOT, "engine", "render.py")).read()
+    # color_filter = PHASE_COLOR_FILTER.get(scene.get("phase", ""), "")
+    # Wenn keine Phase → leerer String → keine Filter angewendet
+    assert 'PHASE_COLOR_FILTER.get(scene.get("phase"' in src or \
+           'PHASE_COLOR_FILTER.get(scene.get("phase", ""), "")' in src, \
+        "PHASE_COLOR_FILTER.get muss für leere Phase leeren String liefern"
 
 
 def t_phase_e_title_card_assignment():
@@ -777,6 +808,11 @@ def main():
         run(t_phase_o_accent_only_punchy_or_climax, "O.1: _is_accent_eligible nur punchy/CLIMAX + ≥2s")
         run(t_phase_o_no_accent_expr_unchanged, "O.2: ohne accent_t = byte-identisch (Original z_expr als Fallback)")
         run(t_phase_o_accent_zoom_bounded, "O.2: amp=0.05 + sigma=0.06s (Jitter-Bound)")
+
+        summary_section("Phase P: Ink-Style-Grading-Refinement (colorbalance + vignette)")
+        run(t_phase_d_color_filter_present, "P: PHASE_COLOR_FILTER eq/colorbalance für alle 4 Phasen")
+        run(t_phase_p_climax_has_vignette, "P: CLIMAX hat vignette=PI/5 (Plan §3)")
+        run(t_phase_p_legacy_plan_identity, "P: Szenen ohne Phase bekommen keinen Filter")
 
         summary_section("Phase N: Animierte Daten-Overlays (Count-Up)")
         run(t_phase_n_overlay_sequence_mode, "N.1: render_overlay.py counter_anim-Modus + Smoothstep")
@@ -1901,6 +1937,13 @@ def t_phase38_channel_creation_with_preset():
     import shutil
 
     port = 18704
+    # Hermetik: der Test erzeugt echte Kanäle über POST /api/channels, und
+    # CHANNELS_DIR zeigt fest auf ROOT/channels. shutil.rmtree unten räumt die
+    # Verzeichnisse, ABER nicht den channels.json-Eintrag → sonst akkumuliert die
+    # echte Kanalliste bei jedem Lauf p38test_*-Einträge (Test-Hygiene-Bug, Juli 2026).
+    # Deshalb channels.json vorher sichern und im finally exakt wiederherstellen.
+    channels_json = os.path.join(ROOT, "channels", "channels.json")
+    _orig_channels = open(channels_json).read() if os.path.exists(channels_json) else None
     proc = subprocess.Popen(
         ["python3", os.path.join(ROOT, "dashboard.py"), "--port", str(port)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=ROOT,
@@ -1955,6 +1998,11 @@ def t_phase38_channel_creation_with_preset():
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+        # channels.json exakt auf Vor-Test-Stand zurücksetzen (kein p38test-Leak)
+        if _orig_channels is not None:
+            with open(channels_json, "w") as _f: _f.write(_orig_channels)
+        elif os.path.exists(channels_json):
+            os.remove(channels_json)
 
 
 def t_phase33_7_no_purple_tokens():
@@ -2480,6 +2528,13 @@ def t_phase_l_hook_throughline_in_prompt():
     import shutil
 
     port = 18704
+    # Hermetik: der Test erzeugt echte Kanäle über POST /api/channels, und
+    # CHANNELS_DIR zeigt fest auf ROOT/channels. shutil.rmtree unten räumt die
+    # Verzeichnisse, ABER nicht den channels.json-Eintrag → sonst akkumuliert die
+    # echte Kanalliste bei jedem Lauf p38test_*-Einträge (Test-Hygiene-Bug, Juli 2026).
+    # Deshalb channels.json vorher sichern und im finally exakt wiederherstellen.
+    channels_json = os.path.join(ROOT, "channels", "channels.json")
+    _orig_channels = open(channels_json).read() if os.path.exists(channels_json) else None
     proc = subprocess.Popen(
         ["python3", os.path.join(ROOT, "dashboard.py"), "--port", str(port)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=ROOT,
@@ -2534,6 +2589,11 @@ def t_phase_l_hook_throughline_in_prompt():
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+        # channels.json exakt auf Vor-Test-Stand zurücksetzen (kein p38test-Leak)
+        if _orig_channels is not None:
+            with open(channels_json, "w") as _f: _f.write(_orig_channels)
+        elif os.path.exists(channels_json):
+            os.remove(channels_json)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
