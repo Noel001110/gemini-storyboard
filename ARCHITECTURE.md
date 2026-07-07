@@ -1407,3 +1407,29 @@ Architektur-Entscheidungen (User-Feedback-Diskussion):
 5. **SwitchTopTab bleibt als Defensive-Funktion** — kein Caller mehr (Tabs sind weg), aber für evt. Re-Introduktion behalten.
 
 **Tests:** `tests/test_cinematic_e2e.py::t_phase33_*` — 4 neue Tests grün (35/35 total).
+
+### 33.3.1 Sidebar-Bugfixes (User-Feedback-Review)
+
+Nach dem 33.3-Commit hat User-Feedback 4 Befunde gemeldet (3 echte Bugs + 1 False-Alarm). Alle 4 sind in 33.3.1 direkt gefixt:
+
+**Bug 1: Brand-Color-Picker hatte keinen Save-Handler.**
+- Symptom: `<input type="color">` im Modal zeigt Farbe, aber nichts wird persistiert.
+- Fix: Save-Button (`💾 Speichern`) + `saveSettingsBrandColor()` JS-Funktion + Backend-Endpoint `POST /api/channels/brand_color` mit Hex-Format-Validierung (`#RGB` oder `#RRGGBB` per `re.fullmatch`).
+- Bidirektionale Sync zwischen Color-Picker und Hex-Textfeld (User kann entweder Picker klicken ODER Hex eingeben).
+- Sidebar wird nach Save via `loadChannels()` sofort neu gerendert.
+
+**Bug 2: Mobile-Responsive komplett fehlend.**
+- Symptom: 220px-Sidebar + 240px Stepper-Labels = 460px Content-Top auf einem 375px-iPhone. Sidebar fraß 60% der Breite.
+- Fix: `@media (max-width: 1023px)` Regel — Sidebar wird zum Off-Canvas-Drawer mit Backdrop-Overlay.
+- Hamburger-Button (`#sidebarToggle`, Lucide `menu`-Icon) im Header, nur `< 1024px` sichtbar.
+- Auto-Close: Channel-Switch im Drawer-Mode schließt automatisch (`_origSwitchChannel_phase33` Wrapper).
+- Backdrop-Click schließt den Drawer (Body-class `sidebar-open` toggelt).
+
+**Bug 3: ESC-Handler-Leak bei wiederholtem Open.**
+- Symptom: `modal._escHandler = new function` überschreibt NICHT den alten Handler. Bei 50 Opens feuert ESC 50× `closeSettingsModal()`.
+- Fix: in `openChannelSettings()` wird VOR dem Anlegen eines neuen ESC-Handlers der alte via `document.removeEventListener('keydown', modal._escHandler)` entfernt. Dann wird `modal._escHandler = null` gesetzt damit die Cleanup-Bedingung im nächsten Open greift.
+
+**Bug 4 (False-Alarm): escHtml vs esc Helper-Inkonsistenz.**
+- User vermutete zwei Helper, aber `grep "const esc"` zeigt nur `escHtml` existiert. Test `t_phase33_1_no_duplicate_escape_helper` schützt jetzt gegen eine versehentliche Re-Introduktion eines `esc()`-Helpers.
+
+**Tests: 35 → 39** (alle grün).

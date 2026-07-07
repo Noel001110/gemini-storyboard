@@ -678,6 +678,12 @@ def main():
         run(t_phase33_top_tabs_removed, "33.3: Skript-Generator-Tab + Stil-Tab weg — nur Videos als Library-Tab")
         run(t_phase33_sidebar_counter_classes, "33.3: .ch-cnt + .ch-active Counter-Klassen im CSS")
 
+        summary_section("Phase 33.3.1: Sidebar Bugfixes (User-Feedback-Review)")
+        run(t_phase33_1_brand_color_save_endpoint, "33.3.1 Bug-1: Brand-Color Save-Endpoint + Hex-Picker-Sync")
+        run(t_phase33_1_mobile_responsive, "33.3.1 Bug-2: Mobile-Responsive mit Hamburger + Drawer")
+        run(t_phase33_1_esc_handler_no_leak, "33.3.1 Bug-3: ESC-Handler wird vor Re-Open entfernt")
+        run(t_phase33_1_no_duplicate_escape_helper, "33.3.1 Bug-4: nur escHtml existiert (kein doppelter esc-Helper)")
+
         print(f"\n=== Result ===")
         print(f"  Passed: {PASSED}")
         print(f"  Failed: {FAILED}")
@@ -993,6 +999,80 @@ def t_phase33_sidebar_counter_classes():
     # Frontend nutzt nameToHsl im chList-Rendering
     assert "nameToHsl(ch.name" in html, \
         "33.3 missing: nameToHsl wird im loadChannels() für brand-color-Default aufgerufen"
+
+
+# ─── Phase 33.3.1 — User-Feedback-Bugfixes ─────────────────────────────────
+
+def t_phase33_1_brand_color_save_endpoint():
+    """33.3.1 Bug-1: Brand-Color-Picker hat Save-Button + persistiert via
+    /api/channels/brand_color (Backend akzeptiert #RGB oder #RRGGBB)."""
+    py_src = open(os.path.join(ROOT, "dashboard.py")).read()
+    html = open(os.path.join(ROOT, "dashboard.html")).read()
+    # Backend-Endpoint vorhanden
+    assert '"/api/channels/brand_color"' in py_src, \
+        "33.3.1 missing: backend /api/channels/brand_color endpoint"
+    # Hex-Validierung im Backend
+    assert 're.fullmatch(r"#(?:[0-9a-fA-F]{3}){1,2}"' in py_src, \
+        "33.3.1 missing: backend Hex-Format-Validierung"
+    # Frontend: Save-Button + Handler
+    assert 'saveSettingsBrandColor' in html, \
+        "33.3.1 missing: saveSettingsBrandColor() JS function"
+    assert 'id="settingsBrandColorText"' in html, \
+        "33.3.1 missing: Hex-Text-Input für Color-Picker-Sync"
+    assert 'syncBrandColorFields' in html, \
+        "33.3.1 missing: syncBrandColorFields() helper für Picker↔Hex-Sync"
+
+
+def t_phase33_1_mobile_responsive():
+    """33.3.1 Bug-2: Mobile-Responsive mit Hamburger-Menu + Drawer.
+    Auf <1024px wird Sidebar zum Off-Canvas-Drawer mit Backdrop."""
+    html = open(os.path.join(ROOT, "dashboard.html")).read()
+    css = open(os.path.join(ROOT, "dashboard.html")).read()
+    # Hamburger-Button im Header
+    assert 'id="sidebarToggle"' in html, \
+        "33.3.1 missing: #sidebarToggle button (Hamburger)"
+    assert 'toggleSidebar' in html, \
+        "33.3.1 missing: toggleSidebar() JS function"
+    # Mobile-CSS-Medien-Query
+    assert '@media (max-width: 1023px)' in css, \
+        "33.3.1 missing: Mobile @media query for sidebar"
+    # Sidebar-Backdrop
+    assert 'id="sidebarBackdrop"' in html, \
+        "33.3.1 missing: #sidebarBackdrop element"
+    # Body-class-based Toggle (CSS-Target)
+    assert 'body.sidebar-open' in css, \
+        "33.3.1 missing: body.sidebar-open CSS selector"
+    # Auto-Close beim Channel-Switch (mobile UX)
+    assert "sidebar-open" in html and "_origSwitchChannel_phase33" in html, \
+        "33.3.1 missing: auto-close sidebar on channel-switch"
+
+
+def t_phase33_1_esc_handler_no_leak():
+    """33.3.1 Bug-3: ESC-Handler wird VOR dem Anlegen eines neuen entfernt.
+    Sonst akkumulieren sich Handler bei jedem Open → ESC feuert N-mal."""
+    html = open(os.path.join(ROOT, "dashboard.html")).read()
+    # openChannelSettings muss removeEventListener VOR addEventListener machen
+    func_start = html.find("async function openChannelSettings()")
+    func_end   = html.find("\nfunction closeSettingsModal()", func_start)
+    body = html[func_start:func_end]
+    assert "removeEventListener('keydown', modal._escHandler)" in body, \
+        "33.3.1 missing: ESC-Handler wird in openChannelSettings() NICHT entfernt vor dem Hinzufügen — Leak"
+
+
+def t_phase33_1_no_duplicate_escape_helper():
+    """33.3.1 Bug-4: User-Frage ob es zwei Escape-Helper gibt (esc + escHtml).
+    Bestätigung: nur escHtml existiert. Diese Test verhindert dass jemand eine
+    zweite Helper-Funktion `esc()` hinzufügt ohne den Test zu korrigieren."""
+    html = open(os.path.join(ROOT, "dashboard.html")).read()
+    # escHtml muss existieren
+    assert "const escHtml" in html, \
+        "33.3.1: escHtml helper missing"
+    # Eine einzelne 'function esc(' oder 'const esc =' Definition darf NICHT vorkommen.
+    # Whitelist: 'escHtml' ist ok. esc ist NICHT erlaubt.
+    import re as _re
+    matches = _re.findall(r"\b(?:function|const)\s+esc\s*[(=]", html)
+    assert len(matches) == 0, \
+        f"33.3.1 Bug-4: zweite Escape-Helper gefunden — nur escHtml sollte existieren. matches={matches}"
 
 
 if __name__ == "__main__":

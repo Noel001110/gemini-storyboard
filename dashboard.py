@@ -3815,6 +3815,19 @@ class H(BaseHTTPRequestHandler):
                 if c["id"] == cid: c["name"] = new_name
             save_channels(chs)
             return self._send(200, {"ok": True})
+        # Phase 33.3.1 Bug-1 — Brand-Color pro Channel persistieren. Wenn der User
+        # im Settings-Modal eine Farbe wählt, wird sie hier gespeichert und beim
+        # nächsten /api/channels-Response ausgelesen (kein Frontend-Only-State).
+        if p == "/api/channels/brand_color":
+            color = (d.get("brand_color") or "").strip()
+            # Validierung: 7-stellige #RRGGBB oder 4-stellige #RGB (input[type=color])
+            if color and not re.fullmatch(r"#(?:[0-9a-fA-F]{3}){1,2}", color):
+                return self._send(400, {"error": f"brand_color invalid: {color!r}"})
+            chs = load_channels()
+            for c in chs:
+                if c["id"] == cid: c["brand_color"] = color
+            save_channels(chs)
+            return self._send(200, {"ok": True, "brand_color": color})
 
         # ── Master prompt ─────────────────────────────────────────────────────
         if p == "/api/master":
