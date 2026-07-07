@@ -696,6 +696,12 @@ def main():
         run(t_phase34_1_minimax_slider_visibility, "34.1: MiniMax-Sliders (Speed/Volume/Pitch) + Hide ElevenLabs-Sliders")
         run(t_phase34_1_minimax_slider_persistence, "34.1: MiniMax-Sliders persist via /api/elevenlabs_settings")
 
+        summary_section("Phase 33.4.1: Step-Reihenfolge angleichen")
+        run(t_phase33_4_1_new_step_labels, "33.4.1: Stepper-Labels Thema/Skript/Audio/Bilder/Render")
+        run(t_phase33_4_1_audio_section_extracted, "33.4.1: Audio-Block (Option C) ist eigene Section data-step-section=\"3\"")
+        run(t_phase33_4_1_title_thumb_removed, "33.4.1: titleThumbCard entfernt (war Step ④)")
+        run(t_phase33_4_1_plan_area_now_4, "33.4.1: planArea jetzt data-step-section=\"4\" (war \"3\")")
+
         print(f"\n=== Result ===")
         print(f"  Passed: {PASSED}")
         print(f"  Failed: {FAILED}")
@@ -804,8 +810,10 @@ def t_stepper_html_structure():
         assert f'data-step-section="{n}"' in src, \
             f"Phase 33.2 missing: data-step-section=\"{n}\" auf Step {n} card"
 
-    # Bug-2-Fix: Step-Labels müssen den Sections entsprechen
-    for label in ("'Modus'", "'Skript'", "'Bilder'", "'Titel'", "'Render'"):
+    # Bug-2-Fix: Step-Labels müssen den Sections entsprechen.
+    # Phase 33.4.1 hat die Labels von (Modus, Skript, Bilder, Titel, Render) auf
+    # (Thema, Skript, Audio, Bilder, Render) geändert.
+    for label in ("'Thema'", "'Skript'", "'Audio'", "'Bilder'", "'Render'"):
         assert label in src, \
             f"Phase 33.2 missing: stepperState() definiert step '{label.strip(chr(39))}'"
 
@@ -1226,9 +1234,71 @@ def t_phase34_1_minimax_slider_persistence():
     assert '+s.value' in html and '+v.value' in html, \
         "34.1 missing: MiniMax-Slider-Werte werden via +s.value/+v.value gepersistiert"
     assert 'parseInt(p.value, 10)' in html, \
-        "34.1 missing: Pitch-Wert wird via parseInt() (int) gepersistiert"
+        "34.1 missing: Pitch-Wert wird via parseInt() (int) persistiert"
     assert "tts_provider: 'minimax'" in html, \
         "34.1 missing: tts_provider: 'minimax' in der MiniMax-Persistenz-Payload"
+
+
+# ─── Phase 33.4.1 — Step-Reihenfolge angleichen ────────────────────────────
+
+def t_phase33_4_1_new_step_labels():
+    """Phase 33.4.1: Stepper-Labels sind auf finale Reihenfolge umgestellt:
+    ①Thema / ②Skript / ③Audio / ④Bilder / ⑤Render (war vorher: Modus/Skript/Bilder/Titel/Render)."""
+    html = open(os.path.join(ROOT, "dashboard.html")).read()
+    # Exakte Substrings prüfen
+    expected_labels = [
+        "{ n: 1, label: 'Thema'",
+        "{ n: 2, label: 'Skript'",
+        "{ n: 3, label: 'Audio'",
+        "{ n: 4, label: 'Bilder'",
+        "{ n: 5, label: 'Render'",
+    ]
+    for lbl in expected_labels:
+        assert lbl in html, f"Phase 33.4.1 missing: stepperState-Definition {lbl!r}"
+    # Anti-Regression: alte Labels NICHT mehr im stepperState (sonst wäre Migration
+    # halb — würde verwirren wenn z.B. 'Titel' als n:4 label erhalten bleibt).
+    for old in ("label: 'Modus'", "label: 'Titel'"):
+        assert old not in html, \
+            f"Phase 33.4.1 anti-regression: altes Label {old!r} noch im stepperState"
+
+def t_phase33_4_1_audio_section_extracted():
+    """Phase 33.4.1: Der TTS-Provider-Block (ehemals Option C in ②) ist in eine eigene
+    Section data-step-section=\"3\" extrahiert. So ist der Stepper-Klick konsistent
+    zur sichtbaren Section-Reihenfolge im Editor."""
+    html = open(os.path.join(ROOT, "dashboard.html")).read()
+    # Audio-Card mit data-step-section="3" und id="cardAudio"
+    assert 'data-step-section="3"' in html, \
+        "33.4.1 missing: data-step-section=\"3\" (sollte Audio-Card sein)"
+    assert 'id="cardAudio"' in html, \
+        "33.4.1 missing: #cardAudio (Audio-Section-Container-ID)"
+    # TTS-Provider-Label auf der neuen Section
+    assert '③ Audio generieren' in html or '③ Audio' in html, \
+        "33.4.1 missing: '③ Audio' Section-Header"
+
+def t_phase33_4_1_title_thumb_removed():
+    """Phase 33.4.1: titleThumbCard ist entfernt. Der bestehende Titel-Block war
+    für den video-orientierten Auto-Generate-Flow, nicht für den Standard-Wizard.
+    TODO 33.4.2: Titel-Generierung wird in ① Thema integriert."""
+    html = open(os.path.join(ROOT, "dashboard.html")).read()
+    # Im HTML-Body darf #titleThumbCard nicht mehr als gerenderter Container sein
+    # (function-definitions dürfen noch da sein, da sie kein throw werfen
+    # solange der Container fehlt)
+    import re as _re
+    # Suche <div class="card" id="titleThumbCard"
+    matches = _re.findall(r'<div\s+class="card"\s+id="titleThumbCard"', html)
+    assert len(matches) == 0, \
+        f"33.4.1: titleThumbCard-Card noch im HTML-Body ({len(matches)} mal)"
+
+def t_phase33_4_1_plan_area_now_4():
+    """Phase 33.4.1: planArea (war Schritt ③ in 33.2) ist jetzt data-step-section=\"4\"
+    weil Step ③ jetzt die Audio-Section ist. data-step-section=\"3\" ist jetzt Audio."""
+    html = open(os.path.join(ROOT, "dashboard.html")).read()
+    # planArea muss data-step-section="4" haben
+    assert 'id="planArea" data-step-section="4"' in html, \
+        "33.4.1: planArea muss data-step-section=\"4\" sein (war vorher 3)"
+    # planArea darf NICHT mehr data-step-section="3" haben (Anti-Regression)
+    assert 'id="planArea" data-step-section="3"' not in html, \
+        "33.4.1 anti-regression: planArea noch mit data-step-section=\"3\""
 
 
 if __name__ == "__main__":

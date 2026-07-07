@@ -1531,3 +1531,57 @@ MiniMax-Voice-Kategorisierung:
 - t_phase34_provider_dropdown_in_frontend
 - t_phase34_resume_supports_both_providers
 - t_phase34_no_old_loadelevenlabsvoices_callers (Anti-Regression)
+
+### 33.4.1 Step-Reihenfolge angleichen (Juli 2026)
+
+Bisherige Schritt-Reihenfolge (33.2-Stand) entsprach NICHT dem Design-Brief:
+- ① Modus / ② Skript / ③ Bilder / ④ Titel / ⑤ Render
+
+Finale Reihenfolge (diese Phase):
+- ① **Thema** (Modus-Toggle + in 33.4.2 dann Titel/Bild-Stil) — war Modus
+- ② Skript (unverändert)
+- ③ **Audio** (TTS-Provider ElevenLabs/MiniMax) — aus Option C von ② extrahiert
+- ④ **Bilder** (Bilder-Generierung) — war ③
+- ⑤ Render (unverändert)
+
+#### 33.4.1 Was passiert ist
+
+**HTML-Restruktur:**
+- Der TTS-Provider-Block (ehemals Option C innerhalb ② Skript) ist in eine eigene
+  `<div class="card" id="cardAudio" data-step-section="3">` extrahiert. Der
+  ElevenLabs+MiniMax-Slider-Block + Provider-Dropdown wandert mit.
+- `data-step-section` Attribute angepasst: planArea war 3 → jetzt 4. CardAudio ist
+  neu 3.
+- `titleThumbCard` (war data-step-section="4") ist entfernt. Der Titel-Block war
+  für den video-orientierten Auto-Generate-Flow, nicht für den Standard-Wizard.
+  TODO 33.4.2: Titel-Generierung wird in ① Thema integriert.
+- ① Modus-Header umbenannt zu „① Thema wählen" (Modus-Toggle bleibt hier).
+
+**JS-Restruktur (`stepperState()` in `dashboard.html`):**
+- Schritt-Definitionen:
+  ```js
+  { n: 1, label: 'Thema',  subtitle: 'Modus + Stil' },
+  { n: 2, label: 'Skript', subtitle: 'Voice oder Text' },
+  { n: 3, label: 'Audio',  subtitle: 'TTS generieren' },
+  { n: 4, label: 'Bilder', subtitle: 'Szenen generieren' },
+  { n: 5, label: 'Render', subtitle: 'Film zusammenbauen' },
+  ```
+
+#### 33.4.1 Was offen bleibt (für 33.4.2)
+
+- ① Thema: nur Modus-Toggle. Titel-Input + selected_title-Anzeige +
+  Bild-Stil-Preview noch fehlend — in 33.4.2 nachziehen.
+- titleThumbCard-Buttons (`genTitles`, `genThumbnail`) sind als JS-Funktionen
+  noch im Code, haben aber keine UI-Trigger mehr. Dead code — kann in
+  33.4.2 entweder reaktiviert (in ① Thema) oder entfernt werden.
+- Bestehende JS-Funktionen wie `genTitles` und `genThumbnail` greifen auf
+  nicht-mehr-existierende DOM-Elemente zu (z.B. `$('titleList')`). Falls sie
+  in 33.4.2 nicht reaktiviert werden, sollten sie ganz entfernt werden.
+
+#### Tests
+
+`tests/test_cinematic_e2e.py::t_phase33_4_1_*` — 4 neue Tests grün (51/51 total):
+- t_phase33_4_1_new_step_labels
+- t_phase33_4_1_audio_section_extracted
+- t_phase33_4_1_title_thumb_removed
+- t_phase33_4_1_plan_area_now_4

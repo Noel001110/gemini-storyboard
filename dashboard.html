@@ -456,7 +456,8 @@
       </ol>
     </nav>
 
-    <!-- Schritt ① — Modus wählen -->
+    <!-- Schritt ① — Thema wählen (Phase 33.4.1: umbenannt von "Modus wählen". Modus-Toggle
+         bleibt hier, in 33.4.2 wird Titel- + Bild-Stil-Setup hier integriert). -->
     <div class="card" data-step-section="1" style="padding:14px 16px">
       <div class="row" style="align-items:center;gap:16px">
         <strong style="font-size:13px">① Modus:</strong>
@@ -511,9 +512,51 @@
         <span class="hint" id="transStatus">Keine Datei</span>
       </div>
 
-      <div class="divider">oder</div>
+      <div class="divider">oder</div><div class="divider">oder</div>
 
-      <div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Option C · TTS-Provider (ElevenLabs / MiniMax)</div>
+      <div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Option B · Skript manuell eingeben (Timing geschätzt)</div>
+      <textarea id="script" rows="7" placeholder="Skript hier einfügen (Timestamps werden ignoriert) …" oninput="estimate();_elRefreshGenBtn()"></textarea>
+      <div class="row" style="margin-top:10px">
+        <label>Wörter / Minute<input type="number" id="wpm" value="150" min="80" max="220" oninput="estimate()"></label>
+        <span class="est" id="est">—</span>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button onclick="makePlan()" id="planBtn">Plan aus Skript erstellen</button>
+        <span class="hint">Timing geschätzt via WPM-Formel + Pacing-Analyse</span>
+      </div>
+    </div>
+
+    <!-- Ein-Knopf-Orchestrator (Phase 4.5) — verkettet Plan → Bilder → Rendern, ohne
+         zwischendurch einzeln klicken zu müssen. Nur im Bild-Modus sinnvoll: der
+         Veo/Grok-Video-Pfad hat eine eigene, separate Zusammenschnitt-Logik. Resumable:
+         überspringt Etappen, die schon fertig sind (bestehender Plan, bereits
+         generierte Bilder) — ein zweiter Klick nach einem Teil-Fortschritt setzt also
+         nur dort fort, wo aufgehört wurde, statt alles neu zu machen. -->
+    <div class="card" id="produceCard" style="display:none;background:var(--acc-soft);border-color:var(--acc)">
+      <div class="row" style="align-items:center;gap:14px">
+        <button onclick="produceAll()" id="produceBtn">🚀 Alles auf einmal</button>
+        <button onclick="stopProduce()" id="stopProduceBtn" class="ghost" style="display:none;color:var(--danger);border-color:var(--danger)">⏹ Stoppen</button>
+        <span class="hint" id="produceHint">Plan → Bilder → Rendern automatisch, ohne einzelne Klicks dazwischen</span>
+      </div>
+      <div class="steps" id="produceSteps" style="display:none;flex-wrap:wrap;margin-top:10px">
+        <span id="pstage-plan">Plan</span>
+        <span style="color:var(--border)">›</span>
+        <span id="pstage-images">Bilder</span>
+        <span style="color:var(--border)">›</span>
+        <span id="pstage-render">Rendern</span>
+      </div>
+    </div>
+
+    
+    <!-- Phase 33.4.1 — Schritt ③ — Audio (TTS-Provider, ElevenLabs / MiniMax) -->
+    <!-- Aus dem ehemaligen Option-C-Block innerhalb von ② Skript extrahiert. Der
+         User wählt hier zwischen ElevenLabs (default) und MiniMax als TTS-Provider.
+         ElevenLabs hat feinere Voice-Library (3000+) und English-Fidelity, MiniMax
+         ist preiswerter und gut für asiatische Sprachen. -->
+    <div class="card" data-step-section="3" id="cardAudio" style="margin-top:14px">
+      <h2>③ Audio generieren (TTS-Provider)</h2>
+      <p class="hint" style="margin-bottom:14px">Voice direkt generieren. Wähle zwischen <b>ElevenLabs</b> (feinste Voice-Library, 3000+ Stimmen, English-Fidelity) und <b>MiniMax Speech 2.6 HD</b> (günstiger, gut für asiatische Sprachen und Storytelling-Pacing). Beide liefern Word-Timestamps für die Scene-Alignment-Pipeline.</p>
+<div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Option C · TTS-Provider (ElevenLabs / MiniMax)</div>
       <div class="row" style="align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
         <label style="flex:0 0 200px">Provider
           <select id="ttsProviderSelect" onchange="onTtsProviderChange()" style="width:100%">
@@ -572,43 +615,10 @@
       </div>
       <span class="hint" id="elStatus" style="display:block;margin-top:6px"></span>
 
-      <div class="divider">oder</div>
-
-      <div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Option B · Skript manuell eingeben (Timing geschätzt)</div>
-      <textarea id="script" rows="7" placeholder="Skript hier einfügen (Timestamps werden ignoriert) …" oninput="estimate();_elRefreshGenBtn()"></textarea>
-      <div class="row" style="margin-top:10px">
-        <label>Wörter / Minute<input type="number" id="wpm" value="150" min="80" max="220" oninput="estimate()"></label>
-        <span class="est" id="est">—</span>
-      </div>
-      <div class="row" style="margin-top:10px">
-        <button onclick="makePlan()" id="planBtn">Plan aus Skript erstellen</button>
-        <span class="hint">Timing geschätzt via WPM-Formel + Pacing-Analyse</span>
-      </div>
+      
     </div>
-
-    <!-- Ein-Knopf-Orchestrator (Phase 4.5) — verkettet Plan → Bilder → Rendern, ohne
-         zwischendurch einzeln klicken zu müssen. Nur im Bild-Modus sinnvoll: der
-         Veo/Grok-Video-Pfad hat eine eigene, separate Zusammenschnitt-Logik. Resumable:
-         überspringt Etappen, die schon fertig sind (bestehender Plan, bereits
-         generierte Bilder) — ein zweiter Klick nach einem Teil-Fortschritt setzt also
-         nur dort fort, wo aufgehört wurde, statt alles neu zu machen. -->
-    <div class="card" id="produceCard" style="display:none;background:var(--acc-soft);border-color:var(--acc)">
-      <div class="row" style="align-items:center;gap:14px">
-        <button onclick="produceAll()" id="produceBtn">🚀 Alles auf einmal</button>
-        <button onclick="stopProduce()" id="stopProduceBtn" class="ghost" style="display:none;color:var(--danger);border-color:var(--danger)">⏹ Stoppen</button>
-        <span class="hint" id="produceHint">Plan → Bilder → Rendern automatisch, ohne einzelne Klicks dazwischen</span>
-      </div>
-      <div class="steps" id="produceSteps" style="display:none;flex-wrap:wrap;margin-top:10px">
-        <span id="pstage-plan">Plan</span>
-        <span style="color:var(--border)">›</span>
-        <span id="pstage-images">Bilder</span>
-        <span style="color:var(--border)">›</span>
-        <span id="pstage-render">Rendern</span>
-      </div>
-    </div>
-
-    <!-- Schritt ③ — Bilder generieren (erscheint erst, sobald ein Szenen-Plan existiert) -->
-    <div id="planArea" data-step-section="3" style="display:none">
+    <!-- Schritt ④ — Bilder generieren (erscheint erst, sobald ein Szenen-Plan existiert) -->
+    <div id="planArea" data-step-section="4" style="display:none">
       <h2 style="font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:0 0 12px;font-weight:700">③ Bilder generieren</h2>
       <div id="batchStatusBar" style="display:none;align-items:center;gap:10px;padding:10px 14px;border-radius:var(--radius);margin-bottom:10px;background:var(--acc-soft);border:1px solid var(--acc);font-weight:600;font-size:13px;color:var(--acc)">
         <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--acc);animation:pulse 1.2s ease-in-out infinite"></span>
@@ -633,27 +643,9 @@
       <div id="scenes" style="margin-top:14px"></div>
     </div>
 
-    <!-- Schritt ④ — Titel & Thumbnail. Bewusst NACH dem Skript/Plan platziert (nicht mehr
-         ganz oben) — beide brauchen den fertigen Skript-Inhalt als Grundlage, vorher
-         ergäbe ein Klick nur einen Fehler ("Kein Skript vorhanden"). Gated analog zur
-         Render-Karte: disabled + Hinweistext, bis ein Plan existiert. -->
-    <div class="card" id="titleThumbCard" data-step-section="4" style="display:none">
-      <h2>④ Titel &amp; Thumbnail</h2>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
-        <div>
-          <div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Titel-Optionen</div>
-          <div id="titleList" style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px"></div>
-          <button class="sm ghost" onclick="genTitles()" id="genTitlesBtn">✍️ Titel generieren</button>
-        </div>
-        <div>
-          <div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Thumbnail</div>
-          <div class="slot" id="thumbSlot" style="margin-bottom:10px">
-            <div class="slot-empty"><span class="slot-icon">🖼</span><span class="slot-label">Noch kein Thumbnail</span></div>
-          </div>
-          <button class="sm ghost" onclick="genThumbnail()" id="genThumbBtn">✨ Thumbnail generieren</button>
-        </div>
-      </div>
-    </div>
+    <!-- Phase 33.4.1 — Schritt ④ Titel & Thumbnail wurde entfernt. Der bestehende
+         Titel-Block ist nicht Teil des Standard-Wizard-Flows. In 33.4.2 wird die
+         Titel-Generierung in ① Thema integriert. -->
 
     <!-- Schritt ⑤ — Auto-Rendering. Braucht mindestens ein generiertes Bild + Voice-over,
          deshalb ganz am Ende der Kette, mit eigenem Gating (updateRenderCardVisibility()). -->
@@ -2574,10 +2566,10 @@ function stepperState(){
     cid: '',
     vid: '',
     steps: [
-      { n: 1, label: 'Modus',  subtitle: 'Bild oder Video' },
+      { n: 1, label: 'Thema',  subtitle: 'Modus + Stil' },
       { n: 2, label: 'Skript', subtitle: 'Voice oder Text' },
-      { n: 3, label: 'Bilder', subtitle: 'Szenen generieren' },
-      { n: 4, label: 'Titel',  subtitle: 'Titel & Thumbnail' },
+      { n: 3, label: 'Audio',  subtitle: 'TTS generieren' },
+      { n: 4, label: 'Bilder', subtitle: 'Szenen generieren' },
       { n: 5, label: 'Render', subtitle: 'Film zusammenbauen' },
     ],
     completed: {},      // {1: true, 2: true, ...}
@@ -2704,4 +2696,9 @@ function stepperInvalidate(){
 }
 </script>
 </body>
-</html>
+</html>    <!-- Phase 33.4.1 — Schritt ④ Titel & Thumbnail wurde entfernt. Der bestehende
+         Titel-Block ist nicht Teil des Standard-Wizard-Flows (er war für die
+         video-orientierte Auto-Generate-Option). In 33.4.2 wird die
+         Titel-Generierung in ① Thema integriert. -->
+
+
