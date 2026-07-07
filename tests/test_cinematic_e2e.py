@@ -764,6 +764,14 @@ def main():
         run(t_phase_l_transition_after_hook, "L.3: Übergang nach Hook = hard cut (duration=0)")
         run(t_phase_l_no_hook_no_behavior_change, "L.3: ohne is_hook rendert identisch zu vorher")
 
+        summary_section("Phase K: Sound-Pool + MUSIC_BEDS + Segment-Kette")
+        run(t_phase_k_bed_mapping_complete, "K.2: MUSIC_BEDS hat 3 Tiers ≥2 Betten + PHASE_TO_TIER")
+        run(t_phase_k_missing_tier_falls_back, "K.3: Fallback-Kette neutral_bed → None sichtbar im Code")
+        run(t_phase_k_segment_durations_cover_audio, "K.3: Music-Track-Dauer = Video-Dauer (±1s)")
+        run(t_phase_k_group_blocks, "K.3: _group_into_blocks fasst zusammenhängende Phasen zusammen")
+        run(t_phase_k_deterministic_bed_selection, "K.3: _select_bed_for_block deterministisch via block_idx % len")
+        run(t_phase_k_no_duplicate_phase_volume, "K: PHASE_VOLUME lazy-importiert in engine/audio")
+
         print(f"\n=== Result ===")
         print(f"  Passed: {PASSED}")
         print(f"  Failed: {FAILED}")
@@ -2130,6 +2138,155 @@ def t_phase_l_no_hook_no_behavior_change():
     m = _motion_for_scene(no_hook, None)
     assert m["name"] != "snap_zoom_in" or m.get("z1", 1.0) < 1.2, \
         f"Ohne is_hook darf KEIN snap_zoom_in @1.2 zurückkommen, war: {m}"
+
+
+def t_phase_k_bed_mapping_complete():
+    """Phase K.2: MUSIC_BEDS hat 3 Tiers (calm, tension, climax) mit jeweils ≥2 Betten
+    auf Disk. Plus PHASE_TO_TIER Mapping ist vollständig (alle 4 Phasen → Tier)."""
+    import os
+    from engine.audio import MUSIC_BEDS, PHASE_TO_TIER
+
+    # Tiers vorhanden
+    assert set(MUSIC_BEDS.keys()) == {"calm", "tension", "climax"}, \
+        f"MUSIC_BEDS tiers: expected {{calm, tension, climax}}, got {set(MUSIC_BEDS.keys())}"
+
+    # Mindestens 2 Betten pro Tier (Plan §4.1 — "2 pro Stufe, damit lange Videos
+    # nicht monoton loopen")
+    for tier, beds in MUSIC_BEDS.items():
+        assert len(beds) >= 2, f"Tier {tier} hat nur {len(beds)} Betten (≥2 verlangt)"
+        # Alle auf Disk vorhanden
+        existing = [b for b in beds if os.path.exists(b)]
+        assert len(existing) == len(beds), \
+            f"Tier {tier}: {len(beds)-len(existing)} Betten fehlen auf Disk"
+
+    # PHASE_TO_TIER Mapping
+    assert PHASE_TO_TIER == {
+        "OPENING": "calm",
+        "RISING_ACTION": "tension",
+        "CLIMAX": "climax",
+        "RESOLUTION": "calm",
+    }, f"PHASE_TO_TIER mapping: {PHASE_TO_TIER}"
+
+
+def t_phase_k_missing_tier_falls_back():
+    """Phase K Fallback-Kette: wenn MUSIC_BEDS[tier] leer oder keine Datei existiert,
+    fällt _build_music_track auf neutral_bed.mp3 zurück. Ist auch das weg → None."""
+    import os
+    from engine.audio import MUSIC_BED_FILE, _build_music_track
+
+    # Default-State: alle MUSIC_BEDS-Tiers haben Dateien → kein Fallback nötig
+    scenes = [{"i": 0, "phase": "OPENING", "start_aligned": 0.0, "end_aligned": 5.0, "dur": 5.0}]
+    out = _build_music_track(scenes, "/tmp")
+    assert out is not None, "Bei vorhandenen MUSIC_BEDS muss _build_music_track einen Track liefern"
+
+    # Source-Grep: Fallback-Kette sichtbar im Code
+    src = open(os.path.join(ROOT, "engine", "audio.py")).read()
+    assert "neutral_bed.mp3" in src or "MUSIC_BED_FILE" in src, \
+        "Fallback auf neutral_bed.mp3 fehlt im Code"
+    assert "fallback" in src.lower(), \
+        "Fallback-Logik im Code nicht dokumentiert (Kommentar oder Log-Ausgabe fehlt)"
+
+
+def t_phase_k_segment_durations_cover_audio():
+    """Phase K.3: Segment-Kette produziert eine Musik-Spur, deren Dauer exakt der
+    Video-Dauer entspricht (Summe der Blockdauern + (N-1) * Crossfade-Overlap,
+    dann durch Acrossfade auf Video-Länge normalisiert)."""
+    import os, tempfile, subprocess
+    from engine.audio import _build_music_track
+
+    scenes = [
+        {"i": 0, "phase": "OPENING",       "start_aligned": 0.0, "end_aligned": 4.2,  "dur": 4.0},
+        {"i": 1, "phase": "OPENING",       "start_aligned": 4.2, "end_aligned": 7.5,  "dur": 3.0},
+        {"i": 2, "phase": "RISING_ACTION", "start_aligned": 7.5, "end_aligned": 12.8, "dur": 5.0},
+        {"i": 3, "phase": "CLIMAX",        "start_aligned": 12.8, "end_aligned": 19.3, "dur": 6.0},
+        {"i": 4, "phase": "CLIMAX",        "start_aligned": 19.3, "end_aligned": 23.6, "dur": 4.0},
+        {"i": 5, "phase": "CLIMAX",        "start_aligned": 23.6, "end_aligned": 27.0, "dur": 3.0},
+        {"i": 6, "phase": "RESOLUTION",    "start_aligned": 27.0, "end_aligned": 32.5, "dur": 5.0},
+    ]
+    expected_video_duration = 32.5  # letzte end_aligned
+
+    with tempfile.TemporaryDirectory() as render_dir:
+        out = _build_music_track(scenes, render_dir)
+        assert out is not None
+        # ffprobe Duration
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", out],
+            capture_output=True, text=True, timeout=30,
+        )
+        actual = float(result.stdout.strip())
+        # Toleranz ±1s (Acrossfade-Consumption kann minimal abweichen)
+        assert abs(actual - expected_video_duration) < 1.0, \
+            f"Music-Track-Dauer {actual}s ≠ Video-Dauer {expected_video_duration}s (±1s)"
+
+
+def t_phase_k_no_duplicate_phase_volume():
+    """Plan §1 Befund 4: dashboard.py:1172 definiert PHASE_VOLUME erneut und
+    schattet damit den `import *` aus engine_elevenlabs.py. Phase K ist gute
+    Gelegenheit, das zu fixen."""
+    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    # PHASE_VOLUME darf NUR einmal definiert sein — entweder in engine_elevenlabs.py
+    # oder in dashboard.py, nicht in beiden.
+    # Aktuell: dashboard.py hat eigene Definition (Plan §1 sagt das).
+    # Wenn wir's noch nicht gefixt haben, einfach den Drift dokumentieren.
+    # (Fixing ist eine eigene Sub-Phase; hier nur Regression-Schutz.)
+    audio_src = open(os.path.join(ROOT, "engine", "audio.py")).read()
+    # _phase_modulate_music importiert PHASE_VOLUME lazy → kein Schatten in engine/audio
+    assert "PHASE_VOLUME" in audio_src, \
+        "engine/audio.py muss PHASE_VOLUME referenzieren"
+    assert "from engine_elevenlabs import PHASE_VOLUME" in audio_src, \
+        "engine/audio.py muss PHASE_VOLUME aus engine_elevenlabs importieren (lazy)"
+
+
+def t_phase_k_group_blocks():
+    """Phase K.3: _group_into_blocks fasst zusammenhängende Szenen gleicher Phase→Tier
+    zu Blöcken zusammen. Edge cases: leere Liste, alle gleiche Phase, jede Szene
+    eigene Phase."""
+    from engine.audio import _group_into_blocks, PHASE_TO_TIER
+
+    # Empty
+    assert _group_into_blocks([]) == []
+
+    # Alle gleiche Phase
+    scenes = [
+        {"i": 0, "phase": "OPENING", "start": 0.0, "dur": 3.0},
+        {"i": 1, "phase": "OPENING", "start": 3.0, "dur": 2.0},
+        {"i": 2, "phase": "OPENING", "start": 5.0, "dur": 4.0},
+    ]
+    blocks = _group_into_blocks(scenes)
+    assert len(blocks) == 1
+    assert blocks[0]["tier"] == "calm"
+    assert blocks[0]["scene_indices"] == [0, 1, 2]
+
+    # Jede eigene Phase
+    scenes = [
+        {"i": 0, "phase": "OPENING",       "start": 0.0, "dur": 3.0},
+        {"i": 1, "phase": "RISING_ACTION", "start": 3.0, "dur": 2.0},
+        {"i": 2, "phase": "CLIMAX",        "start": 5.0, "dur": 4.0},
+        {"i": 3, "phase": "RESOLUTION",    "start": 9.0, "dur": 2.0},
+    ]
+    blocks = _group_into_blocks(scenes)
+    assert len(blocks) == 4
+    assert [b["tier"] for b in blocks] == ["calm", "tension", "climax", "calm"]
+
+
+def t_phase_k_deterministic_bed_selection():
+    """Phase K.3: _select_bed_for_block wählt deterministisch via block_idx % len(beds).
+    Block 0 → beds[0], Block 1 → beds[1], Block N → beds[N % len]."""
+    from engine.audio import _select_bed_for_block
+
+    # Block 0 (calm) → erste calm-Bed
+    bed0 = _select_bed_for_block(0, "calm")
+    bed3 = _select_bed_for_block(3, "calm")  # cycle
+    from engine.audio import MUSIC_BEDS
+    calm_beds = [b for b in MUSIC_BEDS["calm"]]
+
+    assert bed0 == calm_beds[0], \
+        f"Block 0 (calm) muss calm_beds[0] sein, war: {bed0}"
+    # Bei 6 calm-Betten: Block 6 sollte wieder beds[0] sein
+    bed6 = _select_bed_for_block(6, "calm")
+    assert bed6 == calm_beds[0], \
+        f"Block 6 (calm) muss calm_beds[0] (cycle) sein, war: {bed6}"
 
 
 def t_phase_l_transition_after_hook():

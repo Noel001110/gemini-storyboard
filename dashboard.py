@@ -51,8 +51,9 @@ from engine.render import (  # noqa: F401,F403
 # `dashboard.MUSIC_BED_FILE`, etc.
 from engine.audio import (  # noqa: F401,F403
     SOUND_ASSETS_DIR, MUSIC_BED_FILE, SFX_FILES,
+    MUSIC_BEDS, PHASE_TO_TIER,
     _build_sfx_events, _duck_music_under_voice, _place_sfx,
-    _phase_modulate_music, _build_final_audio,
+    _phase_modulate_music, _build_music_track, _build_final_audio,
 )
 
 # ── Phase M.5: Prompt-Komposition + Char-Sheet-Pipeline nach engine/prompts.py ──

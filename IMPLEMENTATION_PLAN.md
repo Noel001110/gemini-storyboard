@@ -560,7 +560,29 @@ Dieser Plan **vergrößert** `dashboard.py` (ca. 15 neue Funktionen) und `dashbo
 Siehe Abschnitt 6.1 (neu) — die Begründung, warum Remotion/Editly/Agent-Orchestrierung bewusst abgelehnt wurden, ist jetzt im Dokument, nicht nur das nackte Verbot.
 
 ### 11.3 Phasen, die in diesem Dokument stehen, aber noch nicht umgesetzt sind
-Zur Erinnerung, damit nichts als „schon erledigt" missverstanden wird: **Phase 1, 2 und 2.5 sind umgesetzt und end-to-end verifiziert** (siehe `ARCHITECTURE.md`). Phase 3 (Whisper-Timing, nicht mehr Scribe — siehe Errata oben), 4 (Micro-Dynamics, Crossfades bereits teilweise umgesetzt), 4.5 (Orchestrator) und 5 (Parallax) sind konzeptionell fertig geplant, aber Phase 3 ist die aktuell laufende Arbeit und 4.5/5 folgen erst danach (siehe Cinematic-Roadmap, Abschnitt 8). Reihenfolge nicht vertauschen — jede Phase baut auf einem getesteten Vorgänger auf.
+**Stand 2026-07-07:** Diese Sektion ist veraltet. Die vollständige aktuelle Phasen-Liste
+findet sich in `CINEMATIC_UPGRADE_PLAN.md` (Stand 2026-07-07, Commit `0c82b1d`).
+Bisher umgesetzt und in `ARCHITECTURE.md` dokumentiert:
+
+- **Phase M (M.0–M.7)** — Engine-Extract: `engine/scenes.py`, `engine/render.py`, `engine/audio.py`, `engine/prompts.py` (4 Module aus `dashboard.py` extrahiert; -29% Zeilen)
+- **Bug-Ticket B-1** — Charakter-Upload-Crash bei ungültigem Base64 behoben
+- **Phase Q + 38** — Stil-Preset-Library (5 Presets: flat_cartoon_doc, editorial_minimal, ink_documentary, charcoal_noir, stick_minimal) + Legacy-Bereinigung + Frontend-Dropdown
+- **Phase 33.7** — Theme Tusche-Rot (Werkstatt-UI statt SaaS-Lila) + Stepper-WCAG-AA-Kontrast
+- **Phase 33.8** — Einstiegs-Flow ("Weiterarbeiten"-Karte) + Onboarding-Hint
+- **Phase L** — Hook + Leitfrage + Render-Kopplung (`_motion_for_scene` Hook-Override, `_transition_after_hook` hard-cut, `HOOK_PROMPT_ADDITION`)
+- **Phase K** — Sound-Pool: 16 Musik-Betten (3 Tiers: calm/tension/climax) + tiered Segment-Kette mit HighPass + Loudnorm + qsin-Crossfade + 4 SFX ersetzt (whoosh, impact, riser, swell_01 als neu)
+
+**Test-Stand:** 99 Tests grün (vorher 54 Baseline).
+
+Ausstehend (laut `CINEMATIC_UPGRADE_PLAN.md` §8.3):
+
+- **Phase O** — Wort-Akzent-Puls (Mikro-Timing via Whisper-Wort-Timestamps)
+- **Phase N** — Animierte Daten-Overlays (Count-Up, Balken, Zeitleiste)
+- **Phase P** — Grading-Refinement (Papier-Tönung, Vignette)
+- **Phase 39** — T2V→I2V Migration
+- **Phase 8.x** — Asset-Curation-Automatisierung (Pixabay-API etc.) — optional nach Phase K
+
+Reihenfolge nicht vertauschen — jede Phase baut auf einem getesteten Vorgänger auf.
 
 ### 11.4 Nicht diskutiert, potenziell relevant für später (unvollständige Liste, kein Auftrag)
 - Mehrsprachigkeit über Deutsch/Englisch hinaus (aktuell nur `SCRIPT_SYSTEM`/`setLang('de'|'en')`).

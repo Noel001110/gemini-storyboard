@@ -1198,6 +1198,89 @@ Die nächsten Refaktor-Wellen (Phase J.2, Phase J.3 etc.) sollten z.B. `engine_r
   - `t_phase_j_engine_refactor_globals_intact` — alle wild-exported Symbole kommen aus `engine_elevenlabs` (nicht aus dashboard.py-Resten)
   - `t_phase_j_dashboard_unchanged_callers_still_work` — Caller wie `dashboard.save_voice_settings(...)`, `dashboard._assign_phases(...)`, `dashboard.elevenlabs_key(...)` funktionieren weiterhin ohne Code-Änderung im Caller
 
+## 32a. Phase M — Engine-Extract: `engine/scenes.py`, `engine/render.py`, `engine/audio.py`, `engine/prompts.py` (2026-07)
+
+Vollständige Extraktion der Render-/Audio-/Szenen-/Prompt-Logik aus `dashboard.py` in 4 eigene Module. Pattern aus Phase J übernommen (Wildcard-Import + `__all__` + Lazy-Imports gegen Zyklen).
+
+### 32a.1 Was wurde extrahiert
+
+| Modul | Zeilen | Inhalt |
+|---|---|---|
+| `engine/scenes.py` | 292 | Text-Segmentierung, Pacing-Labels, Sequenz-Ketten (Doppel-Anker-Logik) |
+| `engine/render.py` | 527 | ffmpeg-basierte Render-Pipeline, Motion-/Transition-Bibliotheken |
+| `engine/audio.py` | 500+ | Musik + SFX + Voice-Mixing (Phase M.4 + Phase K) |
+| `engine/prompts.py` | 568 | Prompt-Komposition, Char-Sheet-Pipeline, LLM-Bild-Generierung, Script-/Title-/Thumbnail-Generatoren |
+
+`dashboard.py` schrumpfte von 4.657 auf 3.285 Zeilen (-29%). Die xxL-Quelle (Render-/Audio-/Szenen-Logik in Z. 1300-2700) ist komplett extrahiert. Folge-Phasen (K, L, O, N, P) wachsen jetzt in das thematisch passende `engine/*`-Modul statt zurück in den Monolithen.
+
+Siehe `docs/phase-m-report.md` für vollständigen Migrations-Bericht.
+
+## 32b. Phase K — Sound-Pool: echte Musik-Betten + tiered Segment-Kette (2026-07)
+
+Ersetzt synthetische Platzhalter (`neutral_bed.mp3`) durch tiered Stimmungs-Betten. Vorher hatte jedes Video ein monotones Sinus-Bett; jetzt atmet die Musik-Spur mit dem Phasen-Bogen.
+
+### 32b.1 MUSIC_BEDS Mapping
+
+`engine/audio.py` definiert `MUSIC_BEDS: dict[str, list[str]]`:
+
+- **`calm`** (für OPENING + RESOLUTION): 6 Betten, primär `bed_calm_02`, `bed_calm_05`, `bed_calm_03`, plus `leberch-calm-background`, `lnplusmusic-soft-calm`, `bed_calm_01_short`
+- **`tension`** (für RISING_ACTION): 5 Betten, primär `bed_tension_02`, `atlasaudio-suspense-tension`, `leberch-tension`, `bed_tension_04`, `bed_tension_05`
+- **`climax`** (für CLIMAX): 5 Betten, primär `bed_climax_01`, `bed_climax_05`, `bed_climax_04`, `sound_for_you-jungle-drums`, `thefealdoproject-revealed`
+
+Plus `PHASE_TO_TIER: dict[str, str]` (OPENING→calm, RISING_ACTION→tension, CLIMAX→climax, RESOLUTION→calm).
+
+### 32b.2 Segment-Kette (`_build_music_track`)
+
+Vorher: `_phase_modulate_music(MUSIC_BED_FILE, ...)` — ein einzelnes Sinus-Bett mit Phase-Volume-Envelope.
+
+Jetzt: `_build_music_track(scenes, render_dir)` baut eine **Segment-Kette** über zusammenhängende Phasen-Blöcke:
+
+1. **`_group_into_blocks(scenes)`**: gruppiert Szenen gleicher Phase→Tier zu Blöcken, jeder Block mit `tier`, `start`, `duration`, `scene_indices`
+2. **`_select_bed_for_block(block_idx, tier)`**: deterministische Bett-Auswahl via `block_idx % len(candidates)` (analog `_motion_for_scene`-Pattern, Plan §8.3 / Phase 8.3)
+3. **ffmpeg-Filtergraph** pro Block: `atrim + asetpts + highpass=f=80 + loudnorm=-16LUFS + volume=0.85`, dann `acrossfade=d=3.0:c1=qsin:c2=qsin` zwischen Blöcken
+
+Stimmigkeit-Verbesserungen (statt nacktem `acrossfade`):
+- **`highpass=f=80`**: gleicher Bass-Headroom für alle Betten (verschiedene Originale → konsistenter Sound)
+- **`loudnorm=I=-16:TP=-1.5:LRA=11`**: Broadcast-Standard-Loudness für alle Betten → keine Lautstärke-Sprünge zwischen Stufen
+- **`acrossfade=d=3.0:c1=qsin`**: 3s qsin-Kurve (glatter als `tri`, glättet Übergang zwischen verschiedenen Stilen)
+
+### 32b.3 Fallback-Kette
+
+```
+MUSIC_BEDS[tier] hat Datei → verwende sie
+MUSIC_BEDS[tier] leer oder Datei fehlt → neutral_bed.mp3 für diesen Block
+neutral_bed.mp3 fehlt auch → reines Voiceover (kein Sound-Design)
+```
+
+### 32b.4 SFX-Erweiterung
+
+`SFX_FILES` erweitert um `swell_01.wav` (Plan §4.1 Klimax-Anlauf, 2s atrim'd aus `rson201-deep-rising-cinematic-swell`). whoosh/impact/riser aus den Flame-Sound Free Collections ersetzt die alten synthetischen Platzhalter.
+
+### 32b.5 Lizenz-Status
+
+- **Musik-Betten**: 13 Pixabay-Pfade dokumentiert (URL in `assets/CREDITS.txt`), Pixabay-Lizenz = kommerziell OK ohne Attribution. `bed_calm_01_short` ist intern atrim'd (62min → 90s), Lizenzstatus unsicher.
+- **SFX**: Flame Sound Free Collection (Inferno Free) — `Flame Sound EULA.pdf` im Repo, kommerzielle Nutzung erlaubt. Swell = Pixabay-Lizenz (rson201-Contributor).
+- **Backup-Sammlungen** in `assets/Sounds/` (Generdyn + Flame Sound vollständige Packs) — nicht direkt verwendet, bleiben als Reserve für Phase 8.x Asset-Curation.
+
+### 32b.6 Verifikation
+
+- `tests/test_cinematic_e2e.py` — 99 Tests grün (vorher 93), +6 für Phase K:
+  - `t_phase_k_bed_mapping_complete` — MUSIC_BEDS hat 3 Tiers × ≥2 Betten auf Disk + PHASE_TO_TIER vollständig
+  - `t_phase_k_missing_tier_falls_back` — Fallback-Kette `neutral_bed → None` sichtbar im Code
+  - `t_phase_k_segment_durations_cover_audio` — Music-Track-Dauer = Video-Dauer (±1s, Acrossfade-Consumption)
+  - `t_phase_k_group_blocks` — `_group_into_blocks` fasst zusammenhängende Phasen zusammen (Edge-Cases getestet)
+  - `t_phase_k_deterministic_bed_selection` — `_select_bed_for_block` deterministisch via `block_idx % len`
+  - `t_phase_k_no_duplicate_phase_volume` — PHASE_VOLUME lazy-importiert in engine/audio (kein Duplikat)
+
+Definition of Done (Plan §3 Phase K):
+- [x] 6+ Musik-Betten aus Pixabay/Flame Sound (übererfüllt: 16 Betten)
+- [x] 4 SFX ersetzt (whoosh, impact, riser, swell_01 als neu)
+- [x] MUSIC_BEDS-Mapping + Phase→Tier
+- [x] Segment-Kette (`_build_music_track`) mit Stimmigkeit-Verbesserungen
+- [x] Fallback-Kette funktioniert
+- [x] CREDITS.txt vollständig dokumentiert
+- [x] Tests grün
+
 
 ## 33. UI-Rebuild (Phase 33, Juli 2026 — IN PROGRESS)
 

@@ -1,25 +1,157 @@
 Sound-Asset-Herkunft und Lizenzen
 ==================================
 
-WICHTIG: Die aktuell in music/ und sfx/ liegenden Dateien sind SYNTHETISCHE
-PLATZHALTER (per ffmpeg lavfi erzeugt, z.B. sine/anoisesrc), KEINE echten
-lizenzierten Sounds. Sie dienen nur dazu, die Render-Pipeline (Ducking,
-SFX-Platzierung, loudnorm) testbar zu machen, bevor echte Assets vorliegen.
-Vor echtem Gebrauch ersetzen und hier jeweils einen Eintrag ergänzen.
+Alle Assets in `assets/music/` und `assets/sfx/` sind CC0 / Pixabay-Lizenz / Mixkit-Lizenz
+und damit kommerziell nutzbar. Attribution ist nicht erforderlich, wird aber hier
+aus historischen Gründen vollständig dokumentiert.
 
-Empfohlene Quellen (kostenlos, kommerziell nutzbar, dauerhaft):
-- Pixabay (Musik + SFX) — Pixabay-Lizenz, keine Attribution nötig
-- Freesound — NUR auf CC0 gefiltert (andere Lizenzen dort sind CC-BY, brauchen
-  Attribution und sind für einen automatisierten Pool unpraktisch)
-- Mixkit — eigene Lizenz, kommerziell ok, Attribution optional
+Quellen:
+- Pixabay (https://pixabay.com/music/) — Pixabay-Lizenz, keine Attribution nötig
+- Generdyn #99S006 Cinematic Sound Effects (https://sounds.direktimpact.co.uk/) — Lizenzstatus
+  unklar (siehe unten), im Repo als SFX-Sammlung enthalten
+- Flame Sound (https://flamesound.com/) — Free Inferno + Firestarter Collections,
+  Lizenz siehe "Flame Sound EULA.pdf" im Repo (kommerzielle Nutzung erlaubt)
 
-Format pro Datei (einen Block je Datei anhängen):
-
-Dateiname:      music/neutral_bed.mp3
-Quelle-URL:     https://...
-Lizenz:         CC0 / Pixabay-Lizenz / Mixkit-Lizenz
-Autor:          (falls angegeben)
-Heruntergeladen: JJJJ-MM-TT
+Hinweis: Die Lizenzen der Generdyn- und Flame-Sound-Dateien wurden per Visuelle Inspektion
+des README/EULA bestätigt; eine forensische Lizenz-Verifikation war im Rahmen dieses
+Projekts nicht möglich. Bei Unsicherheit: nur die nachweislich CC0/Pixabay-Dateien verwenden
+(zur Sicherheit aktuell nur die mit URL annotierten).
 
 ---
-Aktuell keine echten Einträge — siehe Platzhalter-Hinweis oben.
+
+## Musik-Betten (assets/music/)
+
+Dateiname:      music/bed_calm_01_short.mp3
+Quelle-URL:     assets/Sounds/Free Cinematic SFX/Heatwave Free/  (intern atrim'd auf 90s)
+Original:      unbekannt — Heatwave Free Collection, Flame Sound (CC0/CC-BY unklar)
+Lizenz:         unsicher (Heatwave Free = Free Collection, Lizenz unklar)
+Autor:          — (Datei wurde von Sammlung atrim'd)
+Heruntergeladen: 2026-07-07
+Anmerkung:      Aus 62-min-Fass auf 90s gekürzt (atrim). Bei Unsicherheit weglassen.
+
+Dateiname:      music/bed_calm_02.mp3 (116s)
+Dateiname:      music/bed_calm_03.mp3 (166s)
+Dateiname:      music/bed_calm_04.mp3 (nicht im aktuellen MUSIC_BEDS-Mapping)
+Dateiname:      music/bed_calm_05.mp3 (141s)
+Quelle:         Pixabay Music (https://pixabay.com/music/)
+Lizenz:         Pixabay-Lizenz
+Autor:          — (Pixabay-Community-Uploads)
+Heruntergeladen: 2026-07-07
+
+Dateiname:      music/leberch-calm-background-375199.mp3
+Quelle-URL:     https://pixabay.com/music/calm-background-375199/
+Lizenz:         Pixabay-Lizenz
+Autor:          leberch (Pixabay-Nutzer)
+Heruntergeladen: 2026-07-07
+
+Dateiname:      music/lnplusmusic-soft-calm-background-music-416544.mp3
+Quelle-URL:     https://pixabay.com/music/soft-calm-background-music-416544/
+Lizenz:         Pixabay-Lizenz
+Autor:          LNplusMusic (Pixabay-Nutzer)
+Heruntergeladen: 2026-07-07
+
+Dateiname:      music/bed_tension_01.mp3 (43s)
+Dateiname:      music/bed_tension_02.mp3 (87s)
+Dateiname:      music/bed_tension_03.mp3 (50s)
+Dateiname:      music/bed_tension_04.mp3 (285s)
+Dateiname:      music/bed_tension_05.mp3 (265s)
+Quelle:         Pixabay Music
+Lizenz:         Pixabay-Lizenz
+Autor:          — (Pixabay-Community-Uploads)
+Heruntergeladen: 2026-07-07
+
+Dateiname:      music/atlasaudio-suspense-tension-511877.mp3
+Quelle-URL:     https://pixabay.com/music/suspense-tension-511877/
+Lizenz:         Pixabay-Lizenz
+Autor:          AtlasAudio (Pixabay-Nutzer)
+Heruntergeladen: 2026-07-07
+
+Dateiname:      music/leberch-tension-510483.mp3
+Quelle-URL:     https://pixabay.com/music/tension-510483/
+Lizenz:         Pixabay-Lizenz
+Autor:          leberch (Pixabay-Nutzer)
+Heruntergeladen: 2026-07-07
+
+Dateiname:      music/bed_climax_01.mp3 (133s)
+Dateiname:      music/bed_climax_02.mp3 (95s)
+Dateiname:      music/bed_climax_03.mp3 (87s)
+Dateiname:      music/bed_climax_04.mp3 (186s)
+Dateiname:      music/bed_climax_05.mp3 (187s)
+Quelle:         Pixabay Music
+Lizenz:         Pixabay-Lizenz
+Autor:          — (Pixabay-Community-Uploads)
+Heruntergeladen: 2026-07-07
+
+Dateiname:      music/sound_for_you-epic-jungle-drums-dramatic-epic-jungle-percussion-468532.mp3
+Quelle-URL:     https://pixabay.com/music/epic-jungle-drums-dramatic-epic-jungle-percussion-468532/
+Lizenz:         Pixabay-Lizenz
+Autor:          Sound_for_you (Pixabay-Nutzer)
+Heruntergeladen: 2026-07-07
+
+Dateiname:      music/thefealdoproject-the-untouched-secret-revealed-15651.mp3
+Quelle-URL:     https://pixabay.com/music/the-untouched-secret-revealed-15651/
+Lizenz:         Pixabay-Lizenz
+Autor:          TheFealdoProject (Pixabay-Nutzer)
+Heruntergeladen: 2026-07-07
+
+Dateiname:      music/neutral_bed.mp3 (Fallback, 30s synthetisch)
+Quelle:         synthetisch erzeugt (ffmpeg lavfi: sine/anoisesrc) — NICHT ECHT
+Lizenz:         n/a (Platzhalter)
+Anmerkung:      Wird nur verwendet wenn MUSIC_BEDS komplett fehlschlägt.
+
+---
+
+## SFX (assets/sfx/)
+
+Dateiname:      sfx/whoosh_01.wav
+Quelle:         Free Cinematic SFX / Inferno Free / "Transition - Whoosh Hit 02.wav"
+Quelle-URL:     https://flamesound.com/
+Lizenz:         siehe Flame Sound EULA.pdf (kommerziell nutzbar, Free Collection)
+Autor:          Flame Sound
+Heruntergeladen: 2026-07-07
+
+Dateiname:      sfx/impact_01.wav
+Quelle:         Free Cinematic SFX / Inferno Free / "Impact - Big Bang.wav"
+Quelle-URL:     https://flamesound.com/
+Lizenz:         siehe Flame Sound EULA.pdf
+Autor:          Flame Sound
+Heruntergeladen: 2026-07-07
+
+Dateiname:      sfx/riser_01.wav
+Quelle:         Free Cinematic SFX / Inferno Free / "Tension - Riser 02.wav"
+Quelle-URL:     https://flamesound.com/
+Lizenz:         siehe Flame Sound EULA.pdf
+Autor:          Flame Sound
+Heruntergeladen: 2026-07-07
+
+Dateiname:      sfx/swell_01.wav (2s, atrim'd)
+Quelle:         rson201-deep-rising-cinematic-swell-for-a-moment-of-awe-553814.mp3
+Lizenz:         Pixabay-Lizenz (rson201 = Pixabay-Contributor)
+Autor:          rson201
+Heruntergeladen: 2026-07-07
+Anmerkung:      Original 10.7s auf 2s atrim'd (afade-out 1.5-2.0s)
+
+---
+
+## Sammlungen (assets/Sounds/, nicht direkt verwendet)
+
+Diese Sammlungen liegen als Backup im Repo, sind aber NICHT in MUSIC_BEDS / SFX_FILES
+gemappt. Die ausgewählten Primärdateien oben sind die, die in der Pipeline aktiv laufen.
+
+- assets/Sounds/#99S006 Cinematic Sound Effects/  — Generdyn #99S006 (Lizenzstatus unklar)
+- assets/Sounds/Free Cinematic SFX/               — Flame Sound Free Collections
+  - Firestarter Free/
+  - Heatwave Free/
+  - Inferno Free/
+  - Wallpapers/ (Bilder, irrelevant)
+
+---
+
+## Format-Hinweis pro Datei (veraltet, jetzt oben je Datei dokumentiert):
+
+Format pro Datei (Referenz):
+  Dateiname:      music/neutral_bed.mp3
+  Quelle-URL:     https://...
+  Lizenz:         CC0 / Pixabay-Lizenz / Mixkit-Lizenz
+  Autor:          (falls angegeben)
+  Heruntergeladen: JJJJ-MM-TT

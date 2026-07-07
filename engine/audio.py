@@ -1,14 +1,15 @@
 """engine.audio — Audio-Pipeline (Musik + SFX + Voice-Mixing).
 
-Enthält (Phase M.4, 2026-07-07):
+Enthält (Phase M.4 + K, 2026-07-07):
     Konstanten:
-        SOUND_ASSETS_DIR, MUSIC_BED_FILE, SFX_FILES
+        SOUND_ASSETS_DIR, MUSIC_BED_FILE (Fallback), SFX_FILES, MUSIC_BEDS
     Funktionen:
         _build_sfx_events             — Regelbasierte SFX-Timing-Events
         _duck_music_under_voice       — sidechaincompress Ducking
         _place_sfx                    — SFX auf Narration setzen
         _phase_modulate_music         — Phase-Volume-Envelope (Phase G)
-        _build_final_audio            — Orchestrator: Phase → Duck → SFX → loudnorm
+        _build_music_track            — Segment-Kette über Phasen-Blöcke (Phase K.3)
+        _build_final_audio            — Orchestrator: Music-Track → Duck → SFX → loudnorm
 
 BLEIBEN in dashboard.py (Phase M.6 Orchestrator):
     _render_worker                   — Ruft _build_final_audio + _mux_audio auf
@@ -16,6 +17,20 @@ BLEIBEN in dashboard.py (Phase M.6 Orchestrator):
 Externe Abhängigkeiten (lazy importiert):
     engine_elevenlabs.PHASE_VOLUME  — Phase→Volume-Mapping
     engine.render._transition_for_scene — SFX-Family-Pick (gleiche Logik wie Video)
+
+Phase K Besonderheiten (CINEMATIC_UPGRADE_PLAN.md §3 + §4.1):
+    MUSIC_BEDS ist ein dict[tier_name] -> [file_path, ...]. Mehrere Betten pro Stufe
+    verhindern Monotonie in langen Videos. Bett-Auswahl deterministisch via
+    block_index % len(candidates) — analog _motion_for_scene.
+
+    Die Segment-Kette erzeugt _music_track.mp3:
+      1. Blockgruppierung: zusammenhängende Szenen mit gleicher Phase→Stufe
+      2. Bett-Auswahl pro Block
+      3. atrim auf Blockdauer (Crossfade-Kompensation)
+      4. acrossfade mit qsin-Kurve (3s, glatter als tri)
+      5. HighPass auf 80Hz (gleicher Bass-Headroom für alle Betten)
+      6. Loudnorm auf -16 LUFS (Broadcast-Standard) — kohärente Lautstärke zwischen Stufen
+    Fallback-Kette: Tier leer → neutral_bed.mp3 → gar keine Musik.
 """
 
 from __future__ import annotations
@@ -29,20 +44,69 @@ import subprocess
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SOUND_ASSETS_DIR = os.path.join(HERE, "assets")
-MUSIC_BED_FILE = os.path.join(SOUND_ASSETS_DIR, "music", "neutral_bed.mp3")
+MUSIC_DIR = os.path.join(SOUND_ASSETS_DIR, "music")
+MUSIC_BED_FILE = os.path.join(MUSIC_DIR, "neutral_bed.mp3")  # Phase K Fallback
+SFX_DIR = os.path.join(SOUND_ASSETS_DIR, "sfx")
 SFX_FILES = {
-    "whoosh": os.path.join(SOUND_ASSETS_DIR, "sfx", "whoosh_01.wav"),
-    "impact": os.path.join(SOUND_ASSETS_DIR, "sfx", "impact_01.wav"),
-    "riser":  os.path.join(SOUND_ASSETS_DIR, "sfx", "riser_01.wav"),
+    "whoosh": os.path.join(SFX_DIR, "whoosh_01.wav"),
+    "impact": os.path.join(SFX_DIR, "impact_01.wav"),
+    "riser":  os.path.join(SFX_DIR, "riser_01.wav"),
+    "swell":  os.path.join(SFX_DIR, "swell_01.wav"),  # Phase K — neu (Klimax-Anlauf)
 }
+
+# Phase K.2 — MUSIC_BEDS: tier_name → Liste von Bett-Pfaden. Mehrere pro Stufe
+# verhindern Monotonie; Auswahl via block_index % len(candidates).
+# Reihenfolge der Pfade pro Tier = empfohlene Reihenfolge, deterministisch.
+MUSIC_BEDS: dict[str, list[str]] = {
+    "calm": [
+        # Primär (längere, ruhigere Betten für OPENING/RESOLUTION)
+        os.path.join(MUSIC_DIR, "bed_calm_02.mp3"),                                # 116s
+        os.path.join(MUSIC_DIR, "bed_calm_05.mp3"),                                # 141s
+        os.path.join(MUSIC_DIR, "bed_calm_03.mp3"),                                # 166s
+        os.path.join(MUSIC_DIR, "leberch-calm-background-375199.mp3"),               # 96s
+        os.path.join(MUSIC_DIR, "lnplusmusic-soft-calm-background-music-416544.mp3"),# 325s
+        os.path.join(MUSIC_DIR, "bed_calm_01_short.mp3"),                          # 90s (atrim von 62min-Fass)
+    ],
+    "tension": [
+        os.path.join(MUSIC_DIR, "bed_tension_02.mp3"),                              # 87s
+        os.path.join(MUSIC_DIR, "atlasaudio-suspense-tension-511877.mp3"),           # 102s
+        os.path.join(MUSIC_DIR, "leberch-tension-510483.mp3"),                       # 96s
+        os.path.join(MUSIC_DIR, "bed_tension_04.mp3"),                             # 285s
+        os.path.join(MUSIC_DIR, "bed_tension_05.mp3"),                             # 265s
+    ],
+    "climax": [
+        os.path.join(MUSIC_DIR, "bed_climax_01.mp3"),                              # 133s
+        os.path.join(MUSIC_DIR, "bed_climax_05.mp3"),                              # 187s
+        os.path.join(MUSIC_DIR, "bed_climax_04.mp3"),                              # 186s
+        os.path.join(MUSIC_DIR, "sound_for_you-epic-jungle-drums-dramatic-epic-jungle-percussion-468532.mp3"),  # 66s
+        os.path.join(MUSIC_DIR, "thefealdoproject-the-untouched-secret-revealed-15651.mp3"),  # 261s
+    ],
+}
+
+# Phase→Tier-Mapping (Plan §3 Phase K.2)
+PHASE_TO_TIER: dict[str, str] = {
+    "OPENING":       "calm",
+    "RISING_ACTION": "tension",
+    "CLIMAX":        "climax",
+    "RESOLUTION":    "calm",
+}
+
+# Phase K.3 — Crossfade-Parameter
+CROSSFADE_DURATION_SEC = 3.0  # Plan §4.1 empfiehlt 3-4s bei verschiedenen Stilen
+CROSSFADE_CURVE = "qsin"       # Plan-Vorschlag: glatter als tri
+HIGHPASS_HZ = 80                # Plan: gleicher Bass-Headroom für alle Betten
+TARGET_LUFS = -16               # Broadcast-Standard (Streaming)
+TARGET_TRUE_PEAK_DB = -1.5
+TARGET_LRA = 11
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
 __all__ = [
     "SOUND_ASSETS_DIR", "MUSIC_BED_FILE", "SFX_FILES",
+    "MUSIC_BEDS", "PHASE_TO_TIER",
     "_build_sfx_events", "_duck_music_under_voice", "_place_sfx",
-    "_phase_modulate_music", "_build_final_audio",
+    "_phase_modulate_music", "_build_music_track", "_build_final_audio",
 ]
 
 
@@ -179,32 +243,209 @@ def _phase_modulate_music(music_path: str, scenes: list, out_path: str) -> None:
         shutil.copy(music_path, out_path)
 
 
+# ── Phase K.3 — Segment-Kette ────────────────────────────────────────────────
+
+def _phase_to_tier(phase: str) -> str | None:
+    """Map story phase to music tier. Returns None if phase unknown → caller falls
+    back to neutral_bed for that block."""
+    return PHASE_TO_TIER.get(phase)
+
+
+def _group_into_blocks(scenes: list) -> list:
+    """Zusammenhängende Szenen gleicher Phase→Tier zu Blöcken gruppieren.
+
+    Jeder Block: {'tier', 'start', 'duration', 'scene_indices'}.
+    'start' = erste Block-Szene start_aligned (oder start)
+    'duration' = Blockdauer (letztes end_aligned - erstes start_aligned)
+    """
+    blocks = []
+    if not scenes:
+        return blocks
+
+    def _start(s):
+        return s.get("start_aligned") if s.get("start_aligned") is not None else s.get("start", 0.0)
+    def _end(s):
+        return s.get("end_aligned") or (_start(s) + max(0.1, s.get("dur", 5.0)))
+
+    cur_tier = _phase_to_tier(scenes[0].get("phase", ""))
+    cur_start = _start(scenes[0])
+    cur_end = _end(scenes[0])
+    cur_indices = [0]
+
+    for idx in range(1, len(scenes)):
+        tier = _phase_to_tier(scenes[idx].get("phase", ""))
+        if tier == cur_tier:
+            cur_end = _end(scenes[idx])
+            cur_indices.append(idx)
+        else:
+            blocks.append({
+                "tier": cur_tier,
+                "start": cur_start,
+                "duration": cur_end - cur_start,
+                "scene_indices": cur_indices,
+            })
+            cur_tier = tier
+            cur_start = _start(scenes[idx])
+            cur_end = _end(scenes[idx])
+            cur_indices = [idx]
+
+    # Letzter Block
+    blocks.append({
+        "tier": cur_tier,
+        "start": cur_start,
+        "duration": cur_end - cur_start,
+        "scene_indices": cur_indices,
+    })
+    return blocks
+
+
+def _select_bed_for_block(block_idx: int, tier: str) -> str | None:
+    """Deterministische Bett-Auswahl: tier-beds[block_idx % len]. Falls Tier leer oder
+    keine Datei existiert → return None (Caller fällt auf neutral_bed zurück)."""
+    beds = MUSIC_BEDS.get(tier, [])
+    beds = [b for b in beds if os.path.exists(b)]
+    if not beds:
+        return None
+    return beds[block_idx % len(beds)]
+
+
+def _build_music_track(scenes: list, render_dir: str) -> str | None:
+    """Phase K.3 — Musik-Spur als Segment-Kette pro zusammenhängendem Phasen-Block.
+
+    Per Block:
+      1. Bett-Auswahl (deterministisch via _select_bed_for_block)
+      2. atrim auf Blockdauer + Crossfade-Overlap (außer letzter Block)
+      3. HighPass + Loudnorm im Block
+      4. Acrossfade zwischen Blöcken (qsin, 3s)
+
+    Returns path to music track, or None if no usable music was found (in which
+    case _build_final_audio falls back to neutral_bed or pure voiceover).
+
+    Fallback-Kette:
+      - MUSIC_BEDS[tier] leer / Datei fehlt → neutral_bed.mp3 für diesen Block
+      - neutral_bed.mp3 fehlt auch → kein Block, gib None zurück
+    """
+    blocks = _group_into_blocks(scenes)
+    if not blocks:
+        return None
+
+    # Wenn KEIN Block eine gültige Tier-Bett hat und neutral_bed fehlt → None
+    any_bed_available = any(_select_bed_for_block(i, b["tier"]) is not None
+                            for i, b in enumerate(blocks))
+    if not any_bed_available and not os.path.exists(MUSIC_BED_FILE):
+        print("  [Audio] Keine MUSIC_BEDS-Dateien und neutral_bed fehlt — keine Musik-Spur.", flush=True)
+        return None
+
+    n = len(blocks)
+    inputs = []
+    filter_parts = []
+    last_label = None
+
+    for i, block in enumerate(blocks):
+        tier = block["tier"]
+        bed = _select_bed_for_block(i, tier) or MUSIC_BED_FILE
+        if not os.path.exists(bed):
+            continue
+        inputs += ["-stream_loop", "-1", "-i", bed]
+        # Input-Index = Anzahl bisheriger -i Flags (4 Elemente pro Input: -stream_loop -1 -i <path>)
+        in_idx = len(inputs) // 4 - 1
+
+        # Blockdauer inkl. Crossfade-Overlap (außer letzter Block)
+        block_dur = block["duration"]
+        if i < n - 1:
+            block_dur_with_overlap = block_dur + CROSSFADE_DURATION_SEC
+        else:
+            block_dur_with_overlap = block_dur
+
+        # Output-Label für dieses Segment
+        seg_label = f"b{i}"
+
+        # Filter: atrim + HighPass + Loudnorm
+        # - atrim mit asetpts setzt Block-Start auf 0 (für cleanes Crossfade)
+        # - HighPass entfernt unterschiedliche Bass-Heads (gleicher Headroom)
+        # - Loudnorm normiert Lautstärke aller Blöcke auf gleichen LUFS
+        filter_parts.append(
+            f"[{in_idx}:a]atrim=0:{block_dur_with_overlap:.3f},"
+            f"asetpts=PTS-STARTPTS,"
+            f"highpass=f={HIGHPASS_HZ},"
+            f"loudnorm=I={TARGET_LUFS}:TP={TARGET_TRUE_PEAK_DB}:LRA={TARGET_LRA},"
+            f"volume=0.85"  # leichte Reserve, damit final loudnorm nicht clippt
+            f"[{seg_label}]"
+        )
+
+        if last_label is None:
+            last_label = seg_label
+        else:
+            # Crossfade mit qsin — gleichberechtigte Kurve (kein Pegel-Sprung in Mitte)
+            crossfade_label = f"x{i}"
+            filter_parts.append(
+                f"[{last_label}][{seg_label}]acrossfade="
+                f"d={CROSSFADE_DURATION_SEC}:c1={CROSSFADE_CURVE}:c2={CROSSFADE_CURVE}"
+                f"[{crossfade_label}]"
+            )
+            last_label = crossfade_label
+
+    if last_label is None:
+        return None
+
+    # Filtergraph zusammenbauen
+    filter_complex = ";".join(filter_parts)
+    out_path = os.path.join(render_dir, "_music_track.mp3")
+
+    cmd = [
+        "ffmpeg", "-y",
+        *inputs,
+        "-filter_complex", filter_complex,
+        "-map", f"[{last_label}]",
+        "-c:a", "libmp3lame", "-q:a", "2",
+        out_path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=300, text=True)
+        if result.returncode != 0:
+            print(f"  [Audio] _build_music_track failed: {result.stderr[-300:]} — fallback neutral_bed", flush=True)
+            if os.path.exists(MUSIC_BED_FILE):
+                shutil.copy(MUSIC_BED_FILE, out_path)
+                return out_path
+            return None
+        print(f"  [Audio] _build_music_track: {n} Block(s), acrossfade={CROSSFADE_DURATION_SEC}s {CROSSFADE_CURVE}, LUFS={TARGET_LUFS}", flush=True)
+        return out_path
+    except Exception as e:
+        print(f"  [Audio] _build_music_track exception: {e} — fallback neutral_bed", flush=True)
+        if os.path.exists(MUSIC_BED_FILE):
+            shutil.copy(MUSIC_BED_FILE, out_path)
+            return out_path
+        return None
+
+
 # ── Final-Audio-Orchestrator ─────────────────────────────────────────────────
 
 def _build_final_audio(voice_path: str, scenes: list, render_dir: str) -> str:
-    """Builds the final audio track for muxing: voiceover + ducked music bed + rule-
-    based SFX, loudnorm-normalized. Falls back to the raw voiceover unchanged if the
-    music bed asset is missing.
+    """Builds the final audio track for muxing: voiceover + (Phase K) tiered music
+    track + rule-based SFX + loudnorm-normalized.
 
-    Phase G: between loading the music bed and sidechaincompressing it, runs a per-
-    phase volume envelope (PHASE_VOLUME table on the music input). With the current
-    neutral_bed.mp3 the effect is audible but subtle — Phase K will replace it with
-    tiered Pixabay stems for full differentiation.
+    Phase K replaces the single neutral_bed with a per-block tiered segment chain.
+    Fallbacks: neutral_bed for missing tiers → reines Voiceover.
     """
-    if not os.path.exists(MUSIC_BED_FILE):
-        print("  [Render] Kein Musikbett gefunden (assets/music/neutral_bed.mp3) — "
-              "rendere ohne Sound-Design, nur Voiceover.", flush=True)
-        return voice_path
     try:
-        # Phase G: phase-modulate the music bed before ducking
+        # Phase K.3 — Segment-Kette über Phasen-Blöcke (mit HighPass + Loudnorm + qsin)
+        music_path = _build_music_track(scenes, render_dir)
+        if music_path is None:
+            # Kein Music-Track überhaupt möglich → reines Voiceover
+            print("  [Render] Keine Musik-Spur möglich — rendere nur Voiceover.", flush=True)
+            return voice_path
+
+        # Phase G: phase-modulate the music track before ducking
         phase_modulated_path = os.path.join(render_dir, "_phase_modulated.mp3")
-        _phase_modulate_music(MUSIC_BED_FILE, scenes, phase_modulated_path)
+        _phase_modulate_music(music_path, scenes, phase_modulated_path)
         ducked_path = os.path.join(render_dir, "_ducked.mp3")
         _duck_music_under_voice(voice_path, phase_modulated_path, ducked_path)
         sfx_events = _build_sfx_events(scenes)
         final_audio_path = os.path.join(render_dir, "_final_audio.mp3")
         _place_sfx(ducked_path, sfx_events, final_audio_path)
-        print(f"  [Render] Sound-Design: Phase-G-modulierter Musikbett gedückt + {len(sfx_events)} SFX-Ereignisse platziert", flush=True)
+        n_blocks = len(_group_into_blocks(scenes))
+        print(f"  [Render] Sound-Design: {n_blocks}-Block Segment-Kette + Phase-G-Modulation + "
+              f"Ducking + {len(sfx_events)} SFX-Ereignisse platziert", flush=True)
         return final_audio_path
     except Exception as e:
         print(f"  [Render] Sound-Design fehlgeschlagen ({e}) — falle zurück auf reines Voiceover.", flush=True)

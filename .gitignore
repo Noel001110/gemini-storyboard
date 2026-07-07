@@ -10,6 +10,10 @@ anchor.png
 # All runtime channel/video data (master prompts, plans, generated media, uploads)
 channels/
 
+# Backup sound collections — too large for Git. Only selected files in music/ + sfx/
+# are version-controlled (the ones actively used by MUSIC_BEDS / SFX_FILES).
+assets/Sounds/
+
 # Legacy root-level upload dir (pre-channels layout)
 /uploads/
 
