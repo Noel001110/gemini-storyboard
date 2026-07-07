@@ -71,6 +71,15 @@ from engine.prompts import (  # noqa: F401,F403
     make_thumbnail_prompt, gen_thumbnail_image,
 )
 
+# ── Phase Q + 38: Stil-Presets nach engine/presets.py ─────────────────────────
+# Re-Export. IMAGE_MASTER_DEFAULT ist jetzt = PRESET_MASTERS[DEFAULT_PRESET]
+# (= "flat_cartoon_doc"), nicht mehr der karge Stick-Figure-Platzhalter.
+# Bestehende Kanäle behalten ihren master_prompt.txt — keine Migration nötig.
+from engine.presets import (  # noqa: F401,F403
+    PRESET_MASTERS, PRESET_DESCRIPTIONS, DEFAULT_PRESET,
+    IMAGE_MASTER_DEFAULT, VIDEO_MASTER_DEFAULT,
+)
+
 # ── Background job tracking ───────────────────────────────────────────────────
 # {job_id: {status:"running"|"done"|"error", progress:0-100, file, source_url, error}}
 JOBS: dict = {}
@@ -291,31 +300,6 @@ def set_video_mode(cid, vid, mode):
     for v in videos:
         if v["id"] == vid: v["mode"] = mode
     save_videos(cid, videos)
-
-IMAGE_MASTER_DEFAULT = """\
-CHARACTER VISUAL (used as reference for every image):
-Minimalist 2D stick figure — round circle head, straight line limbs, no facial features drawn.
-Pure black thin strokes on pure white #FFFFFF background.
-No color, no shading, no fill. Flat line art only.
-
-SCENE STYLE:
-Each image shows the stick figure in a pose or action that visually represents the scene moment.
-Keep proportions consistent. Simple bold lines. White background always empty.
-"""
-
-VIDEO_MASTER_DEFAULT = """\
-CHARACTER (repeat verbatim in every video prompt):
-Simple 2D stick figure — round head, straight limbs, thin black lines on pure white background.
-
-STORY ARC:
-[Describe the overall narrative: who is the protagonist, what is their journey,
-what are the key emotional beats from beginning to end. 3-5 sentences.]
-
-VISUAL STYLE RULES (always apply):
-2D flat line art animation. Pure white #FFFFFF background throughout.
-No photorealism. No color. No mouth movement. No lip sync.
-Camera: Ken Burns zoom or slow pan matching scene emotion.
-"""
 
 # ── Channel list ──────────────────────────────────────────────────────────────
 def load_channels():
@@ -2219,6 +2203,16 @@ class H(BaseHTTPRequestHandler):
         vid = qs.get("video", [""])[0]
         if p == "/":
             return self._send(200, open(os.path.join(HERE, "dashboard.html"), encoding="utf-8").read(), "text/html; charset=utf-8")
+        # Phase 38: Stil-Presets abfragen (für UI-Dropdown)
+        if p == "/api/presets":
+            from engine.presets import PRESET_MASTERS, PRESET_DESCRIPTIONS, DEFAULT_PRESET
+            return self._send(200, {
+                "presets": [
+                    {"id": pid, "description": PRESET_DESCRIPTIONS[pid]}
+                    for pid in PRESET_MASTERS
+                ],
+                "default": DEFAULT_PRESET,
+            })
         if p == "/api/channels":
             # UI-Rebuild Phase 33.3 — Sidebar braucht pro Channel einen Video-Counter
             # und Brand-Color. Wir packen die beiden Felder direkt ins channels-Response.
@@ -2463,12 +2457,18 @@ class H(BaseHTTPRequestHandler):
             chs.append({"id": cid_new, "name": name})
             save_channels(chs)
             ensure_channel(cid_new)
-            # copy current channel's master as starting point
-            src = ch_master(cid if cid in ids else "default")
+            # Phase 38: Stil-Preset-Auswahl. Falls 'preset' mitgegeben wird und gültig
+            # ist, wird das entsprechende Master-Preset nach channels/<cid>/master_prompt.txt
+            # geschrieben. Existierende master_prompt.txt wird NIE überschrieben (Q.4).
+            preset_id = d.get("preset")
             dst = ch_master(cid_new)
-            if os.path.exists(src) and not os.path.exists(dst):
-                shutil.copy2(src, dst)
-            return self._send(200, {"ok": True, "id": cid_new, "name": name})
+            if not os.path.exists(dst):
+                from engine.presets import PRESET_MASTERS, DEFAULT_PRESET
+                chosen_preset = preset_id if preset_id in PRESET_MASTERS else DEFAULT_PRESET
+                with open(dst, "w") as f:
+                    f.write(PRESET_MASTERS[chosen_preset])
+            return self._send(200, {"ok": True, "id": cid_new, "name": name,
+                                     "preset": chosen_preset if 'chosen_preset' in dir() else None})
         if p == "/api/channels/delete":
             chs = load_channels()
             if len(chs) <= 1:

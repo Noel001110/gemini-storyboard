@@ -1,7 +1,22 @@
+# ⚠️  LEGACY — NICHT MEHR AKTUELL  ⚠️
+#
+# Dieses Dokument beschreibt den Stil des allerersten Video-Versuchs (Yeonmi-Story,
+# schwarz-weiße Tusche-Line-Art). Es ist **NICHT** der aktuelle Kanal-Stil des Dashboards.
+#
+# Aktueller Stil: flacher 2D-Cartoon (warm, dokumentarisch), siehe
+#   engine/presets.py → PRESET_MASTERS["flat_cartoon_doc"]
+# Plan-Kontext: CINEMATIC_UPGRADE_PLAN.md §10
+#
+# Die alte Pipeline (gen.py, scenes.tsv, run_batch.sh) und der alte Asset-Pool
+# (yeonmi_storyboard/) sind aus dem Dashboard entkoppelt. Sie wurden am 2026-07-07 nach
+# legacy/ verschoben (Phase Q.1 des Upgrade-Plans). Nur noch historisch referenziert —
+# NICHT weiterpflegen, jeder neue Kanal startet mit den Presets in engine/presets.py.
+# ───────────────────────────────────────────────────────────────────────────────────────────
+
 # Yeonmi Storyboard — Stil-Bibel & Pipeline
 
 Ziel: Jedes Bild sieht aus wie aus DEMSELBEN Video, gezeichnet von DERSELBEN Hand.
-Scharfe, saubere Line-Art-Skizzen — KEIN Blur, KEINE Whiteboard-Rahmen, KEIN Grunge-Hintergrund.
+Scharfe, saubere Line-Art-Skizzen — KEIN Blur, KEIN Whiteboard-Rahmen, KEIN Grunge-Hintergrund.
 
 ## Finale Konfiguration (festgelegt)
 
