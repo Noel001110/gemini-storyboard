@@ -764,6 +764,12 @@ def main():
         run(t_bug_b1_charref_upload_validates_base64, "B-1: handler hat try/except + validate=False + name-check + mkdir")
         run(t_bug_b1_charref_upload_roundtrip, "B-1 E2E: valid upload schreibt PNG+JSON, keine 5xx")
 
+        summary_section("Phase 3.4 — /health-Endpoint (Schwachstellenbericht #38/#40/#65/#67)")
+        run(t_phase3_health_endpoint_returns_ok, "#38: /health liefert status=ok + uptime + active counts")
+        run(t_phase3_health_includes_git_commit, "#38: /health enthält version mit Git-Commit")
+        run(t_phase3_health_tracks_active_jobs, "#38: /health zählt active_jobs/batches/renders")
+        run(t_phase3_health_returns_404_on_post, "#38: /health ist GET-only (POST → 404)")
+
         summary_section("Phase 2.1 — Atomare Writes (Schwachstellenbericht #6/#7/#36/#60)")
         run(t_phase2_atomic_write_basic, "#6: _atomic_write_json schreibt gültige JSON-Datei")
         run(t_phase2_atomic_write_overwrites_existing, "#6: _atomic_write_json überschreibt existierende Datei (os.replace)")
@@ -2716,6 +2722,117 @@ def t_char_filter_load_char_refs():
             shutil.rmtree(test_ch_dir, ignore_errors=True)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 3.4 — Health-Endpoint (Schwachstellenbericht #38, #40, #65, #67)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def t_phase3_health_endpoint_returns_ok():
+    """#38: /health liefert status=ok + uptime + active counts."""
+    import subprocess, json as _json
+    port = 18901
+    proc = subprocess.Popen(
+        ["python3", os.path.join(ROOT, "dashboard.py"), "--port", str(port)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=ROOT,
+    )
+    import time as _time
+    _time.sleep(2.5)
+    try:
+        import urllib.request as _ur
+        import urllib.error as _ue
+        with _ur.urlopen(f"http://localhost:{port}/health", timeout=10) as r:
+            body = _json.load(r)
+        assert body["status"] == "ok", f"status muss 'ok' sein, war: {body['status']}"
+        assert "uptime_sec" in body, "uptime_sec fehlt"
+        assert body["uptime_sec"] > 0, "uptime_sec muss positiv sein"
+        for key in ("active_jobs", "active_batches", "active_renders"):
+            assert key in body, f"{key} fehlt im Health-Response"
+            assert isinstance(body[key], int), f"{key} muss int sein"
+    finally:
+        proc.terminate()
+        try: proc.wait(timeout=5)
+        except subprocess.TimeoutExpired: proc.kill(); proc.wait()
+
+
+def t_phase3_health_includes_git_commit():
+    """#38: /health version-Feld enthält den aktuellen Git-Commit-Hash."""
+    import subprocess, json as _json
+    port = 18902
+    proc = subprocess.Popen(
+        ["python3", os.path.join(ROOT, "dashboard.py"), "--port", str(port)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=ROOT,
+    )
+    import time as _time
+    _time.sleep(2.5)
+    try:
+        import urllib.request as _ur
+        import urllib.error as _ue
+        with _ur.urlopen(f"http://localhost:{port}/health", timeout=10) as r:
+            body = _json.load(r)
+        assert "version" in body, "version fehlt"
+        assert body["version"].startswith("main/"), \
+            f"version muss 'main/...' Format haben, war: {body['version']}"
+        # Git-Hash nach main/ sollte 7+ Hex-Zeichen haben
+        commit = body["version"].split("/", 1)[1]
+        assert len(commit) >= 7, f"Git-Commit zu kurz: {commit}"
+        assert all(c in "0123456789abcdef" for c in commit), \
+            f"Git-Commit muss Hex sein, war: {commit}"
+    finally:
+        proc.terminate()
+        try: proc.wait(timeout=5)
+        except subprocess.TimeoutExpired: proc.kill(); proc.wait()
+
+
+def t_phase3_health_tracks_active_jobs():
+    """#38: ohne aktive Jobs sind alle Counts 0 (Smoke-Test)."""
+    import subprocess, json as _json
+    port = 18903
+    proc = subprocess.Popen(
+        ["python3", os.path.join(ROOT, "dashboard.py"), "--port", str(port)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=ROOT,
+    )
+    import time as _time
+    _time.sleep(2.5)
+    try:
+        import urllib.request as _ur
+        import urllib.error as _ue
+        with _ur.urlopen(f"http://localhost:{port}/health", timeout=10) as r:
+            body = _json.load(r)
+        for key in ("active_jobs", "active_batches", "active_renders"):
+            assert isinstance(body[key], int), f"{key} muss int sein"
+            assert body[key] >= 0, f"{key} muss ≥ 0 sein"
+    finally:
+        proc.terminate()
+        try: proc.wait(timeout=5)
+        except subprocess.TimeoutExpired: proc.kill(); proc.wait()
+
+
+def t_phase3_health_returns_404_on_post():
+    """#38: /health ist GET-only (POST → 404). Health-Endpoints sollten nie mutieren."""
+    import subprocess
+    port = 18904
+    proc = subprocess.Popen(
+        ["python3", os.path.join(ROOT, "dashboard.py"), "--port", str(port)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=ROOT,
+    )
+    import time as _time
+    _time.sleep(2.5)
+    try:
+        import urllib.request as _ur
+        import urllib.error as _ue
+        req = _ur.Request(f"http://localhost:{port}/health", data=b"{}", method="POST")
+        try:
+            _ur.urlopen(req, timeout=10)
+            assert False, "POST /health sollte 404 oder 405 zurückgeben"
+        except _ue.HTTPError as e:
+            assert e.code in (404, 405), f"POST /health sollte 404 oder 405 sein, war: {e.code}"
+    finally:
+        proc.terminate()
+        try: proc.wait(timeout=5)
+        except subprocess.TimeoutExpired: proc.kill(); proc.wait()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 2.1 — Atomare Writes (Schwachstellenbericht #6, #7, #36, #60, #68)
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 2.1 — Atomare Writes (Schwachstellenbericht #6, #7, #36, #60, #68)
 # ─────────────────────────────────────────────────────────────────────────────
