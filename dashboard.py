@@ -65,7 +65,7 @@ def _graceful_shutdown(signum, frame):
     if _SHUTDOWN_IN_PROGRESS:  # Doppelte Signale ignorieren
         return
     _SHUTDOWN_IN_PROGRESS = True
-    print(f"  [Shutdown] Signal {signum} empfangen — Worker beenden laufende Aufgaben …", flush=True)
+    _log("INFO", "shutdown_signal", signal=signum)
 
 signal.signal(signal.SIGTERM, _graceful_shutdown)  # Container-Stop
 signal.signal(signal.SIGINT, _graceful_shutdown)   # Ctrl-C
@@ -217,6 +217,33 @@ _VOICE_JOBS_LOCK = threading.Lock()
 # MAX_AGE_JOBS_HOURS — an entry still running must never be deleted, or the client's
 # polling loop would silently orphan (poll a job_id the server has forgotten about).
 MAX_AGE_JOBS_HOURS = 2.0
+
+# Phase 3.4 (#40): Strukturiertes JSON-Logging.
+# Per default wird die menschenlesbare Form ausgegeben (wie vorher), aber per Env-Var
+# LOG_JSON=1 (oder für Docker: in .env) wird automatisch JSON für Log-Aggregation (ELK, Loki).
+# Ersetzt print() nicht 1:1 — neuer Code sollte log_event() nutzen, alte print-Calls
+# bleiben für Backward-Compat. Die _log()-Helper sorgen für konsistentes Format.
+
+import os as _os_log  # für Env-Var-Read
+import json as _json_log
+_LOG_JSON_MODE = _os_log.environ.get("LOG_JSON", "0") == "1"
+
+def _log(level: str, event: str, **fields) -> None:
+    """Strukturierte Log-Zeile. Im JSON-Modus: kompakte JSON-Zeile. Sonst: key=value-Format.
+    Beispiel-Aufruf: _log("INFO", "render_complete", video_id="v1", duration_s=42.5)"""
+    if _LOG_JSON_MODE:
+        out = {"ts": time.time(), "level": level, "event": event, **fields}
+        try:
+            print(_json_log.dumps(out, ensure_ascii=False), flush=True)
+        except (TypeError, ValueError):
+            # Fallback bei nicht-serialisierbaren Werten
+            print(f'{{"ts":{time.time()},"level":"{level}","event":"{event}"}}', flush=True)
+    else:
+        if fields:
+            kvs = " ".join(f"{k}={v!r}" for k, v in fields.items())
+            print(f"  [{level}] {event} {kvs}", flush=True)
+        else:
+            print(f"  [{level}] {event}", flush=True)
 
 # Phase 3.4: Health-Endpoint braucht Server-Uptime und Git-Commit (für Monitoring)
 _START_TIME = time.time()
@@ -859,15 +886,17 @@ def _kie_record_failure():
     _KIE_FAILURE_TIMES.append(now)
     if len(_KIE_FAILURE_TIMES) >= KIE_FAILURES_THRESHOLD and _KIE_CIRCUIT_OPENED_AT == 0.0:
         _KIE_CIRCUIT_OPENED_AT = now
-        print(f"  [KIE Circuit Breaker] GEÖFFNET nach {KIE_FAILURES_THRESHOLD} Fehlern in {KIE_FAILURE_WINDOW_S}s — "
-              f"keine Calls für {KIE_CIRCUIT_OPEN_DURATION_S}s", flush=True)
+        _log("WARNING", "kie_circuit_opened",
+             threshold=KIE_FAILURES_THRESHOLD,
+             window_s=KIE_FAILURE_WINDOW_S,
+             duration_s=KIE_CIRCUIT_OPEN_DURATION_S)
 
 
 def _kie_record_success():
     """Schließt Circuit bei Erfolg."""
     global _KIE_CIRCUIT_OPENED_AT
     if _KIE_CIRCUIT_OPENED_AT != 0.0:
-        print("  [KIE Circuit Breaker] geschlossen nach Erfolg", flush=True)
+        _log("INFO", "kie_circuit_closed")
         _KIE_CIRCUIT_OPENED_AT = 0.0
     _KIE_FAILURE_TIMES.clear()
 
@@ -942,7 +971,7 @@ def _kie_submit_image(full_prompt: str, model: str = "nano-banana-2", ref_urls: 
             # normal KIE rate windows (the API documentation says ~20/min for our tier).
             if e.code == 429 and attempt < 3:
                 wait = 2 ** (attempt + 1)   # 2s, 4s, 8s
-                print(f"  [KIE] HTTP 429 Rate-Limit (Versuch {attempt+1}/4), warte {wait}s …", flush=True)
+                _log("WARNING", "kie_429", attempt=attempt+1, wait_s=wait)
                 time.sleep(wait)
                 continue
             raise RuntimeError(f"KIE HTTP {e.code}: {e.read().decode()[:200]}")
@@ -954,7 +983,7 @@ def _kie_submit_image(full_prompt: str, model: str = "nano-banana-2", ref_urls: 
         # burst — worth a short backoff + retry instead of giving up the whole scene.
         # Anything else (e.g. insufficient credits) is not transient, fail immediately.
         if "frequency" in msg.lower() and attempt < 3:
-            print(f"  [KIE] Rate-Limit getroffen, warte {2*(attempt+1)}s und versuche erneut …", flush=True)
+            _log("WARNING", "kie_frequency", attempt=attempt+1, wait_s=2*(attempt+1))
             time.sleep(2 * (attempt + 1))
             continue
         raise RuntimeError(f"KIE: {msg}")
