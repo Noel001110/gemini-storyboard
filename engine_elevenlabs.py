@@ -256,6 +256,72 @@ def _minimax_call_with_retry(url: str, body: dict, headers: dict) -> dict:
             last_err = RuntimeError(f"MiniMax Fehler: {e}")
     raise last_err or RuntimeError("MiniMax: retries exhausted")
 
+def _el_words_from_alignment(alignment: dict) -> list:
+    """Baut Wort-Timestamps aus einer ElevenLabs-`/with-timestamps`-Antwort.
+
+    ElevenLabs liefert ZEICHEN-basiertes Alignment:
+        alignment.characters                    -> ["H","e","l","l","o"," ","W",...]
+        alignment.character_start_times_seconds -> [0.0, 0.05, ...]
+        alignment.character_end_times_seconds   -> [0.05, 0.1, ...]
+    NICHT `alignment.words`. Diese Funktion aggregiert Zeichen an Whitespace-Grenzen
+    zu Wörtern. Falls eine Antwort doch ein fertiges `words`-Feld hat (anderes/älteres
+    Schema), wird das bevorzugt. Return: [{"word","start","end"}], Wort-Reihenfolge.
+    """
+    if not isinstance(alignment, dict):
+        return []
+
+    # Fall 1: fertige Wortliste (Legacy/anderes Schema) — bevorzugen
+    words = alignment.get("words")
+    if isinstance(words, list) and words:
+        norm = []
+        for w in words:
+            if not isinstance(w, dict):
+                continue
+            txt = (w.get("text") or w.get("word") or "").strip()
+            if not txt:
+                continue
+            try:
+                s = float(w.get("start", 0.0)); e = float(w.get("end", s + 0.01))
+            except (TypeError, ValueError):
+                continue
+            norm.append({"word": txt, "start": max(0.0, s), "end": max(s + 0.01, e)})
+        if norm:
+            return norm
+
+    # Fall 2: Zeichen-basiertes Alignment -> zu Wörtern aggregieren
+    chars  = alignment.get("characters")
+    starts = alignment.get("character_start_times_seconds")
+    ends   = alignment.get("character_end_times_seconds")
+    if not (isinstance(chars, list) and isinstance(starts, list) and isinstance(ends, list)):
+        return []
+    n = min(len(chars), len(starts), len(ends))
+    norm = []
+    buf = {"txt": "", "start": None, "end": None}
+
+    def _flush():
+        t = buf["txt"].strip()
+        if t and buf["start"] is not None:
+            s = max(0.0, float(buf["start"])); e = max(s + 0.01, float(buf["end"]))
+            norm.append({"word": t, "start": s, "end": e})
+        buf["txt"] = ""; buf["start"] = None; buf["end"] = None
+
+    for i in range(n):
+        ch = chars[i]
+        if not isinstance(ch, str):
+            continue
+        if ch.isspace():
+            _flush()
+            continue
+        if buf["start"] is None:
+            try:    buf["start"] = float(starts[i])
+            except (TypeError, ValueError): buf["start"] = 0.0
+        buf["txt"] += ch
+        try:    buf["end"] = float(ends[i])
+        except (TypeError, ValueError): buf["end"] = (buf["start"] or 0.0) + 0.01
+    _flush()
+    return norm
+
+
 def elevenlabs_generate(text: str, settings: dict) -> dict:
     voice_id = settings.get("voice_id") or ""
     if not voice_id:
@@ -280,27 +346,17 @@ def elevenlabs_generate(text: str, settings: dict) -> dict:
         raise RuntimeError(f"ElevenLabs-Antwort ist kein JSON-Objekt: {type(resp).__name__}")
     if not resp.get("audio_base64"):
         raise RuntimeError("ElevenLabs antwortete ohne audio_base64 — bitte erneut versuchen.")
-    alignment = resp.get("alignment") or {}
-    words = alignment.get("words") if isinstance(alignment, dict) else None
-    if not isinstance(words, list) or not words:
-        raise RuntimeError(
-            "ElevenLabs antwortete ohne alignment.words — bitte erneut versuchen "
-            "(Provider-Schema-Drift oder leerer Text?)."
-        )
-    norm = []
-    for w in words:
-        if not isinstance(w, dict):
-            continue
-        txt = (w.get("text") or w.get("word") or "").strip()
-        if not txt:
-            continue
-        try:
-            s = float(w.get("start", 0.0)); e = float(w.get("end", s + 0.01))
-        except (TypeError, ValueError):
-            continue
-        norm.append({"word": txt, "start": max(0.0, s), "end": max(s + 0.01, e)})
+    # ElevenLabs /with-timestamps liefert ZEICHEN-basiertes Alignment
+    # (alignment.characters + character_start/end_times_seconds), NICHT alignment.words.
+    # _el_words_from_alignment aggregiert Zeichen zu Wörtern (mit words-Fallback).
+    alignment = resp.get("alignment") or resp.get("normalized_alignment") or {}
+    norm = _el_words_from_alignment(alignment)
     if not norm:
-        raise RuntimeError("ElevenLabs-alignment.words enthielt keine verwertbaren Wörter.")
+        raise RuntimeError(
+            "ElevenLabs antwortete ohne verwertbares Alignment (weder alignment.words "
+            "noch character-level alignment.characters/*_times_seconds) — bitte erneut "
+            "versuchen (Provider-Schema-Drift oder leerer Text?)."
+        )
     return {
         "audio_base64": resp["audio_base64"],
         "words": norm,
