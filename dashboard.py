@@ -218,6 +218,20 @@ _VOICE_JOBS_LOCK = threading.Lock()
 # polling loop would silently orphan (poll a job_id the server has forgotten about).
 MAX_AGE_JOBS_HOURS = 2.0
 
+# Phase 3.4: Health-Endpoint braucht Server-Uptime und Git-Commit (für Monitoring)
+_START_TIME = time.time()
+def _get_git_commit() -> str:
+    """Bestimmt den aktuellen Git-Commit-Hash (für /health-Endpoint-Version-Feld).
+    Gibt '' zurück wenn nicht in einem Git-Repo oder git nicht verfügbar."""
+    try:
+        import subprocess as _sp
+        return _sp.check_output(["git", "rev-parse", "HEAD"],
+                              cwd=os.path.dirname(os.path.abspath(__file__)),
+                              stderr=_sp.DEVNULL, text=True).strip()
+    except Exception:
+        return ""
+_CURRENT_GIT_COMMIT = _get_git_commit()
+
 def _cleanup_stale_jobs(max_age_hours: float = MAX_AGE_JOBS_HOURS):
     cutoff = time.time() - max_age_hours * 3600
     removed = 0
@@ -2376,6 +2390,22 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/job_status":
             job_id = qs.get("job_id", [""])[0]
             return self._send(200, JOBS.get(job_id, {"status": "unknown"}))
+        # Phase 3.4 (Schwachstellenbericht #38): Health-Endpoint für Docker/LB-Monitoring
+        if p == "/health" or p == "/api/health":
+            uptime_sec = time.time() - _START_TIME
+            active_jobs = sum(1 for v in JOBS.values() if v.get("status") == "running")
+            with _BATCH_JOBS_LOCK:
+                active_batches = sum(1 for v in BATCH_JOBS.values() if v and v.get("running"))
+            with _RENDER_JOBS_LOCK:
+                active_renders = sum(1 for v in RENDER_JOBS.values() if v and v.get("running"))
+            return self._send(200, {
+                "status": "ok" if not _SHUTDOWN_IN_PROGRESS else "shutting_down",
+                "uptime_sec": round(uptime_sec, 1),
+                "active_jobs": active_jobs,
+                "active_batches": active_batches,
+                "active_renders": active_renders,
+                "version": "main/" + (_CURRENT_GIT_COMMIT[:7] if _CURRENT_GIT_COMMIT else "unknown"),
+            })
         if p == "/api/generate_all_status":
             with _BATCH_JOBS_LOCK:
                 state = BATCH_JOBS.get((cid, vid))
