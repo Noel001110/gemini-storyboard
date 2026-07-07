@@ -757,6 +757,13 @@ def main():
         run(t_phase33_8_empty_state_hint, "33.8: Onboarding-Hint wenn Channel leer")
         run(t_phase33_8_no_color_in_onboarding, "33.8: chNewForm hat Preset-Dropdown, kein Color-Picker")
 
+        summary_section("Phase L: Hook + Leitfrage + Render-Kopplung")
+        run(t_phase_l_hook_fields_in_analyze_prompt, "L.1: analyze_script-Prompt hat hook+throughline+Regel")
+        run(t_phase_l_hook_throughline_in_prompt, "L.1: Schema hat hook mit beat/strength/type-Enum")
+        run(t_phase_l_is_hook_motion_override, "L.3: Hook → snap_zoom_in@1.2, aber NICHT bei Seq-Continuation")
+        run(t_phase_l_transition_after_hook, "L.3: Übergang nach Hook = hard cut (duration=0)")
+        run(t_phase_l_no_hook_no_behavior_change, "L.3: ohne is_hook rendert identisch zu vorher")
+
         print(f"\n=== Result ===")
         print(f"  Passed: {PASSED}")
         print(f"  Failed: {FAILED}")
@@ -2054,6 +2061,104 @@ def t_phase33_8_no_color_in_onboarding():
         "Phase 33.8: chNewForm MUSS das Preset-Dropdown enthalten (Phase 38)"
     assert "<input" in snippet and "chNewName" in snippet, \
         "Phase 33.8: chNewForm MUSS das Name-Feld enthalten"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase L: Hook + Leitfrage + Render-Kopplung (CINEMATIC_UPGRADE_PLAN.md §4.2)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def t_phase_l_hook_fields_in_analyze_prompt():
+    """L.1: analyze_script-Prompt enthält hook + throughline_question + Regel."""
+    from engine.prompts import HOOK_PROMPT_ADDITION
+    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    # Schema muss die neuen Felder enthalten
+    assert '"hook":' in src, "analyze_script-Prompt muss hook-Schema enthalten"
+    assert "throughline_question" in src, \
+        "analyze_script-Prompt muss throughline_question-Schema enthalten"
+    # Regel "Niemals erfinden" für hook/throughline
+    assert "HOOK" in src, "Erklär-Block für HOOK im analyze_script-Prompt fehlt"
+    assert "NIEMALS" in src or "NIEMALS" in src or "leerer String ist valide" in src, \
+        "Hook-Regel (Niemals erfinden / leerer String OK) fehlt"
+    # HOOK_PROMPT_ADDITION als Hard-Injection
+    assert "poster-like composition" in HOOK_PROMPT_ADDITION or "poster-like" in HOOK_PROMPT_ADDITION.lower(), \
+        "HOOK_PROMPT_ADDITION muss den Stil-Cue enthalten"
+    assert "single striking focal subject" in HOOK_PROMPT_ADDITION, \
+        "HOOK_PROMPT_ADDITION muss den 'single striking focal subject'-Cue enthalten"
+
+
+def t_phase_l_is_hook_motion_override():
+    """L.3: Hook-Szene → snap_zoom_in mit intensity 1.2. Schutzregel 2: NICHT wenn
+    Fortsetzung einer Sequenz."""
+    from engine.render import _motion_for_scene
+
+    # Hook, nicht Sequenz-Fortsetzung → snap_zoom_in
+    hook_scene = {"i": 0, "dur": 3.0, "pacing": "normal", "is_hook": True}
+    m = _motion_for_scene(hook_scene, None)
+    assert m["name"] == "snap_zoom_in", \
+        f"Hook-Szene muss snap_zoom_in geben, gab: {m}"
+    assert m["z1"] >= 1.2, f"Hook-Intensität sollte >=1.2 sein, war: {m}"
+
+    # Hook, ABER Sequenz-Fortsetzung → Sequenz-Vererbung schlägt Hook (Schutzregel 2)
+    seq_continuation = {
+        "i": 1, "dur": 3.0, "pacing": "normal", "pacing": "calm",
+        "seq_id": "s1", "seq_pos": 1, "is_hook": True,  # widersprüchlich — Hook auf Continuation
+    }
+    prev_scene = {"motion": {"name": "diagonal_glide", "z0": 1.04, "z1": 1.1,
+                              "focus0": [0.4, 0.4], "focus1": [0.6, 0.55]}}
+    m = _motion_for_scene(seq_continuation, prev_scene)
+    assert m["name"] == "diagonal_glide", \
+        f"Hook auf Seq-Continuation muss Sequenz-Motion erben, gab: {m}"
+
+    # Kein Hook, normale Szene → reguläre Auswahl
+    normal = {"i": 0, "dur": 3.0, "pacing": "normal", "is_hook": False}
+    m = _motion_for_scene(normal, None)
+    assert m["name"] != "static", f"Normale Szene sollte nicht static sein: {m}"
+
+
+def t_phase_l_no_hook_no_behavior_change():
+    """L.3: ohne is_hook-Feld in plan.json rendert alles identisch zu vorher."""
+    from engine.render import _motion_for_scene
+    import engine.prompts as ep
+    # _build_image_prompt ohne is_hook → keine HOOK STYLE Injection
+    p = ep._build_image_prompt("Scene text.", "MASTER.", None, phase="CLIMAX")
+    assert "HOOK STYLE:" not in p, \
+        "Ohne is_hook=True darf KEINE HOOK STYLE Injection stattfinden"
+    assert "STYLE (CLIMAX):" in p, \
+        "Phase-Cue muss unverändert funktionieren (Rückwärtskompatibilität)"
+    # _motion_for_scene ohne is_hook → keine Hook-Override
+    no_hook = {"i": 0, "dur": 3.0, "pacing": "calm"}
+    m = _motion_for_scene(no_hook, None)
+    assert m["name"] != "snap_zoom_in" or m.get("z1", 1.0) < 1.2, \
+        f"Ohne is_hook darf KEIN snap_zoom_in @1.2 zurückkommen, war: {m}"
+
+
+def t_phase_l_transition_after_hook():
+    """L.3: Übergang nach Hook-Szene ist hard cut (duration=0, kein SFX)."""
+    from engine.render import _transition_after_hook
+    t_type, sfx, duration = _transition_after_hook({"is_hook": True})
+    assert duration == 0.0, \
+        f"Hard cut nach Hook muss duration=0 haben, war: {duration}"
+    assert sfx is None, \
+        f"Hook-Übergang darf KEIN SFX haben (Hook selbst hat Aufmerksamkeit), war: {sfx}"
+
+
+def t_phase_l_hook_throughline_in_prompt():
+    """L.1: hook und throughline_question sind im analyze_script-Schema dokumentiert."""
+    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    # Das analyze_script-Prompt-Template muss beide Felder haben
+    i = src.find("def analyze_script(beats):")
+    assert i >= 0
+    # Bis zur BEATS-Zeile (Ende des Templates)
+    end = src.find('"BEATS:\\n"', i)
+    assert end > 0
+    template = src[i:end]
+    assert '"hook"' in template, "analyze_script: hook-Feld fehlt im Schema"
+    assert "throughline_question" in template, \
+        "analyze_script: throughline_question fehlt im Schema"
+    assert "beat" in template.lower() and "strength" in template.lower(), \
+        "analyze_script: hook-Detail-Felder (beat, strength) fehlen"
+    assert "quote" in template and "scene" in template and "thesis" in template, \
+        "analyze_script: hook.type-Enum (quote/scene/thesis) fehlt"
     """Phase 38 Backend: POST /api/channels mit preset-Feld schreibt das richtige
     master_prompt.txt. Ohne preset → DEFAULT_PRESET (flat_cartoon_doc)."""
     import subprocess
