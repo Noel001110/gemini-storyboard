@@ -442,8 +442,12 @@
   <div id="view-editor" style="display:none">
     <div class="back-link" onclick="backToVideoList()">← Zurück zu Videos</div>
 
-    <!-- Phase 33.2 — Stepper-Container (sticky unter dem Header, nur im Editor-View) -->
-    <nav id="stepper" x-data="stepperState()" x-init="init()"
+    <!-- Stepper-Querleiste ENTFERNT (Juli 2026, Nutzerwunsch): die nummerierten
+         Sektionen ①–⑤ sind bereits untereinander gestapelt (Single-Page-Flow) und
+         DIENEN selbst als Schritt-Navigation. Der separate Balken oben war redundant.
+         Die Alpine-Komponente bleibt (display:none) erhalten, weil openVideo() ihr
+         reset() aufruft und updateStepVisibility() weiterhin Sektion 4/5 an SCENES koppelt. -->
+    <nav id="stepper" x-data="stepperState()" x-init="init()" style="display:none"
          class="sticky top-14 z-40 bg-app-surface/95 backdrop-blur border-b border-app-border -mx-6 px-6 py-3 mb-4">
       <button type="button" @click="invalidate()"
               class="absolute right-3 top-2 p-1.5 rounded-md text-app-mut hover:text-app-text hover:bg-app-surface-2 transition-colors"
