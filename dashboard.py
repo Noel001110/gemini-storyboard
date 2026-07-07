@@ -2930,12 +2930,27 @@ class H(BaseHTTPRequestHandler):
             name = d.get("name", "Charakter").strip()
             img_b64 = d.get("image", "")
             mime = d.get("mime", "image/png")
-            if not img_b64: return self._send(400, {"error": "image fehlt"})
-            img_bytes = base64.b64decode(img_b64)
-            safe = re.sub(r"[^\w\-]", "_", name.lower())
+            if not name:
+                return self._send(400, {"error": "name fehlt"})
+            if not img_b64:
+                return self._send(400, {"error": "image fehlt"})
+            # B-1 Fix: validate=False tolerates fehlendes Padding (häufigster Browser-Bug),
+            # try/except fängt den Rest. Ohne den Fix crasht die HTTP-Verbindung mit
+            # leerem 500er-Body und das Frontend zeigt einen Silent-Fail.
+            try:
+                img_bytes = base64.b64decode(img_b64, validate=False)
+            except Exception as e:
+                return self._send(400, {"error": f"image ist kein gültiges Base64: {e}"})
+            if not img_bytes:
+                return self._send(400, {"error": "image dekodiert zu leer"})
+            safe = re.sub(r"[^\w\-]", "_", name.lower()) or "character"
+            os.makedirs(ch_sheets(cid), exist_ok=True)  # B-1: Auto-Mkdir (frische Kanäle)
             img_path  = os.path.join(ch_sheets(cid), f"{safe}.png")
             meta_path = os.path.join(ch_sheets(cid), f"{safe}.json")
-            open(img_path, "wb").write(img_bytes)
+            try:
+                open(img_path, "wb").write(img_bytes)
+            except OSError as e:
+                return self._send(500, {"error": f"Schreiben fehlgeschlagen: {e}"})
             try:    desc = analyze_char_image(img_bytes, mime)
             except Exception as e:
                 desc = ""; print(f"  [Char] Analyse-Fehler: {e}", flush=True)
