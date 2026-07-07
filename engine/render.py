@@ -333,7 +333,20 @@ def _render_clip(img_path: str, scene: dict, out_path: str, fps: int = RENDER_FP
 
     # Smoothstep easing (3t²-2t³), built purely from the frame index `on`/`frames
     smoothstep = f"(3*pow(on/{frames},2)-2*pow(on/{frames},3))"
-    z_expr = f"{z0}+({z1}-{z0})*{smoothstep}"
+    # Phase O: Wort-Akzent-Puls (Plan §4.4) — gaußscher Zoom-Puls auf accent_t.
+    # Nur wenn scene["accent_t"] gesetzt (vom _render_worker nach Whisper-Alignment).
+    # amp=0.05 (+5% Zoom-Peak, unter 1.2x-Jitter-Grenze aus MOTION_LIBRARY),
+    # sigma=0.06s (~0.2s sichtbare Puls-Breite bei 30fps).
+    accent_t = scene.get("accent_t")
+    if accent_t is not None and accent_t > 0 and clip_dur > 2.0:
+        f_a = round(accent_t * fps)
+        sigma = max(2, round(0.06 * fps))
+        amp = 0.05
+        # +amp*exp(-pow((on-f_a)/sigma,2)) — symmetrischer Gauß, glatt beidseitig
+        z_expr = (f"{z0}+({z1}-{z0})*{smoothstep}"
+                  f"+{amp}*exp(-pow((on-{f_a})/{sigma},2))")
+    else:
+        z_expr = f"{z0}+({z1}-{z0})*{smoothstep}"
     fx_expr = f"({fx0}+({fx1}-{fx0})*{smoothstep})"
     fy_expr = f"({fy0}+({fy1}-{fy0})*{smoothstep})"
     x_expr = f"(iw*{fx_expr})-(iw/zoom/2)"

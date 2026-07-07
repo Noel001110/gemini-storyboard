@@ -27,8 +27,10 @@ from engine_elevenlabs import *  # noqa: F401,F403
 # hier hält den alten Code lauffähig, ohne dass ich 200+ Zeilen patchen muss.
 from engine.scenes import (  # noqa: F401,F403
     MAX_SCENE_SEC, PACING_TARGET_SEC, NORMAL_HARD_CAP_SEC, PACING_WARN_THRESHOLD,
+    ACCENT_PAUSE_THRESHOLD_SEC, ACCENT_MIN_SCENE_DUR_SEC,
     split_units, segment_by_pacing, _renumber_seq_pos, _apply_visual_sequences_direct,
     _wait_for_chain_scene, _resolve_chain_refs,
+    _is_accent_eligible, _compute_accent_t,
 )
 
 # ── Phase M.3: Visuelle Render-Pipeline nach engine/render.py ──────────────────
@@ -1266,6 +1268,24 @@ def _render_worker(cid: str, vid: str):
                       f"{len(trims)} Pause(n) auf {MAX_PAUSE_SEC}s gekürzt (-{trimmed_total:.1f}s) "
                       f"(Sprache: {whisper_lang}, p={whisper_prob})",
                       flush=True)
+
+                # Phase O: Wort-Akzent-Puls — pro punchy/CLIMAX-Szene einen Akzent-Zeitpunkt
+                # aus den adjusted_words ableiten. Plan §4.4.
+                n_accents = 0
+                for s in scenes:
+                    if not _is_accent_eligible(s):
+                        s.pop("accent_t", None)
+                        continue
+                    st = s.get("start_aligned") if s.get("start_aligned") is not None else s.get("start", 0.0)
+                    en = s.get("end_aligned") if s.get("end_aligned") is not None else (st + s.get("dur", 0.0))
+                    accent = _compute_accent_t(st, en, adjusted_words)
+                    if accent is not None:
+                        s["accent_t"] = accent
+                        n_accents += 1
+                    else:
+                        s.pop("accent_t", None)
+                if n_accents:
+                    print(f"  [Phase O] Akzent-Puls: {n_accents} Szene(n) mit accent_t gesetzt", flush=True)
             except Exception as e:
                 # Graceful degradation: scenes keep their estimated start/dur, the
                 # sync invariant and SFX timing simply fall back to those (both
