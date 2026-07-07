@@ -917,7 +917,6 @@ async function openVideo(vid, name){
   // video that HAS scenes to one that doesn't would leave these cards visible with
   // stale content from the previous video, since renderScenes() (which normally hides
   // them) never runs when there's no plan to render.
-  $('titleThumbCard').style.display = 'none';
   $('renderCard').style.display = 'none';
   $('produceCard').style.display = 'none';
 
@@ -979,64 +978,12 @@ let VIDEO_META = {titles: [], selected_title: '', thumbnail_prompt: '', has_thum
 
 async function loadVideoMeta(){
   VIDEO_META = await ch_get('/api/video_meta').catch(() => ({titles:[], selected_title:'', thumbnail_prompt:'', has_thumbnail:false}));
-  renderTitleList();
-  renderThumbnail();
 }
 
-function renderTitleList(){
-  const c = $('titleList'); c.innerHTML = '';
-  if(!VIDEO_META.titles || !VIDEO_META.titles.length){
-    c.innerHTML = '<p class="hint" style="margin:0">Noch keine Titel — generieren, sobald ein Skript vorhanden ist.</p>';
-    return;
-  }
-  VIDEO_META.titles.forEach(t => {
-    const sel = t === VIDEO_META.selected_title;
-    const el = document.createElement('div');
-    el.style.cssText = `padding:9px 12px;border-radius:8px;border:1px solid ${sel?'var(--acc)':'var(--border)'};background:${sel?'var(--acc-soft)':'var(--surface-2)'};font-size:13px;cursor:pointer;display:flex;align-items:center;gap:8px`;
-    el.innerHTML = `<span style="flex-shrink:0">${sel?'✅':'⚪'}</span><span>${t}</span><span class="hint" style="margin-left:auto;flex-shrink:0">${t.length} Zeichen</span>`;
-    el.onclick = () => selectTitle(t);
-    c.appendChild(el);
-  });
-}
 
-async function genTitles(){
-  const btn = $('genTitlesBtn'); btn.disabled = true; btn.textContent = '⏳ Generiere …';
-  const r = await ch_api('/api/generate_titles', {});
-  btn.disabled = false; btn.textContent = '✍️ Titel generieren';
-  if(!r.ok){ alert('Fehler: '+(r.error||'unbekannt')); return; }
-  VIDEO_META.titles = r.titles;
-  renderTitleList();
-}
 
-async function selectTitle(t){
-  VIDEO_META.selected_title = t;
-  renderTitleList();
-  await ch_api('/api/select_title', {title: t});
-}
 
-function renderThumbnail(){
-  const slot = $('thumbSlot');
-  if(VIDEO_META.has_thumbnail){
-    slot.innerHTML = `<img src="/generated/thumbnail.jpg?t=${Date.now()}&channel=${ACTIVE_CHANNEL}&video=${ACTIVE_VIDEO}">`;
-  } else {
-    slot.innerHTML = `<div class="slot-empty"><span class="slot-icon">🖼</span><span class="slot-label">Noch kein Thumbnail</span></div>`;
-  }
-}
 
-async function genThumbnail(){
-  const btn = $('genThumbBtn'); btn.disabled = true; btn.textContent = '⏳ Generiere …';
-  $('thumbSlot').innerHTML = `<div class="slot-empty"><span class="slot-icon">⏳</span><span class="slot-label">Wird generiert …</span></div>`;
-  const r = await ch_api('/api/generate_thumbnail', {});
-  btn.disabled = false; btn.textContent = '✨ Thumbnail generieren';
-  if(!r.ok){
-    alert('Fehler: '+(r.error||'unbekannt'));
-    renderThumbnail();
-    return;
-  }
-  VIDEO_META.has_thumbnail = true;
-  VIDEO_META.thumbnail_prompt = r.prompt;
-  renderThumbnail();
-}
 
 // Applies one fresh scene (from /api/plan) onto the local SCENES/DOM state. Shared by
 // both the lone-scene watcher below and the server-side batch poller — same sync logic
@@ -1143,7 +1090,6 @@ function startBatchPoll(){
       $('prog').textContent = `${doneCount} / ${SCENES.length}`;
       $('barFill').style.width = (SCENES.length ? doneCount/SCENES.length*100 : 0) + '%';
       updateRenderCardVisibility();
-      updateTitleThumbCardVisibility();
       updateProduceCardVisibility();
       if(st.error){
         alert('Generierung abgebrochen: ' + st.error);
@@ -1884,8 +1830,6 @@ function renderScenes(source){
   $('prog').textContent=`${doneCount} / ${SCENES.length}`;
   $('barFill').style.width=(SCENES.length ? doneCount/SCENES.length*100 : 0)+'%';
   updateRenderCardVisibility();
-  updateTitleThumbCardVisibility();
-  updateProduceCardVisibility();
 }
 
 function setStatus(i,st){ const e=$('st'+i); if(e){e.textContent=st; e.className='st '+st;} }
@@ -2155,19 +2099,6 @@ const RENDER_STAGE_LABELS = {
 };
 const RENDER_STAGE_ORDER = ['prepare', 'timing', 'motion', 'clips', 'transitions', 'assemble', 'audio', 'review'];
 
-function updateTitleThumbCardVisibility(){
-  // Schritt ④ braucht den fertigen Skript-Inhalt als Grundlage (Titel/Thumbnail-Prompt
-  // werden aus dem vollen Skripttext generiert) — vorher würde ein Klick nur mit "Kein
-  // Skript vorhanden" fehlschlagen. Sichtbar/aktivierbar sobald ein Plan existiert,
-  // unabhängig vom Bild-Fortschritt (anders als die Render-Karte, die Bilder braucht).
-  const card = $('titleThumbCard');
-  if(!card) return;
-  const hasPlan = SCENES.length > 0;
-  card.style.display = hasPlan ? '' : 'none';
-  const genTitlesBtn = $('genTitlesBtn'), genThumbBtn = $('genThumbBtn');
-  if(genTitlesBtn) genTitlesBtn.disabled = !hasPlan;
-  if(genThumbBtn) genThumbBtn.disabled = !hasPlan;
-}
 
 function updateRenderCardVisibility(){
   const card = $('renderCard');
@@ -2561,6 +2492,18 @@ function copyScript(){
 // vorgeschlagene neue Reihenfolge (Thema/Skript/Audio/Bilder/Render) wird in
 // 33.4 umgestellt wenn die Step-Cards migriert werden — Anchor-IDs sind
 // bereits vorbereitet (data-step-section="1..5").
+//
+// Phase 33.4.2-prep Step D: zentrale Step-Card-Visibility. Vor dem Stepper-Wechsel
+// werden alle 5 Cards per display:none versteckt und die aktive per display:''.
+// Override-Layer: vorherige per-Step-Gating-Logik (z.B. planArea nur wenn Plan
+// existiert) muss VOR diesem Aufruf gesetzt sein.
+function updateStepVisibility(currentStep){
+  for (let n = 1; n <= 5; n++) {
+    const card = document.querySelector(`[data-step-section="${n}"]`);
+    if (!card) continue;
+    card.style.display = (n === currentStep) ? '' : 'none';
+  }
+}
 function stepperState(){
   return {
     cid: '',
@@ -2647,6 +2590,13 @@ function stepperState(){
     goTo(n){
       if (!this.canEnter(n)) return;
       this.currentStep = n;
+      // Phase 33.4.2-prep Step D: zentrale Step-Card-Visibility. Nur die aktive Card
+      // wird sichtbar geschaltet, alle anderen display:none. Das macht den Stepper
+      // zum einklappbaren Wizard (vorher waren alle 5 Cards sichtbar, User scrollte
+      // durch 4 Bildschirmhöhen). Per-Step-Gating (z.B. planArea erst sichtbar wenn
+      // ein Plan existiert) wird vom zentralen Block VOR diesem Update gesetzt —
+      // d.h. updateStepVisibility() ist eine override-Layer, nicht der einzige.
+      if (typeof updateStepVisibility === 'function') updateStepVisibility(n);
       const el = document.querySelector(`[data-step-section="${n}"]`);
       if (el) {
         el.scrollIntoView({ behavior: 'smooth', block: 'start' });

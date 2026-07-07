@@ -702,6 +702,10 @@ def main():
         run(t_phase33_4_1_title_thumb_removed, "33.4.1: titleThumbCard entfernt (war Step ④)")
         run(t_phase33_4_1_plan_area_now_4, "33.4.1: planArea jetzt data-step-section=\"4\" (war \"3\")")
 
+        summary_section("Phase 33.4.2-prep: A + D (Dead-Code + Visibility)")
+        run(t_phase33_4_2_prep_no_dead_code, "33.4.2-prep A: titleThumbCard/genTitles/genThumbnail/selectTitle alle entfernt")
+        run(t_phase33_4_2_prep_central_visibility, "33.4.2-prep D: updateStepVisibility(currentStep) + goTo() wired")
+
         print(f"\n=== Result ===")
         print(f"  Passed: {PASSED}")
         print(f"  Failed: {FAILED}")
@@ -1299,6 +1303,40 @@ def t_phase33_4_1_plan_area_now_4():
     # planArea darf NICHT mehr data-step-section="3" haben (Anti-Regression)
     assert 'id="planArea" data-step-section="3"' not in html, \
         "33.4.1 anti-regression: planArea noch mit data-step-section=\"3\""
+
+
+# ─── Phase 33.4.2-prep: A (Dead-Code) + D (Visibility) ─────────────────────
+
+def t_phase33_4_2_prep_no_dead_code():
+    """Phase 33.4.2-prep Step A: titleThumbCard-Card und alle Title/Thumbnail-Funktionen
+    sind komplett entfernt. Genau die Funktionen die in 33.4.2 als 'in ①Thema-Card neu
+    aufgebaut' markiert sind (genTitles → genTitleStep, genThumbnail → genThumbnailStep).
+    Anti-Regression: keine Re-Introduktion."""
+    html = open(os.path.join(ROOT, "dashboard.html")).read()
+    import re as _re
+    # Komplette Entfernung
+    for token in ("titleThumbCard", "genTitles", "genThumbnail",
+                  "selectTitle", "updateTitleThumbCardVisibility",
+                  "renderTitleList", "renderThumbnail"):
+        # Pattern erlaubt Wortgrenzen
+        matches = _re.findall(rf"\b{_re.escape(token)}\b", html)
+        assert len(matches) == 0, \
+            f"33.4.2-prep A: '{token}' noch im Code ({len(matches)} Vorkommen)"
+
+def t_phase33_4_2_prep_central_visibility():
+    """Phase 33.4.2-prep Step D: zentrale updateStepVisibility(currentStep)-Funktion
+    iteriert über alle 5 Step-Cards und toggled display:none/'' je nach currentStep.
+    Aufruf erfolgt im stepperState.goTo() damit Stepper-Klick = Card-Switch."""
+    html = open(os.path.join(ROOT, "dashboard.html")).read()
+    # Funktion vorhanden
+    assert "function updateStepVisibility" in html, \
+        "33.4.2-prep D: updateStepVisibility(currentStep) function missing"
+    # Iteration über 5 Cards
+    assert "[data-step-section=\"${n}\"]" in html, \
+        "33.4.2-prep D: querySelector for each step-card missing"
+    # Aufruf im goTo
+    assert "if (typeof updateStepVisibility === 'function') updateStepVisibility(n)" in html, \
+        "33.4.2-prep D: goTo() must call updateStepVisibility(n)"
 
 
 if __name__ == "__main__":

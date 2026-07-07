@@ -1585,3 +1585,65 @@ Finale Reihenfolge (diese Phase):
 - t_phase33_4_1_audio_section_extracted
 - t_phase33_4_1_title_thumb_removed
 - t_phase33_4_1_plan_area_now_4
+
+### 33.4.2-prep A + D (Juli 2026)
+
+**Scope:** Foundation für 33.4.2/33.4.3/37.1. Zwei kleine Refactoren:
+A = Dead-Code-Entfernung, D = zentrale Step-Card-Visibility.
+
+#### A — Tote JS-Funktionen entfernt
+
+Nach 33.4.1 ist die `titleThumbCard` komplett aus dem HTML-Body entfernt, aber
+die zugehörigen JS-Funktionen waren noch im Code. Sie haben bei jedem `openVideo()`
+einen Throw auf `$('titleList')` / `$('thumbSlot')` / `$('titleThumbCard')` produziert
+weil die DOM-Elemente nicht mehr existierten. **Live-Bug seit 33.4.1** der nur
+in Production-Sessions sichtbar wäre (nicht in Tests — Tests mocken das Frontend).
+
+Entfernt:
+- `genTitles()` und `selectTitle()` — Title-Generator, wird in 33.4.2 in ①Thema neu
+- `genThumbnail()` und `renderThumbnail()` — Thumbnail-Generator, wird in 33.4.2 in ①Thema neu
+- `renderTitleList()` — UI-Renderer für Title-Liste
+- `updateTitleThumbCardVisibility()` — Visibility-Gate für nicht-existente Card
+- `$('titleThumbCard').style.display = 'none';` in `openVideo()` — verweist auf tote Card
+- Aufruf-Sites der entfernten Funktionen in `renderScenes()` und weiteren Render-Pfaden
+
+**Resultat:** keine Live-JS-Errors beim Video-Öffnen mehr. `VIDEO_META`-State bleibt
+intakt (wird vom Backend `/api/video_meta` befüllt und ist Vorlage für 33.4.2-Bau).
+
+#### D — Zentrale Step-Card-Visibility
+
+Vorher waren alle 5 Step-Cards (`data-step-section="1..5"`) gleichzeitig sichtbar
+und der User scrollte 4+ Bildschirmhöhen durch. Mit 33.4.2-prep wird der Wizard
+einklappbar: pro Step-Klick wird die aktive Card sichtbar, alle anderen `display:none`.
+
+```js
+function updateStepVisibility(currentStep){
+  for (let n = 1; n <= 5; n++) {
+    const card = document.querySelector(`[data-step-section="${n}"]`);
+    if (!card) continue;
+    card.style.display = (n === currentStep) ? '' : 'none';
+  }
+}
+```
+
+Aufruf in `stepperState.goTo(n)`:
+```js
+goTo(n){
+  if (!this.canEnter(n)) return;
+  this.currentStep = n;
+  if (typeof updateStepVisibility === 'function') updateStepVisibility(n);
+  // ... scroll + ring-Flash
+}
+```
+
+**Override-Layer-Semantik:** `updateStepVisibility()` setzt ALLE 5 Cards.
+Per-Step-Gating (z.B. `planArea` nur wenn Plan existiert) muss VOR diesem
+Update gesetzt sein — ist nicht überschrieben sondern als zusätzliche
+display:block-Schicht darüber. Die Reihenfolge im OpenVideo/Stepper-Code:
+1. Per-Step-Gating (`planArea` etc.)
+2. Stepper-Klick → `updateStepVisibility()` als override
+
+#### Tests
+`tests/test_cinematic_e2e.py::t_phase33_4_2_prep_*` — 2 neue Tests grün (53/53 total):
+- `t_phase33_4_2_prep_no_dead_code` — 7-Tokens Anti-Regression (titleThumbCard, genTitles, genThumbnail, selectTitle, updateTitleThumbCardVisibility, renderTitleList, renderThumbnail)
+- `t_phase33_4_2_prep_central_visibility` — `updateStepVisibility(n)` function + Iteration + Aufruf im goTo()
