@@ -297,13 +297,14 @@ def t_phase_g_volume_no_boundary_peak():
 
     # Source-grep regression guard: the new pattern must be present, the old pattern
     # `parts.append(f"between(t,{st:.3f},{en:.3f})*{vol:.2f}")` must NOT.
-    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    # Phase M.4: _phase_modulate_music lives in engine/audio.py now.
+    src = open(os.path.join(ROOT, "engine", "audio.py")).read()
     idx = src.find("def _phase_modulate_music")
     body = src[idx:idx + 2500]
     assert ("parts.append(f\"(if(gte(t," in body
             or "parts.append(f'(if(gte(t," in body
             or 'parts.append(f"(if(gte(t,' in body), \
-        f"Phase-G fix pattern missing in dashboard.py — staircase-peak regression is back"
+        f"Phase-G fix pattern missing in engine/audio.py — staircase-peak regression is back"
     assert 'between(t,{st:.3f},{en:.3f})' not in body, \
         "Old buggy line in _phase_modulate_music — Phase-G staircase-fix regressed"
 
@@ -333,7 +334,8 @@ def t_phase_g_volume_uses_end_aligned():
         f"envelope must NOT use planned start+dur (15.0), got expr={expr}"
 
     # Source-grep guard: _phase_modulate_music must reference end_aligned
-    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    # Phase M.4: function lives in engine/audio.py now.
+    src = open(os.path.join(ROOT, "engine", "audio.py")).read()
     idx = src.find("def _phase_modulate_music")
     body = src[idx:idx + 3000]
     assert "end_aligned" in body, \
