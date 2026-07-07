@@ -1514,6 +1514,7 @@ function startPlanPoll(){
       renderScenes('text');
       $('planArea').style.display = SCENES.length ? 'block' : 'none';
       updateStepVisibility();  // Single-page-Flow: Render-Step mit einblenden, sobald Szenen da
+      fillScriptFromScenesIfEmpty(); _elRefreshGenBtn();  // Voiceover-Button aktivieren
       if(r.characters) suggestCharsFromPlan(r.characters);
     }
   };
@@ -1654,6 +1655,19 @@ function _mmWireSliders(){
   s.onchange = v.onchange = p.onchange = persist;
 }
 
+// Wenn das Option-B-Skriptfeld leer ist, aber ein Plan mit Szenen existiert
+// (z.B. Plan aus Titel/Thema generiert), das Skript aus den Szenen-Texten
+// rekonstruieren — das IST die Narration, und der Voiceover braucht diesen Text.
+// Überschreibt NIE ein vom Nutzer getipptes Skript (nur wenn leer).
+function fillScriptFromScenesIfEmpty(){
+  const el = $('script');
+  if(!el) return;
+  if((el.value||'').trim()) return;                 // Nutzer-Skript nie überschreiben
+  if(!(Array.isArray(SCENES) && SCENES.length)) return;
+  const txt = SCENES.map(s => (s.text||'').trim()).filter(Boolean).join(' ').trim();
+  if(txt){ el.value = txt; if(typeof estimate==='function') estimate(); }
+}
+
 function _elRefreshGenBtn(){
   const script = ($('script') && $('script').value || '').trim();
   const hasVoice = !!($('elVoiceSelect') && $('elVoiceSelect').value);
@@ -1747,6 +1761,7 @@ function startVoiceoverPoll(){
         renderScenes(plan.source || 'audio');
         $('planArea').style.display = SCENES.length ? 'block' : 'none';
         updateStepVisibility();  // Single-page-Flow: Render-Step mit einblenden, sobald Szenen da
+        fillScriptFromScenesIfEmpty(); _elRefreshGenBtn();  // Voiceover-Button aktivieren
         if(plan.characters) suggestCharsFromPlan(plan.characters);
       }
       $('elGenBtn').disabled = false;
