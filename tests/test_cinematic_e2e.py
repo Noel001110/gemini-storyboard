@@ -751,6 +751,12 @@ def main():
         run(t_phase33_7_brand_color_cosmetic_only, "33.7: Brand-Color-Picker-Label '(rein kosmetisch)'")
         run(t_phase33_7_stepepr_visible_label, "33.7: Stepper-Labels lesbar (text-app-text/-mut)")
 
+        summary_section("Phase 33.8: Einstiegs-Flow + Onboarding")
+        run(t_phase33_8_default_view_is_videos, "33.8: App-Start = Video-Liste (nicht Kanal-Settings)")
+        run(t_phase33_8_continue_card_present, "33.8: 'Weiterarbeiten'-Karte ganz oben")
+        run(t_phase33_8_empty_state_hint, "33.8: Onboarding-Hint wenn Channel leer")
+        run(t_phase33_8_no_color_in_onboarding, "33.8: chNewForm hat Preset-Dropdown, kein Color-Picker")
+
         print(f"\n=== Result ===")
         print(f"  Passed: {PASSED}")
         print(f"  Failed: {FAILED}")
@@ -1995,6 +2001,59 @@ def t_phase33_7_stepepr_visible_label():
     # Stepper-Label-Class
     assert "'text-app-text'" in src and "'text-app-mut'" in src, \
         "Stepper-Labels müssen text-app-text (active/completed) oder text-app-mut (inactive) nutzen"
+
+
+def t_phase33_8_default_view_is_videos():
+    """Phase 33.8: App-Start zeigt Video-Liste, nicht Kanal-Settings (F4-Fix)."""
+    src = open(os.path.join(ROOT, "dashboard.html")).read()
+    # Init-Block muss showVideoListView() aufrufen, NICHT eine Settings-Ansicht
+    init_marker = "(async()=>{"
+    idx = src.find(init_marker)
+    assert idx >= 0, "Init-IIFE must exist"
+    # Body bis zu 200 Zeichen nach dem Init prüfen
+    body = src[idx:idx + 800]
+    assert "showVideoListView()" in body, \
+        "Phase 33.8: Init muss showVideoListView() aufrufen (Default-View = Video-Liste)"
+    assert "loadVideoList()" in body, \
+        "Phase 33.8: Init muss Videos laden BEVOR die View gezeigt wird"
+
+
+def t_phase33_8_continue_card_present():
+    """Phase 33.8: 'Weiterarbeiten'-Karte wird im Video-Grid ganz oben gezeigt."""
+    src = open(os.path.join(ROOT, "dashboard.html")).read()
+    assert "continue-card" in src, \
+        "Phase 33.8: .continue-card CSS-Klasse fehlt"
+    assert "Weiterarbeiten an" in src, \
+        "Phase 33.8: 'Weiterarbeiten an'-Text fehlt"
+    # Sortierung nach created_ts desc
+    assert "created_ts" in src and "sort" in src, \
+        "Phase 33.8: Video-Liste muss nach created_ts sortiert werden, neuestes zuerst"
+
+
+def t_phase33_8_empty_state_hint():
+    """Phase 33.8: wenn Channel keine Videos hat, zeigt die UI einen Onboarding-Hint."""
+    src = open(os.path.join(ROOT, "dashboard.html")).read()
+    assert "videoEmptyHint" in src or "video-empty-hint" in src, \
+        "Phase 33.8: videoEmptyHint-Element fehlt im HTML"
+    # Hint wird in loadVideoList ein-/ausgeblendet je nach VIDEOS.length
+    assert "VIDEOS.length === 0" in src, \
+        "Phase 33.8: Hint-Toggle in loadVideoList fehlt"
+
+
+def t_phase33_8_no_color_in_onboarding():
+    """Phase 33.8: Onboarding-Pfad hat keine Farbwahl mehr (F3/F6-Fix)."""
+    src = open(os.path.join(ROOT, "dashboard.html")).read()
+    # In showNewChannelForm / chNewForm darf KEIN Color-Picker sein
+    # Suche den chNewForm-Block
+    i = src.find('id="chNewForm"')
+    end = src.find("</div>", i + 100)  # schließendes div
+    snippet = src[i:end + 6]
+    assert "type=\"color\"" not in snippet, \
+        "Phase 33.8: chNewForm darf KEIN color-input haben (F6 — eine Farbwahl-Stelle)"
+    assert "<select" in snippet and "chNewPreset" in snippet, \
+        "Phase 33.8: chNewForm MUSS das Preset-Dropdown enthalten (Phase 38)"
+    assert "<input" in snippet and "chNewName" in snippet, \
+        "Phase 33.8: chNewForm MUSS das Name-Feld enthalten"
     """Phase 38 Backend: POST /api/channels mit preset-Feld schreibt das richtige
     master_prompt.txt. Ohne preset → DEFAULT_PRESET (flat_cartoon_doc)."""
     import subprocess
