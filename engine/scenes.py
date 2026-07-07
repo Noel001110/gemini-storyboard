@@ -291,3 +291,60 @@ def _resolve_chain_refs(plan_path: str, scene: dict) -> tuple:
     if prev.get("source_url") and prev.get("file") != anchor.get("file"):
         refs.append(prev["source_url"]); debug["chain_prev_file"] = prev.get("file")
     return refs, debug
+
+
+# ── Phase O: Wort-Akzent-Puls ─────────────────────────────────────────────────
+
+# Pause-Schwelle für Akzent-Kandidaten (Plan §4.4)
+ACCENT_PAUSE_THRESHOLD_SEC = 0.25
+# Mindest-Dauer einer Szene damit ein Akzent berechnet wird
+ACCENT_MIN_SCENE_DUR_SEC = 2.0
+
+
+def _is_accent_eligible(scene: dict) -> bool:
+    """Phase O Eligibility-Check: nur punchy oder CLIMAX-Szenen ab 2s Länge."""
+    if scene.get("dur", 0) < ACCENT_MIN_SCENE_DUR_SEC:
+        return False
+    pacing = scene.get("pacing", "normal")
+    phase = scene.get("phase", "")
+    return pacing == "punchy" or phase == "CLIMAX" or scene.get("is_climax", False)
+
+
+def _compute_accent_t(scene_start: float, scene_end: float, words: list) -> float | None:
+    """Phase O Akzent-Berechnung (deterministisch, kein LLM).
+
+    Sucht im Wortbereich der Szene die längste Folgepause ≥ 0.25s. Tiebreak:
+    längere Pause + Wort ≥ 8 Zeichen ODER Zahl gewinnt (Betonungs-Proxy für
+    Sprecher-Akzente auf substantiellen Inhalten).
+
+    Returns: Sekunden relativ zum Clip-Start (= scene_start), oder None wenn
+    keine geeignete Pause gefunden.
+    """
+    in_scene = [w for w in words
+                if w.get("start", 0) >= scene_start
+                and w.get("end", 0) <= scene_end]
+    if len(in_scene) < 2:
+        return None
+
+    def _score_word(w: dict) -> float:
+        word = w.get("word", "")
+        has_long = len(word) >= 8
+        has_digit = any(c.isdigit() for c in word)
+        return 0.5 if (has_long or has_digit) else 0.0
+
+    candidates = []
+    for i in range(len(in_scene) - 1):
+        w_i, w_next = in_scene[i], in_scene[i + 1]
+        gap = w_next["start"] - w_i["end"]
+        if gap < ACCENT_PAUSE_THRESHOLD_SEC:
+            continue
+        mid_t = (w_i["end"] + w_next["start"]) / 2
+        # Score = Pause + Wort-Score (Tiebreak)
+        score = gap + _score_word(w_i) + 0.3 * _score_word(w_next)
+        candidates.append((score, mid_t - scene_start, gap, w_i.get("word", "")))
+
+    if not candidates:
+        return None
+    # Höchster Score gewinnt
+    candidates.sort(reverse=True, key=lambda c: c[0])
+    return candidates[0][1]

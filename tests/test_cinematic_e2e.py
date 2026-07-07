@@ -772,6 +772,12 @@ def main():
         run(t_phase_k_deterministic_bed_selection, "K.3: _select_bed_for_block deterministisch via block_idx % len")
         run(t_phase_k_no_duplicate_phase_volume, "K: PHASE_VOLUME lazy-importiert in engine/audio")
 
+        summary_section("Phase O: Wort-Akzent-Puls (Mikro-Timing)")
+        run(t_phase_o_accent_rule_deterministic, "O.1: _compute_accent_t findet längste Pause ≥ 0.25s")
+        run(t_phase_o_accent_only_punchy_or_climax, "O.1: _is_accent_eligible nur punchy/CLIMAX + ≥2s")
+        run(t_phase_o_no_accent_expr_unchanged, "O.2: ohne accent_t = byte-identisch (Original z_expr als Fallback)")
+        run(t_phase_o_accent_zoom_bounded, "O.2: amp=0.05 + sigma=0.06s (Jitter-Bound)")
+
         print(f"\n=== Result ===")
         print(f"  Passed: {PASSED}")
         print(f"  Failed: {FAILED}")
@@ -2287,6 +2293,84 @@ def t_phase_k_deterministic_bed_selection():
     bed6 = _select_bed_for_block(6, "calm")
     assert bed6 == calm_beds[0], \
         f"Block 6 (calm) muss calm_beds[0] (cycle) sein, war: {bed6}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase O: Wort-Akzent-Puls (CINEMATIC_UPGRADE_PLAN.md §4.4)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def t_phase_o_accent_rule_deterministic():
+    """O.1: _compute_accent_t ist deterministisch + findet die längste Pause ≥ 0.25s."""
+    from engine.scenes import _compute_accent_t
+
+    # Eindeutige 0.7s-Pause zwischen Wörtern
+    words = [
+        {"word": "Die", "start": 0.0, "end": 0.3},
+        {"word": "Welt", "start": 0.3, "end": 0.6},
+        {"word": "dreht", "start": 0.6, "end": 1.0},
+        {"word": "sich", "start": 1.7, "end": 2.0},
+        {"word": "weiter", "start": 2.0, "end": 2.4},
+    ]
+    accent = _compute_accent_t(0.0, 3.0, words)
+    assert accent is not None, "0.7s-Pause muss gefunden werden"
+    # Mitte der Pause zwischen "dreht"(end=1.0) und "sich"(start=1.7) = 1.35s
+    assert abs(accent - 1.35) < 0.01, f"accent_t sollte 1.35s sein (Mitte 1.0-1.7), war: {accent}"
+
+    # Edge-Case: < 2 Wörter im Bereich → None
+    assert _compute_accent_t(0.0, 1.0, [{"word": "eins", "start": 0, "end": 0.5}]) is None
+
+    # Edge-Case: alle Pausen < 0.25s → None
+    tight_words = [
+        {"word": "a", "start": 0.0, "end": 0.3},
+        {"word": "b", "start": 0.4, "end": 0.7},   # 0.1s Pause
+        {"word": "c", "start": 0.8, "end": 1.1},   # 0.1s Pause
+    ]
+    assert _compute_accent_t(0.0, 2.0, tight_words) is None
+
+
+def t_phase_o_accent_only_punchy_or_climax():
+    """O.1: _is_accent_eligible gibt True nur für punchy oder CLIMAX-Szenen ab 2s."""
+    from engine.scenes import _is_accent_eligible
+
+    assert _is_accent_eligible({"pacing": "punchy", "dur": 3.0}) is True
+    assert _is_accent_eligible({"phase": "CLIMAX", "dur": 3.0}) is True
+    assert _is_accent_eligible({"is_climax": True, "dur": 3.0}) is True
+    # Calm/normal NICHT eligible
+    assert _is_accent_eligible({"pacing": "calm", "phase": "OPENING", "dur": 5.0}) is False
+    assert _is_accent_eligible({"pacing": "normal", "dur": 5.0}) is False
+    # Zu kurz
+    assert _is_accent_eligible({"pacing": "punchy", "dur": 1.0}) is False
+    assert _is_accent_eligible({"phase": "CLIMAX", "dur": 1.5}) is False
+
+
+def t_phase_o_no_accent_expr_unchanged():
+    """O.2: ohne scene['accent_t'] rendert _render_clip BYTE-IDENTISCH zu vorher.
+
+    Plan §4.4: "Szenen ohne accent_t rendern byte-identisch zum heutigen Ausdruck".
+    Verifiziert: z_expr ist exakt "{z0}+({z1}-{z0})*{smoothstep}" wenn kein accent_t.
+    """
+    src = open(os.path.join(ROOT, "engine", "render.py")).read()
+    # Suche nach dem accent_t-Branch
+    i = src.find("Phase O: Wort-Akzent-Puls")
+    assert i >= 0, "Phase O Block fehlt in render.py"
+    body = src[i:i+2500]
+    # Wenn accent_t None oder 0 oder clip_dur ≤ 2.0 → originaler z_expr
+    assert "f\"{z0}+({z1}-{z0})*{smoothstep}\"" in body, \
+        "Original z_expr muss als Fallback existieren (Plan: byte-identisch ohne accent_t)"
+    # UND der Gauß-Puls-Term existiert als Alternative
+    assert "amp*exp(-pow((on-{f_a})/{sigma},2))" in body or \
+           "amp*exp(-pow((on-f_a)/sigma,2))" in body, \
+        "Gauß-Puls-Term muss im Code existieren"
+
+
+def t_phase_o_accent_zoom_bounded():
+    """O.2: amp=0.05 hält Zoom-Bound (5% zusätzlich zu MOTION_LIBRARY-Maximum 1.25x
+    bleibt unter Jitter-Grenze)."""
+    src = open(os.path.join(ROOT, "engine", "render.py")).read()
+    # amp-Wert explizit
+    assert "amp = 0.05" in src, "amp muss 0.05 sein (Plan §4.4: unter 1.2x-Jitter-Grenze)"
+    # sigma muss 0.06s sein
+    assert "0.06 * fps" in src or "0.06*fps" in src, "sigma muss 0.06s sein (~0.2s Puls-Breite)"
 
 
 def t_phase_l_transition_after_hook():
