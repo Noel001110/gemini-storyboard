@@ -536,6 +536,12 @@
         <button onclick="makePlan()" id="planBtn">Plan aus Skript erstellen</button>
         <span class="hint">Timing geschätzt via WPM-Formel + Pacing-Analyse</span>
       </div>
+      <div id="planProgress" style="display:none;margin-top:12px">
+        <div style="height:8px;background:var(--surface-2);border-radius:4px;overflow:hidden">
+          <div id="planProgressBar" style="height:100%;width:0%;background:var(--acc);border-radius:4px;transition:width .6s ease"></div>
+        </div>
+        <div id="planProgressLabel" class="hint" style="margin-top:5px">Startet …</div>
+      </div>
     </div>
 
     <!-- Ein-Knopf-Orchestrator (Phase 4.5) — verkettet Plan → Bilder → Rendern, ohne
@@ -1490,17 +1496,53 @@ async function makePlan(){
   startPlanPoll();
 }
 
+// Geschätzter Ladebalken für die Plan-Generierung. Kein echter Backend-Fortschritt
+// (der Prompt-Schritt ist EIN Status-Step) — stattdessen Zeit-Schätzung anhand der
+// Szenenzahl: ~9s/Szene (aus Beobachtung) + ~45s Overhead (analyze+segment). Der Balken
+// nähert sich asymptotisch ~95% und springt bei "fertig" auf 100% — fühlt sich nicht
+// mehr nach "ewig" an, ist aber ehrlich als Schätzung gelabelt.
+let _planEstTotalSec = 0, _planStartTs = 0;
+function _planEstimateFromScript(){
+  const words = ($('script') ? ($('script').value||'').trim().split(/\s+/).filter(Boolean).length : 0);
+  const scenes = Math.max(4, Math.round(words / 11));   // ~11 Wörter/Szene (beobachtet)
+  return 45 + scenes * 9;                               // Overhead + ~9s/Szene
+}
+function _planProgressTick(step){
+  const box=$('planProgress'), bar=$('planProgressBar'), lbl=$('planProgressLabel');
+  if(!box||!bar||!lbl) return;
+  box.style.display='block';
+  // Falls das Backend die Szenenzahl nennt ("… für N Szenen …"), Schätzung nachschärfen
+  const m = (step||'').match(/für\s+(\d+)\s+Szenen/i);
+  if(m){ _planEstTotalSec = 45 + parseInt(m[1],10) * 9; }
+  const elapsed = (Date.now() - _planStartTs) / 1000;
+  const pct = Math.min(95, Math.round(100 * elapsed / Math.max(30, _planEstTotalSec)));
+  bar.style.width = pct + '%';
+  const remain = Math.max(0, Math.round(_planEstTotalSec - elapsed));
+  const mm = Math.floor(remain/60), ss = remain%60;
+  lbl.textContent = `${step||'Arbeite …'}  ·  ~${pct}% (geschätzt${remain>0?`, noch ~${mm>0?mm+' min ':''}${ss}s`:''})`;
+}
+function _planProgressDone(){
+  const box=$('planProgress'), bar=$('planProgressBar'), lbl=$('planProgressLabel');
+  if(bar) bar.style.width='100%';
+  if(lbl) lbl.textContent='Fertig ✓';
+  if(box) setTimeout(()=>{ box.style.display='none'; if(bar) bar.style.width='0%'; }, 1800);
+}
+
 function startPlanPoll(){
   if(_planPollTimer) return;
   const btn=$('planBtn'); btn.disabled=true;
+  _planStartTs = Date.now();
+  _planEstTotalSec = _planEstimateFromScript();
   const poll = async () => {
     const st = await ch_get('/api/plan_status').catch(() => null);
     if(!st) return;
     if(st.running){
       btn.textContent = st.step || 'Plane …';
+      _planProgressTick(st.step);
     } else {
       clearInterval(_planPollTimer); _planPollTimer = null;
       btn.disabled=false; btn.textContent='Plan aus Skript erstellen';
+      _planProgressDone();
       if(st.error){ alert('Fehler: '+st.error); return; }
       const r = await ch_get('/api/plan');
       SCENES = r.scenes || [];
