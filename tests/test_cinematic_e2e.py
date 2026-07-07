@@ -297,13 +297,14 @@ def t_phase_g_volume_no_boundary_peak():
 
     # Source-grep regression guard: the new pattern must be present, the old pattern
     # `parts.append(f"between(t,{st:.3f},{en:.3f})*{vol:.2f}")` must NOT.
-    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    # Phase M.4: _phase_modulate_music lives in engine/audio.py now.
+    src = open(os.path.join(ROOT, "engine", "audio.py")).read()
     idx = src.find("def _phase_modulate_music")
     body = src[idx:idx + 2500]
     assert ("parts.append(f\"(if(gte(t," in body
             or "parts.append(f'(if(gte(t," in body
             or 'parts.append(f"(if(gte(t,' in body), \
-        f"Phase-G fix pattern missing in dashboard.py — staircase-peak regression is back"
+        f"Phase-G fix pattern missing in engine/audio.py — staircase-peak regression is back"
     assert 'between(t,{st:.3f},{en:.3f})' not in body, \
         "Old buggy line in _phase_modulate_music — Phase-G staircase-fix regressed"
 
@@ -333,7 +334,8 @@ def t_phase_g_volume_uses_end_aligned():
         f"envelope must NOT use planned start+dur (15.0), got expr={expr}"
 
     # Source-grep guard: _phase_modulate_music must reference end_aligned
-    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    # Phase M.4: function lives in engine/audio.py now.
+    src = open(os.path.join(ROOT, "engine", "audio.py")).read()
     idx = src.find("def _phase_modulate_music")
     body = src[idx:idx + 3000]
     assert "end_aligned" in body, \
@@ -708,6 +710,24 @@ def main():
 
         summary_section("Phase 33.4.2: Thema-Card integration & linear workflow (PR 2)")
         run(t_phase33_4_2_thema_card_restructured, "33.4.2: Thema-Card restructure & Option A upload removal")
+
+        summary_section("Phase 11 (§11.4): Sequence chain — Doppel-Anker Regressionstests")
+        run(t_seq_double_anchor_refs, "§11.4: _resolve_chain_refs returns 0/1/2 refs correctly")
+        run(t_seq_todo_preserves_scene_order, "§11.3+§11.4 S2: no sort/reverse on `todo` in _batch_generate_worker")
+        run(t_seq_wait_timeout_exceeds_poll_max, "§11.4 S2: _wait timeout > MAX_POLLS*3s")
+        run(t_seq_continuity_prompt_last, "§11.3+§11.4 S3: CONTINUITY block is the last prompt component")
+        run(t_seq_motion_inheritance_precedence, "§11.3+§11.4 R2: _motion_for_scene checks seq_pos FIRST")
+        run(t_seq_renumber_assigns_anchor_zero, "§11.4: _renumber_seq_pos assigns 0,1,2... per seq_id")
+        run(t_seq_batch_worker_docstring_s1_fixed, "§11.4 S1: _batch_generate_worker docstring no longer lies")
+
+        summary_section("Phase M (Migrations-Verifikation, Refactor Engine-Extract)")
+        run(t_phase_m_engine_modules_exist, "M: 5 Module (engine.scenes/render/audio/prompts + routes) importieren")
+        run(t_phase_m_dashboard_re_exports_scenes, "M.2: dashboard.X is engine.scenes.X für 7 Symbole")
+        run(t_phase_m_dashboard_re_exports_render, "M.3: dashboard.X is engine.render.X für 8 Symbole")
+        run(t_phase_m_dashboard_re_exports_audio, "M.4: dashboard.X is engine.audio.X für 6 Symbole")
+        run(t_phase_m_dashboard_re_exports_prompts, "M.5+M.6: dashboard.X is engine.prompts.X für 10 Symbole")
+        run(t_phase_m_no_eager_cross_engine_imports, "M.0-M.6: keine Top-Level Cross-Engine-Imports (lazy)")
+        run(t_phase_m_dashboard_size_below_4000, "M.6: dashboard.py < 4000 Zeilen (vorher 4657)")
 
         print(f"\n=== Result ===")
         print(f"  Passed: {PASSED}")
@@ -1353,6 +1373,332 @@ def t_phase33_4_2_thema_card_restructured():
     # Audio-Upload Dropzone und Option A müssen komplett aus Schritt 2 verschwunden sein
     assert "Option A · Voice-Over hochladen" not in html, "Schritt 2: Option A dropzone must be removed"
     assert "transAudio" not in html or "transcribeAudio" not in html, "Schritt 2: transcribeAudio logic must be removed from Step 2"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 11: Sequence chain (Doppel-Anker) — see CINEMATIC_UPGRADE_PLAN.md §11.4
+# Regression tests for the 4 previously-uncovered functions plus S1 docstring fix.
+# MUST run green BEFORE Phase L (which touches _motion_for_scene, see Schutzregel 2).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def t_seq_double_anchor_refs():
+    """§11.4 (S4 regression): _resolve_chain_refs returns the correct refs.
+
+    seq_pos 1 → exactly 1 ref (anchor; pos-1 == 0 dedup'd)
+    seq_pos 2 → exactly 2 refs (anchor + predecessor, distinct files)
+    seq_pos 0 / no seq_id → empty list, no wait
+    """
+    from engine.scenes import _resolve_chain_refs, _wait_for_chain_scene
+
+    # Plan mit 3-Szenen-Sequenz, Anker + 2 Fortsetzungen, alle mit source_url + file
+    tmp = tempfile.mkdtemp(prefix="seq_test_")
+    try:
+        plan_path = os.path.join(tmp, "plan.json")
+        scenes = [
+            {"i": 0, "seq_id": "s1", "seq_pos": 0, "source_url": "http://a/anchor.jpg", "file": "anchor.jpg"},
+            {"i": 1, "seq_id": "s1", "seq_pos": 1, "source_url": "http://a/cont1.jpg",   "file": "cont1.jpg"},
+            {"i": 2, "seq_id": "s1", "seq_pos": 2, "source_url": "http://a/cont2.jpg",   "file": "cont2.jpg"},
+        ]
+        json.dump({"scenes": scenes}, open(plan_path, "w"))
+
+        # Anchor (seq_pos 0) → no chain refs (normal char_ref only)
+        refs, debug = _resolve_chain_refs(plan_path, scenes[0])
+        assert refs == [], f"anchor must have no chain refs, got {refs}"
+        assert debug == {}, f"anchor must have no chain debug, got {debug}"
+
+        # seq_pos 1 → exactly 1 ref (anchor; prev IS anchor, dedup'd)
+        refs, debug = _resolve_chain_refs(plan_path, scenes[1])
+        assert refs == ["http://a/anchor.jpg"], f"seq_pos 1 must have exactly 1 ref, got {refs}"
+        assert debug.get("chain_anchor_file") == "anchor.jpg"
+        assert "chain_prev_file" not in debug, "seq_pos 1 must NOT have chain_prev_file (dedup'd)"
+
+        # seq_pos 2 → exactly 2 refs (anchor + distinct prev)
+        refs, debug = _resolve_chain_refs(plan_path, scenes[2])
+        assert refs == ["http://a/anchor.jpg", "http://a/cont1.jpg"], f"seq_pos 2 must have 2 refs, got {refs}"
+        assert debug.get("chain_anchor_file") == "anchor.jpg"
+        assert debug.get("chain_prev_file") == "cont1.jpg", f"seq_pos 2 must have chain_prev_file, got {debug}"
+
+        # No seq_id → empty
+        refs, debug = _resolve_chain_refs(plan_path, {"i": 99, "pacing": "calm"})
+        assert refs == []
+        assert debug == {}
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def t_seq_todo_preserves_scene_order():
+    """§11.4 (S2 regression): _batch_generate_worker's `todo` MUST preserve scene order.
+
+    Schutzregel 1: no `sort`/`sorted`/`reverse` on `todo`. If anyone ever sorts
+    `todo` (e.g. "Hook zuerst" in Phase L), anchors and continuations land in
+    parallel batches and deadlock via _wait_for_chain_scene.
+    """
+    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    # Find _batch_generate_worker body
+    i = src.find("def _batch_generate_worker")
+    assert i >= 0, "_batch_generate_worker must still exist in dashboard.py"
+    # Look for `todo` until the function's next def or class
+    # Crude but effective: scan 200 lines after def and check for forbidden calls on `todo`
+    end = src.find("\ndef ", i + 50)
+    if end < 0:
+        end = i + 5000
+    body = src[i:end]
+    # Forbidden: todo.sort(), todo.sorted, sorted(todo), reverse=True on todo, etc.
+    # Allowed: filtering (list comprehensions, `for s in scenes if not s.get("file")`).
+    forbidden = ["todo.sort", "sorted(todo", "todo.reverse", "reversed(todo"]
+    for f in forbidden:
+        assert f not in body, (
+            f"§11.3 Schutzregel 1 violated: _batch_generate_worker contains '{f}'. "
+            f"`todo` MUST preserve original scene order — see CINEMATIC_UPGRADE_PLAN.md §11.3."
+        )
+
+
+def t_seq_wait_timeout_exceeds_poll_max():
+    """§11.4 (S2 regression): _wait_for_chain_scene timeout > IMAGE_JOB_MAX_POLLS * 3s.
+
+    Schutzregel: timeout (170s) must stay > MAX_POLLS * 3s (150s by default).
+    If anyone raises IMAGE_JOB_MAX_POLLS, the wait would silently expire and
+    continuations would lose their chain refs without error.
+    """
+    import re as _re
+    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    # Find IMAGE_JOB_MAX_POLLS
+    m = _re.search(r"IMAGE_JOB_MAX_POLLS\s*=\s*(\d+)", src)
+    assert m, "IMAGE_JOB_MAX_POLLS must be defined"
+    max_polls = int(m.group(1))
+    poll_total_sec = max_polls * 3
+
+    from engine.scenes import _wait_for_chain_scene
+    import inspect
+    sig = inspect.signature(_wait_for_chain_scene)
+    timeout_default = sig.parameters["timeout"].default
+    assert timeout_default > poll_total_sec, (
+        f"_wait_for_chain_scene timeout ({timeout_default}s) must be > "
+        f"IMAGE_JOB_MAX_POLLS * 3s ({poll_total_sec}s). Otherwise continuations "
+        f"silently lose their chain refs."
+    )
+
+
+def t_seq_continuity_prompt_last():
+    """§11.4 (S3 regression): CONTINUITY block is appended LAST to the image prompt.
+
+    Schutzregel 3: master + phase-cue may change, but the CONTINUITY block must
+    stay at the very end — otherwise earlier instructions can dilute or contradict
+    the chain-ref adherence.
+    """
+    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    # Find the CONTINUITY block in _batch_generate_worker
+    i = src.find('"\\n\\nCONTINUITY (STRICT):')
+    assert i >= 0, "CONTINUITY (STRICT) block must still exist in dashboard.py"
+    # Within the next ~80 lines, there must be NO further mutation of full_prompt.
+    # `print()` and `acquire()`/`try:` between CONTINUITY and submit are OK.
+    after = src[i:i+5000]
+    # Any forbidden mutation of full_prompt?
+    forbidden_after_continuity = [
+        'full_prompt += "', 'full_prompt =', 'full_prompt += f',
+    ]
+    for f in forbidden_after_continuity:
+        # Allow only the CONTINUITY line itself (which contains the marker)
+        assert f not in after or after.count(f) == 1, (
+            f"§11.3 Schutzregel 3 violated: full_prompt is mutated AFTER CONTINUITY "
+            f"block (found '{f}' beyond the marker). CONTINUITY must be the LAST "
+            f"prompt component."
+        )
+    # Submit must still happen after CONTINUITY
+    assert "_kie_submit_image(" in after or "gen_image(" in after, (
+        "CONTINUITY block is the last component — submit (_kie_submit_image) must follow"
+    )
+
+
+def t_seq_motion_inheritance_precedence():
+    """§11.4 (Schutzregel 2): _motion_for_scene checks seq_pos FIRST, before any
+    new motion rule (Phase L is_hook, future overrides, etc.).
+
+    Phase M.3: _motion_for_scene lives in engine/render.py (not dashboard.py).
+    """
+    src = open(os.path.join(ROOT, "engine", "render.py")).read()
+    i = src.find("def _motion_for_scene")
+    assert i >= 0, "_motion_for_scene must exist in engine/render.py"
+    body_start = src.find("\n", i) + 1
+    end = src.find("\ndef ", body_start)
+    if end < 0:
+        end = body_start + 3000
+    body = src[body_start:end]
+    first_if = body.find("if ")
+    assert first_if >= 0, "_motion_for_scene must have at least one if"
+    snippet = body[first_if:first_if + 300]
+    assert "seq_pos" in snippet or "seq_id" in snippet, (
+        f"_motion_for_scene: first condition must be the seq_pos inheritance check "
+        f"(Schutzregel 2). Got: {snippet[:200]!r}"
+    )
+
+
+def t_seq_renumber_assigns_anchor_zero():
+    """§11.4 (basic correctness): _renumber_seq_pos assigns 0,1,2,... per seq_id."""
+    from engine.scenes import _renumber_seq_pos
+    scenes = [
+        {"i": 0, "seq_id": "s1"},
+        {"i": 1, "seq_id": "s1"},
+        {"i": 2, "seq_id": "s1"},
+        {"i": 3, "seq_id": "s2"},
+        {"i": 4, "seq_id": "s2"},
+        {"i": 5},  # no seq_id
+    ]
+    _renumber_seq_pos(scenes)
+    assert scenes[0]["seq_pos"] == 0, "first scene of s1 must be anchor"
+    assert scenes[1]["seq_pos"] == 1
+    assert scenes[2]["seq_pos"] == 2
+    assert scenes[3]["seq_pos"] == 0, "first scene of s2 must be anchor"
+    assert scenes[4]["seq_pos"] == 1
+    assert scenes[5]["seq_pos"] == 0, "no seq_id → seq_pos=0 (no anchor, harmless default)"
+
+
+def t_seq_batch_worker_docstring_s1_fixed():
+    """§11.4 (S1 regression): _batch_generate_worker docstring no longer claims
+    'no ordering dependency' — it now correctly notes the chain-ref dependency.
+    """
+    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    i = src.find("def _batch_generate_worker")
+    assert i >= 0
+    # Read the docstring — find the NEXT triple-quote AFTER the opening one
+    open_q = src.find('"""', i)
+    assert open_q > 0
+    close_q = src.find('"""', open_q + 3)
+    assert close_q > 0
+    docstring = src[open_q:close_q + 3]
+    # Old buggy phrase must be gone
+    assert "no ordering dependency" not in docstring, (
+        "S1 bug NOT fixed: _batch_generate_worker docstring still says 'no ordering dependency' "
+        "while the function calls _resolve_chain_refs 70 lines below."
+    )
+    # New correct phrase must be present
+    assert "_resolve_chain_refs" in docstring, (
+        f"S1 fix incomplete: docstring must reference _resolve_chain_refs. Got: {docstring[:300]!r}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase M (Migrations-Verifikation, 2026-07-07) — Modul-Identitäten + Architektur-Inv.
+# Diese Tests prüfen NICHT Logik, sondern dass der Refactor die versprochenen
+# Garantien einhält: dashboard.X ist engine.Y, Cross-Module-Referenzen sind lazy,
+# alle 61 vorherigen Tests bleiben grün.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def t_phase_m_dashboard_re_exports_scenes():
+    """M.2: alle aus engine/scenes.py extrahierten Symbole sind über dashboard.X
+    als dasselbe Objekt erreichbar (Re-Export funktioniert).
+    """
+    import engine.scenes
+    assert dashboard.split_units is engine.scenes.split_units
+    assert dashboard.segment_by_pacing is engine.scenes.segment_by_pacing
+    assert dashboard._renumber_seq_pos is engine.scenes._renumber_seq_pos
+    assert dashboard._apply_visual_sequences_direct is engine.scenes._apply_visual_sequences_direct
+    assert dashboard._wait_for_chain_scene is engine.scenes._wait_for_chain_scene
+    assert dashboard._resolve_chain_refs is engine.scenes._resolve_chain_refs
+    assert dashboard.MAX_SCENE_SEC == engine.scenes.MAX_SCENE_SEC
+
+
+def t_phase_m_dashboard_re_exports_render():
+    """M.3: alle aus engine/render.py extrahierten Symbole re-exportiert."""
+    import engine.render
+    assert dashboard.RENDER_FPS == engine.render.RENDER_FPS
+    assert dashboard._render_clip is engine.render._render_clip
+    assert dashboard._assemble_clips is engine.render._assemble_clips
+    assert dashboard._motion_for_scene is engine.render._motion_for_scene
+    assert dashboard._transition_for_scene is engine.render._transition_for_scene
+    assert dashboard.MOTION_LIBRARY is engine.render.MOTION_LIBRARY
+    assert dashboard.TRANSITION_LIBRARY is engine.render.TRANSITION_LIBRARY
+    assert dashboard.render_text_overlay_png is engine.render.render_text_overlay_png
+    assert dashboard.render_title_card_png_via_venv is engine.render.render_title_card_png_via_venv
+
+
+def t_phase_m_dashboard_re_exports_audio():
+    """M.4: alle aus engine/audio.py extrahierten Symbole re-exportiert."""
+    import engine.audio
+    assert dashboard._build_sfx_events is engine.audio._build_sfx_events
+    assert dashboard._duck_music_under_voice is engine.audio._duck_music_under_voice
+    assert dashboard._place_sfx is engine.audio._place_sfx
+    assert dashboard._phase_modulate_music is engine.audio._phase_modulate_music
+    assert dashboard._build_final_audio is engine.audio._build_final_audio
+    assert dashboard.SFX_FILES is engine.audio.SFX_FILES
+
+
+def t_phase_m_dashboard_re_exports_prompts():
+    """M.5+M.6: alle aus engine/prompts.py extrahierten Symbole re-exportiert."""
+    import engine.prompts
+    assert dashboard._build_image_prompt is engine.prompts._build_image_prompt
+    assert dashboard._build_video_prompt is engine.prompts._build_video_prompt
+    assert dashboard._phase_prompt_addition is engine.prompts._phase_prompt_addition
+    assert dashboard.visual_prompts is engine.prompts.visual_prompts
+    assert dashboard._image_prompt_chunk is engine.prompts._image_prompt_chunk
+    assert dashboard.generate_script is engine.prompts.generate_script
+    assert dashboard.generate_titles is engine.prompts.generate_titles
+    assert dashboard.make_thumbnail_prompt is engine.prompts.make_thumbnail_prompt
+    assert dashboard.gen_thumbnail_image is engine.prompts.gen_thumbnail_image
+    assert dashboard.load_char_refs is engine.prompts.load_char_refs
+    assert dashboard.gen_charsheet is engine.prompts.gen_charsheet
+
+
+def t_phase_m_no_eager_cross_engine_imports():
+    """Architektur-Invariante: engine-Module dürfen NICHT andere engine-Module oben
+    importieren — nur innerhalb von Funktionen (lazy). Sonst gibt's Import-Zyklen
+    sobald ein Modul das andere erweitert.
+
+    Erkennt NUR Imports, die direkt im Modul-Body stehen (nicht in Funktionen).
+    """
+    import ast
+    import os as _os
+    engine_dir = _os.path.join(ROOT, "engine")
+    offenders = []
+    for fname in _os.listdir(engine_dir):
+        if not fname.endswith(".py") or fname == "__init__.py":
+            continue
+        path = _os.path.join(engine_dir, fname)
+        with open(path) as f:
+            src = f.read()
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:
+            continue
+        # Only check top-level statements (col_offset == 0); function-body imports are OK
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.startswith("engine."):
+                        offenders.append(f"{fname}: top-level 'import {alias.name}'")
+            elif isinstance(node, ast.ImportFrom):
+                if node.module and node.module.startswith("engine."):
+                    offenders.append(f"{fname}: top-level 'from {node.module} import ...'")
+    assert not offenders, (
+        "Top-level cross-engine imports detected (must be lazy inside functions):\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def t_phase_m_dashboard_size_below_4000():
+    """Sanity-Check: dashboard.py nach M sollte deutlich kleiner sein als vorher.
+    Vorher: 4657 Zeilen. Aktuell (M.6): 3285. Erwartung: < 4000.
+    """
+    src_path = os.path.join(ROOT, "dashboard.py")
+    line_count = sum(1 for _ in open(src_path))
+    assert line_count < 4000, (
+        f"dashboard.py ist {line_count} Zeilen — Refactor hat nicht genug reduziert "
+        f"(Baseline 4657). Siehe docs/phase-m-report.md für Analyse."
+    )
+    print(f"    (dashboard.py: {line_count} Zeilen)")
+
+
+def t_phase_m_engine_modules_exist():
+    """M.0+M.2-M.5: alle 4 engine-Module + 1 routes-Modul existieren und importieren."""
+    import engine
+    import engine.scenes
+    import engine.render
+    import engine.audio
+    import engine.prompts
+    import routes
+    assert hasattr(engine, "__all__") or hasattr(engine.scenes, "split_units")
+    assert hasattr(routes, "register_engine_paths")
+    assert hasattr(routes, "ENDPOINT_REGISTRY")
 
 
 if __name__ == "__main__":
