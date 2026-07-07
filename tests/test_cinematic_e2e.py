@@ -1739,24 +1739,23 @@ def t_bug_b1_charref_upload_validates_base64():
 
 def t_bug_b1_charref_upload_roundtrip():
     """B-1 End-to-End: Valider Upload schreibt PNG + JSON, beide lesbar.
-    Verwendet die echte HTTP-Schnittstelle (startet Server im Thread).
+    Verwendet die echte HTTP-Schnittstelle (startet Server im Subprozess).
     """
-    import threading
+    import subprocess
     import urllib.request
     import urllib.error
     import time as _time
 
     # Free port — pick a high random one to avoid clashes
-    port = 18701
+    port = 18702
 
-    server_thread = threading.Thread(
-        target=lambda: __import__("subprocess").run(
-            ["python3", os.path.join(ROOT, "dashboard.py"), "--port", str(port)],
-            capture_output=True
-        ),
-        daemon=True
+    # Use Popen (not run) so we can run the server async
+    proc = subprocess.Popen(
+        ["python3", os.path.join(ROOT, "dashboard.py"), "--port", str(port)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        cwd=ROOT,
     )
-    server_thread.start()
     _time.sleep(2.5)  # server boot
 
     try:
@@ -1795,19 +1794,17 @@ def t_bug_b1_charref_upload_roundtrip():
         assert meta["name"] == "RoundtripChar"
         assert meta["safe"] == "roundtripchar"
 
-        # Cleanup
+        # Cleanup test channel
         import shutil
         shutil.rmtree(os.path.join(ROOT, "channels", "b1_test_roundtrip"), ignore_errors=True)
     finally:
-        # Subprocess-launched server has no clean shutdown from test thread;
-        # kill any leftover on this port
+        # Terminate the subprocess server
+        proc.terminate()
         try:
-            __import__("subprocess").run(
-                ["lsof", "-ti", f":{port}"],
-                capture_output=True, text=True, check=False
-            ).stdout.strip().split("\n")
-        except Exception:
-            pass
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
 
 
 if __name__ == "__main__":
