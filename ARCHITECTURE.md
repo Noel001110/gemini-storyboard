@@ -1,6 +1,6 @@
 # Storyboard Generator — Architektur-Überblick
 
-Stand: Juli 2026. Referenz-Dokument, damit man nach längerer Pause wieder reinfindet, ohne den ganzen Code neu lesen zu müssen. Alle Zeilenangaben beziehen sich auf den aktuellen Stand von `dashboard.py` / `dashboard.html` — bei größeren Änderungen können sie sich verschieben, die Funktionsnamen bleiben der verlässlichere Anker.
+Stand: Juli 2026. Referenz-Dokument, damit man nach längerer Pause wieder reinfindet, ohne den ganzen Code neu lesen zu müssen. **Zeilenangaben in den historischen Abschnitten (§4–§32) sind nach dem Engine-Refactor (Phase J + M) veraltet** — die zustandslose Kern-Logik lebt jetzt im `engine/`-Paket, nicht mehr im `dashboard.py`-Monolithen. Die verlässlichen Anker sind die **Funktionsnamen**; die aktuelle Modul-Landkarte steht in **§3.1**.
 
 ## 1. Was das Programm macht
 
@@ -8,19 +8,19 @@ Lokales Tool (läuft auf `localhost:8765`), das aus einem Sprecher-Skript automa
 
 ## 2. Tech-Stack — bewusst minimal
 
-- **Backend**: `dashboard.py`, ein einziges File, nur Python-Stdlib (`http.server.ThreadingHTTPServer`, kein Flask/FastAPI). ~3745 Zeilen (Stand nach Aufräumen toter Pfade, Juli 2026 — wächst mit jeder Phase, Zeilenangabe hier bewusst nur eine grobe Orientierung, kein exakter Wert zum Nachhalten).
-- **Frontend**: `dashboard.html`, ein einziges File — Vanilla JS, kein Build-Step, kein Framework. Wird bei **jedem** Request frisch von der Platte gelesen (Zeile 2034: `open(... "dashboard.html").read()`), d.h. Frontend-Änderungen brauchen **keinen Server-Neustart**, Backend-Änderungen (`dashboard.py`) schon.
-- **Externe Dienste**: alles über **KIE.ai** als zentralen API-Broker — Bildgenerierung (nano-banana-2/-lite), Textgenerierung (Gemini 2.5 Flash + Gemini 3.5 Flash native), Video (Veo 3.1, Grok Imagine T2V/I2V).
+- **Backend**: `dashboard.py` (~3360 Z., Orchestrator: HTTP-Server + Jobs + Worker) **plus das `engine/`-Paket** (`scenes`, `prompts`, `render`, `audio`, `presets`) und `engine_elevenlabs.py` — nur Python-Stdlib (`http.server.ThreadingHTTPServer`, kein Flask/FastAPI). Vollständige Modul-Aufteilung: **§3.1**. War ursprünglich ein ~4.700-Zeilen-Monolith, seit Phase J + M aufgeteilt.
+- **Frontend**: `dashboard.html`, ein einziges File — Vanilla JS + Tailwind (CDN) + Alpine.js, kein Build-Step. Wird bei **jedem** Request frisch von der Platte gelesen, d.h. Frontend-Änderungen brauchen **keinen Server-Neustart**, Backend-Änderungen (`dashboard.py` / `engine/`) schon.
+- **Externe Dienste**: alles über **KIE.ai** als zentralen API-Broker — Bildgenerierung (nano-banana-2/-lite), Textgenerierung (Gemini 2.5 Flash + Gemini 3.5 Flash native), Video (Veo 3.1 I2V; T2V deprecated, Plan Phase 39). TTS zusätzlich über ElevenLabs/MiniMax (`engine_elevenlabs.py`).
 - **Datenhaltung**: keine Datenbank — alles als JSON-Dateien im Filesystem unter `channels/`.
 
 ## 3. Verzeichnisstruktur (Datenmodell)
 
 ```
-channels/
-  channels.json                       # Liste aller Kanäle [{id, name}]
+channels/                             # gitignored — lokale Nutzerdaten, nicht im Repo
+  channels.json                       # Liste aller Kanäle [{id, name, brand_color?}]
   <cid>/                              # ein Kanal
     master_prompt.txt                 # Bild-Stil (Charakter/Farben/Linienführung)
-    video_master_prompt.txt           # Video-Stil (für T2V-Modus)
+    video_master_prompt.txt           # Video-Stil (nur T2V — deprecated, Phase 39 entfernt T2V)
     char_ref_url.txt                  # EIN globales Referenzbild fürs ganze Kanal (Veo-Konsistenz)
     char_ref.png                      # lokale Kopie davon
     charsheets/                       # benannte Charakter-Referenzen (mehrere möglich)
@@ -56,7 +56,30 @@ channels/
   "render": {"file": "final.mp4", "ts": 173..., "checks": {"duration_ok": true, "audio_ok": true, "frames_ok": true}}
 }
 ```
-`status` ∈ `geplant | läuft | fertig | fehler`. Jeder Schreibzugriff auf `plan.json` läuft über `_PLAN_WRITE_LOCK` (dashboard.py:35) — siehe Abschnitt 6.3, das war ein echter Bug. Alle Felder ab `concrete_entity` sind **additiv/optional** (Feature A/B, siehe Abschnitt 12/13) — alte Pläne ohne diese Felder bleiben ohne Änderung ladbar.
+`status` ∈ `geplant | läuft | fertig | fehler`. Jeder Schreibzugriff auf `plan.json` läuft über `_PLAN_WRITE_LOCK` (dashboard.py) — siehe Abschnitt 6.3, das war ein echter Bug. Alle Felder ab `concrete_entity` sind **additiv/optional** (Feature A/B, siehe Abschnitt 12/13) — alte Pläne ohne diese Felder bleiben ohne Änderung ladbar. Neuere additive Felder (ab Phase K–P): `is_hook`, `throughline_question` (L), `data_visual` (N), `accent_t` (O), `music_plan` (K).
+
+### 3.1 Code-Struktur — Python-Module (Stand nach Phase M, Juli 2026)
+
+Ursprünglich war **alles** ein Monolith in `dashboard.py` (~4.700 Z.). Phase J + M haben die
+zustandslose Kern-Logik in ein `engine/`-Paket extrahiert; `dashboard.py` (~3.360 Z.) bleibt
+der **Orchestrator** (HTTP-Server, Job-Dicts, Worker-Threads, LLM-/KIE-Calls). Alle Extrakte
+laufen über `from engine.<modul> import *` + `__all__`, mit Lazy-Imports gegen Zyklen.
+
+| Datei | Zeilen | Rolle |
+|---|---|---|
+| `dashboard.py` | ~3360 | Orchestrator: `ThreadingHTTPServer` + `H`-Handler (do_GET/do_POST), alle Job-Dicts + Locks, `_render_worker`/`_batch_generate_worker`/Orchestrator, KIE/Veo/Gemini-Calls (`_kie_submit_image`, `gen_veo`, `gen_video`, `post_gemini_native`), `analyze_script`, `_assign_phases`, `align_scenes_to_whisper`, `upload_image_public` |
+| `engine/scenes.py` | ~350 | Szenen-Logik: `split_units`, `segment_by_pacing`, `_is_accent_eligible`, `_compute_accent_t` (Phase O), Sequenz-Ketten-Helfer |
+| `engine/prompts.py` | ~590 | Prompt-Komposition: `visual_prompts`, `_build_image_prompt`, `HOOK_PROMPT_ADDITION` (L), Char-Sheet-Pipeline |
+| `engine/render.py` | ~660 | Visuelle Render-Pipeline: `_render_clip` (zoompan/Grading/Overlays), `_assemble_clips`, `_mux_audio`, `_crossfade_clips`, `_render_selfcheck`, Motion-/Transition-Vokabular, `MOTION_LIBRARY`/`TRANSITION_LIBRARY` |
+| `engine/audio.py` | ~450 | Sound-Design: `_build_final_audio`, `_build_music_track` (K), `_phase_modulate_music`, `_duck_music_under_voice`, `_place_sfx`, `MUSIC_BEDS`/`PHASE_TO_TIER`/`SFX_FILES` |
+| `engine/presets.py` | ~185 | Stil-Preset-Library (Phase 38): `PRESET_MASTERS`, `DEFAULT_PRESET` |
+| `engine_elevenlabs.py` | ~675 | TTS-Provider (ElevenLabs/MiniMax) + Phasen-Konstanten (`PHASE_PROMPT_ADDITIONS`, `PHASE_COLOR_FILTER`, `PHASE_VOLUME`) |
+| `render_overlay.py` | ~290 | PIL-Overlays: Untertitel, Counter (statisch + `counter_anim`-Sequenz, Phase N), Title-Cards — läuft im venv-Subprozess |
+
+**Wichtig für Doku-Pflege (Plan §8.4/2):** Die Zeilennummern in den historischen Abschnitten
+§4–§32 stammen aus dem Vor-M-Monolithen und sind **nicht** mehr verlässlich. Stabile Anker sind
+die **Funktionsnamen** — obige Tabelle sagt, in welchem Modul sie heute leben. Bei Bedarf greppen,
+nie blind auf alte Zeilennummern patchen.
 
 ## 4. High-Level-Datenfluss
 
@@ -87,10 +110,16 @@ Für Videos (T2V/Veo) ist der Pfad separat und **on-demand pro Szene**, nicht Te
 
 ## 5. Die zwei Betriebsmodi (`mode`: `"image"` | `"video"`)
 
-Pro Video (`videos.json` → `mode`-Feld) einstellbar, im Frontend über den Segmented-Control oben im Editor (`setMode()`, dashboard.html:930).
+> **Stand Juli 2026:** Die gesamte Cinematic-Pipeline (Phasen A–P) ist **Bild-first**. Der
+> **Video-/T2V-Modus ist deprecated** und für die vollständige Entfernung vorgesehen (Plan
+> Phase 39, „T2V raus / I2V rein"). `gen_veo` **bleibt** — es akzeptiert `image_urls` und trägt
+> damit den I2V-Pfad; nur der reine Text→Video-Modus (`make_t2v_prompt`, `/api/preview_t2v_prompt`,
+> `/api/generate_t2v`, UI-Mode „🎬 Video (T2V)") entfällt.
 
-- **Bild-Modus** (Standard): Skript → Szenen → **Bilder** (nano-banana-2). Optional pro Szene per I2V ("Animieren"-Button) zu einem kurzen Grok-Video animiert (`gen_video()`, dashboard.py:2649 — **nicht** Veo, sondern `grok-imagine/image-to-video`).
-- **Video-Modus** (T2V): Skript → Szenen → **direkt Videos**, kein Bild-Zwischenschritt, über **Veo 3.1** (`gen_veo`/`extend_veo`, dashboard.py:2533/2564, verdrahtet über `/api/generate_t2v`, dashboard.py:3251), inkl. Chain-Extend (Abschnitt 7.2). Ein früher zusätzlich vorhandener, nie verdrahteter zweiter Pfad über Grok T2V (`gen_t2v`, Modell `grok-imagine/text-to-video`) wurde beim Aufräumen toter Pfade (Juli 2026) entfernt, siehe Abschnitt 11.
+Pro Video (`videos.json` → `mode`-Feld) einstellbar, im Frontend über den Segmented-Control oben im Editor (`setMode()`).
+
+- **Bild-Modus** (Standard, empfohlen): Skript → Szenen → **Bilder** (nano-banana-2). Optional pro Szene per I2V ("Animieren"-Button) zu einem kurzen Grok-Video animiert (`gen_video()`, dashboard.py — **nicht** Veo, sondern `grok-imagine/image-to-video`).
+- **Video-Modus** (T2V, deprecated): Skript → Szenen → **direkt Videos** über **Veo 3.1** (`gen_veo`/`extend_veo`, dashboard.py, verdrahtet über `/api/generate_t2v`), inkl. Chain-Extend (Abschnitt 7.2).
 
 `renderScenes()` im Frontend (dashboard.html:1131) rendert je nach `CURRENT_MODE` komplett unterschiedliches HTML pro Szene (zwei Spalten Bild+Video im Bild-Modus vs. eine Video-Spalte + Prompt-Textarea im Video-Modus).
 
@@ -1807,16 +1836,26 @@ intakt (wird vom Backend `/api/video_meta` befüllt und ist Vorlage für 33.4.2-
 
 #### D — Zentrale Step-Card-Visibility
 
-Vorher waren alle 5 Step-Cards (`data-step-section="1..5"`) gleichzeitig sichtbar
-und der User scrollte 4+ Bildschirmhöhen durch. Mit 33.4.2-prep wird der Wizard
-einklappbar: pro Step-Klick wird die aktive Card sichtbar, alle anderen `display:none`.
+> **⚠ ÜBERHOLT (Juli 2026, Nutzerwunsch):** Der hier beschriebene einklappbare Tab-Wizard
+> wurde **zurückgenommen** — die App ist wieder ein **Single-Page-Flow**: alle Schritte laufen
+> von oben nach unten durch (Thema → Skript → Audio → Bilder → Render), fertige Schritte bleiben
+> sichtbar, `goTo()` scrollt nur noch smooth zum Schritt (Scroll-Nav statt Tab-Switch).
+> `updateStepVisibility()` versteckt **nicht** mehr — es hält Sektion 1–3 immer sichtbar und
+> blendet 4 (Plan) + 5 (Render) ein, sobald Szenen existieren (`SCENES.length`). Der Abschnitt
+> unten bleibt als Historie des Zwischenstands 33.4.2-prep stehen.
+
+Vorher (33.4.2-prep D): alle 5 Step-Cards (`data-step-section="1..5"`) gleichzeitig sichtbar,
+User scrollte 4+ Bildschirmhöhen. 33.4.2-prep machte den Wizard einklappbar: pro Step-Klick
+die aktive Card sichtbar, alle anderen `display:none`. **Heute wieder Single-Page (siehe Banner).**
 
 ```js
+// HEUTIGE Version (Single-Page-Flow):
 function updateStepVisibility(currentStep){
-  for (let n = 1; n <= 5; n++) {
+  const hasScenes = Array.isArray(SCENES) && SCENES.length > 0;
+  const vis = { 1:'', 2:'', 3:'', 4: hasScenes?'':'none', 5: hasScenes?'':'none' };
+  for (let n = 1; n <= 5; n++){
     const card = document.querySelector(`[data-step-section="${n}"]`);
-    if (!card) continue;
-    card.style.display = (n === currentStep) ? '' : 'none';
+    if (card) card.style.display = vis[n];
   }
 }
 ```
