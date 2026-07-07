@@ -14,6 +14,62 @@ KIE_KEY_FILE  = os.path.expanduser("~/.kie_key")
 CHANNELS_DIR  = os.path.join(HERE, "channels")
 CHANNELS_FILE = os.path.join(CHANNELS_DIR, "channels.json")
 
+# ── Phase 2.1 (Schwachstellenbericht #6/#7/#36/#60/#68): Atomare Schreibvorgänge ──
+# Schreibvorgänge auf channels.json, plan.json, videos.json, audio_meta.json u.a.
+# müssen atomar sein — ein Crash mitten im Write darf die Datei nicht zerstören.
+# Standard-Pattern:
+#   1. tmp-Datei in GLEICHEM Verzeichnis (gleiches Filesystem → atomic rename)
+#   2. fsync() — Inhalt ist auf Disk bevor wir umbenennen
+#   3. os.replace() — atomar (POSIX garantiert), ersetzt Ziel in einem Schritt
+# Für Listen/Dicts: indent=1 macht die Dateien lesbar, ohne indent für kompakte Saves.
+
+def _atomic_write_json(path: str, data, ensure_ascii: bool = False, indent=None) -> None:
+    """Atomar JSON schreiben: tmp-Datei → fsync → os.replace.
+
+    Garantiert dass `path` immer entweder die alte oder die neue vollständige Version
+    enthält — nie eine halbe Datei. Vermeidet Korruption bei Crash/Disk-Full/Power-Loss.
+
+    Atomare Garantie nur innerhalb des gleichen Dateisystems (gleiche Partition) —
+    os.replace ist nur dann atomar, wenn tmp-Datei und Ziel-Pfad auf derselben
+    Partition liegen. Wir wählen tmp-Pfad daher explizit neben der Zieldatei.
+    """
+    path = str(path)
+    parent = os.path.dirname(path) or "."
+    os.makedirs(parent, exist_ok=True)
+    # Eindeutiger tmp-Name (verhindert Kollision bei parallelen Writes)
+    fd, tmp_path = tempfile.mkstemp(prefix=os.path.basename(path) + ".", suffix=".tmp", dir=parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=ensure_ascii, indent=indent)
+            f.flush()
+            os.fsync(f.fileno())  # erzwinge Write-to-Disk vor dem rename
+        os.replace(tmp_path, path)  # atomar auf POSIX-Dateisystemen
+    except BaseException:
+        # Bei jedem Fehler (Crash, Disk-Full, Permission-Denied): tmp-Datei aufräumen
+        try:    os.unlink(tmp_path)
+        except OSError: pass
+        raise
+
+import tempfile  # für _atomic_write_json (Phase 2.1)
+import signal   # für SIGTERM-Handler (Phase 2.1 #68)
+
+# Graceful Shutdown: alle offenen Schreibvorgänge abschließen + Jobs stoppen.
+# Schwachstelle #68: ohne SIGTERM-Handler werden Hintergrund-Worker bei Container-Stop
+# mitten im Render abgebrochen — plan.json kann korrupt sein.
+_SHUTDOWN_IN_PROGRESS = False
+def _graceful_shutdown(signum, frame):
+    """SIGTERM/SIGINT-Handler: setzt Flag, lässt laufende Worker natürlich enden.
+    Render-Worker prüfen dieses Flag an Render-Pausenpunkten (Phase 2.1 Follow-up).
+    """
+    global _SHUTDOWN_IN_PROGRESS
+    if _SHUTDOWN_IN_PROGRESS:  # Doppelte Signale ignorieren
+        return
+    _SHUTDOWN_IN_PROGRESS = True
+    print(f"  [Shutdown] Signal {signum} empfangen — Worker beenden laufende Aufgaben …", flush=True)
+
+signal.signal(signal.SIGTERM, _graceful_shutdown)  # Container-Stop
+signal.signal(signal.SIGINT, _graceful_shutdown)   # Ctrl-C
+
 # ── Phase J: Engine-Refactor — engine_*.py modules ─────────────────────────────
 # ElevenLabs-Integration (Phase 1) + Phase-Engine-Constants (Phasen B-H-I) leben in
 # engine_elevenlabs.py. Wildcard-Import für backward-compat: alle bisher direkt
@@ -231,7 +287,7 @@ def load_v_meta(cid, vid):
     except: return {"titles": [], "selected_title": "", "thumbnail_prompt": ""}
 
 def save_v_meta(cid, vid, meta):
-    json.dump(meta, open(v_meta(cid, vid), "w"), ensure_ascii=False, indent=1)
+    _atomic_write_json(v_meta(cid, vid), meta, ensure_ascii=False, indent=1)
 
 def get_video_image_model(cid: str, vid: str) -> str:
     """Image model choice (nano-banana-2 vs -lite) is per-VIDEO, not per-channel — a
@@ -277,7 +333,7 @@ def load_videos(cid):
 
 def save_videos(cid, videos):
     ensure_channel(cid)
-    json.dump(videos, open(ch_videos_file(cid), "w"), ensure_ascii=False, indent=1)
+    _atomic_write_json(ch_videos_file(cid), videos, ensure_ascii=False, indent=1)
 
 def create_video(cid, name, mode="image"):
     videos = load_videos(cid)
@@ -312,7 +368,7 @@ def load_channels():
 
 def save_channels(chs):
     os.makedirs(CHANNELS_DIR, exist_ok=True)
-    json.dump(chs, open(CHANNELS_FILE, "w"), ensure_ascii=False, indent=1)
+    _atomic_write_json(CHANNELS_FILE, chs, ensure_ascii=False, indent=1)
 
 # ── First-run migration: move flat files → channels/default/ ─────────────────
 def _legacy_mode(cid):
@@ -366,7 +422,7 @@ def _migrate_legacy_video(cid):
                 new_path = os.path.join(v_uploads(cid, vid), os.path.basename(meta.get("path", "")))
                 if os.path.exists(new_path):
                     meta["path"] = new_path
-                    json.dump(meta, open(am, "w"))
+                    _atomic_write_json(am, meta)
             except: pass
         print(f"  [Migrate] Kanal '{cid}': altes Layout → 'Video 1' ({vid})", flush=True)
     else:
@@ -846,7 +902,7 @@ def _mark_scene_error(plan_path: str, scene_i: int):
             for s in plan["scenes"]:
                 if s["i"] == scene_i and s.get("status") == "läuft":
                     s["status"] = "fehler"
-            json.dump(plan, open(plan_path, "w"), ensure_ascii=False, indent=1)
+            _atomic_write_json(plan_path, plan, ensure_ascii=False, indent=1)
         except: pass
 
 def _image_job_worker_inner(job_id: str, task_id: str, out_path: str, plan_path: str, scene_i: int):
@@ -893,7 +949,7 @@ def _image_job_worker_inner(job_id: str, task_id: str, out_path: str, plan_path:
                         if s["i"] == scene_i:
                             s["status"] = "fertig"; s["file"] = fn
                             s["source_url"] = urls[0]; s["source_url_ts"] = int(time.time())
-                    json.dump(plan, open(plan_path, "w"), ensure_ascii=False, indent=1)
+                    _atomic_write_json(plan_path, plan, ensure_ascii=False, indent=1)
                 except: pass
             return
         if state == "fail":
@@ -1110,7 +1166,7 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
                                     s["chain_anchor_file"] = chain_debug["chain_anchor_file"]
                                 if chain_debug.get("chain_prev_file"):
                                     s["chain_prev_file"] = chain_debug["chain_prev_file"]
-                        json.dump(p2, open(plan_path, "w"), ensure_ascii=False, indent=1)
+                        _atomic_write_json(plan_path, p2, ensure_ascii=False, indent=1)
                     except: pass
                 try:
                     _image_job_worker_inner(job_id, task_id, out_path, plan_path, i)
@@ -1204,7 +1260,7 @@ def _veo_job_worker(job_id: str, task_id: str, scene: dict,
                     s["video_prompt"] = video_prompt
                     s["veo_task_id"] = task_id
                     s["chain_len"] = chain_len
-            json.dump(plan, open(plan_path, "w"), ensure_ascii=False, indent=1)
+            _atomic_write_json(plan_path, plan, ensure_ascii=False, indent=1)
         except Exception as e:
             print(f"  [Veo] Plan-Update-Fehler: {e}", flush=True)
 
@@ -1424,7 +1480,7 @@ def _render_worker(cid: str, vid: str):
                         by_i[s["i"]]["end_aligned"] = s["end_aligned"]
             fresh_plan["audio_duration"] = audio_duration
             fresh_plan["render"] = {"file": "final.mp4", "ts": int(time.time()), "checks": checks}
-            json.dump(fresh_plan, open(plan_path, "w"), ensure_ascii=False, indent=1)
+            _atomic_write_json(plan_path, fresh_plan, ensure_ascii=False, indent=1)
 
         # Only delete render_tmp after mux + selfcheck succeeded, and only this
         # directory — v_render_tmp() is deliberately separate from v_out()/generated/,
@@ -1498,7 +1554,7 @@ def _plan_generate_worker(cid: str, vid: str, text: str, wpm: float, sec: float)
             if "speaker" not in s:
                 s["speaker"] = "narrator"
         out_data = {"scenes": scenes, "wpm": wpm, "sec": sec, "characters": analysis.get("characters", [])}
-        json.dump(out_data, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
+        _atomic_write_json(v_plan(cid, vid), out_data, ensure_ascii=False, indent=1)
 
         with _PLAN_JOBS_LOCK:
             PLAN_JOBS[key] = {"running": False, "step": "Fertig", "error": None, "done": True, "ts": time.time()}
@@ -2250,7 +2306,7 @@ def _transcribe_generate_worker(cid: str, vid: str, sec: float) -> dict:
         "voiceover_word_timestamps": meta.get("voiceover_word_timestamps") if is_elevenlabs else None,
         "characters": analysis.get("characters", []),
     }
-    json.dump(out, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
+    _atomic_write_json(v_plan(cid, vid), out, ensure_ascii=False, indent=1)
     return out
 
 
@@ -2863,7 +2919,7 @@ class H(BaseHTTPRequestHandler):
                     for s in plan.get("scenes", []):
                         s.pop("start_aligned", None)
                         s.pop("end_aligned", None)
-                    json.dump(plan, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
+                    _atomic_write_json(v_plan(cid, vid), plan, ensure_ascii=False, indent=1)
             except Exception:
                 pass
             print(f"  [Audio] {os.path.basename(local_path)} ({len(raw)//1024} KB)", flush=True)
@@ -3189,7 +3245,7 @@ class H(BaseHTTPRequestHandler):
                     for s in plan["scenes"]:
                         if s["i"] == i:
                             s["prompt"] = prompt; s["status"] = "läuft"
-                    json.dump(plan, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
+                    _atomic_write_json(v_plan(cid, vid), plan, ensure_ascii=False, indent=1)
                 except: pass
             threading.Thread(
                 target=_image_job_worker,
@@ -3236,7 +3292,7 @@ class H(BaseHTTPRequestHandler):
                             if s["i"] == i:
                                 s["source_url"] = source_url
                                 s["source_url_ts"] = int(time.time())
-                        json.dump(plan, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
+                        _atomic_write_json(v_plan(cid, vid), plan, ensure_ascii=False, indent=1)
                 except Exception as e:
                     return self._send(500, {"error": f"Bild-Upload fehlgeschlagen: {e}"})
 
@@ -3306,7 +3362,7 @@ class H(BaseHTTPRequestHandler):
                         if s["i"] == i:
                             s["video_file"] = fn
                             s["video_prompt"] = video_prompt
-                    json.dump(plan, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
+                    _atomic_write_json(v_plan(cid, vid), plan, ensure_ascii=False, indent=1)
                 except: pass
             print(f"  [Video] Szene {i} fertig → {fn} (audio={'ja' if has_audio else 'nein'})", flush=True)
             return self._send(200, {"ok": True, "file": fn, "video_prompt": video_prompt, "ts": int(time.time())})

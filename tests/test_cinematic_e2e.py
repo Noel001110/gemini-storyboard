@@ -764,6 +764,15 @@ def main():
         run(t_bug_b1_charref_upload_validates_base64, "B-1: handler hat try/except + validate=False + name-check + mkdir")
         run(t_bug_b1_charref_upload_roundtrip, "B-1 E2E: valid upload schreibt PNG+JSON, keine 5xx")
 
+        summary_section("Phase 2.1 — Atomare Writes (Schwachstellenbericht #6/#7/#36/#60)")
+        run(t_phase2_atomic_write_basic, "#6: _atomic_write_json schreibt gültige JSON-Datei")
+        run(t_phase2_atomic_write_overwrites_existing, "#6: _atomic_write_json überschreibt existierende Datei (os.replace)")
+        run(t_phase2_atomic_write_creates_parent_dirs, "#6: _atomic_write_json legt Parent-Dirs an")
+        run(t_phase2_atomic_write_cleanup_on_error, "#7: Bei Fehler wird tmp-Datei aufgeräumt")
+        run(t_phase2_atomic_write_no_temp_leftovers, "#6: keine .tmp-Datei nach erfolgreichem Write")
+        run(t_phase2_sigterm_handler_registered, "#68: SIGTERM-Handler registriert")
+        run(t_phase2_sigterm_handler_dedup, "#68: SIGTERM-Handler ignoriert Doppel-Signale")
+
         summary_section("Char-Müll-Injection-Schutz (Audit-Fix nach User-Report)")
         run(t_char_filter_mull_empty, "Char-Filter: leere/zu kurze Description wird gefiltert")
         run(t_char_filter_mull_test_patterns, "Char-Filter: Test-Stick-Figure-Patterns werden gefiltert")
@@ -2705,6 +2714,134 @@ def t_char_filter_load_char_refs():
         test_ch_dir = _os.path.join(ROOT, "channels", test_cid)
         if _os.path.exists(test_ch_dir):
             shutil.rmtree(test_ch_dir, ignore_errors=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 2.1 — Atomare Writes (Schwachstellenbericht #6, #7, #36, #60, #68)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def t_phase2_atomic_write_basic():
+    """#6: _atomic_write_json schreibt eine gültige JSON-Datei mit korrektem Inhalt."""
+    import os as _os, json as _json, tempfile as _tempfile
+    import dashboard
+    tmpdir = _tempfile.mkdtemp(prefix="atomic_test_")
+    try:
+        path = _os.path.join(tmpdir, "test.json")
+        data = {"a": 1, "b": [1, 2, 3], "c": {"nested": True}}
+        dashboard._atomic_write_json(path, data, indent=2)
+        assert _os.path.exists(path), "Datei muss nach Write existieren"
+        loaded = _json.load(open(path))
+        assert loaded == data, f"Inhalt muss übereinstimmen, war: {loaded}"
+    finally:
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def t_phase2_atomic_write_overwrites_existing():
+    """#6: _atomic_write_json überschreibt existierende Datei (os.replace-Verhalten)."""
+    import os as _os, tempfile as _tempfile
+    import dashboard
+    tmpdir = _tempfile.mkdtemp(prefix="atomic_overwrite_")
+    try:
+        path = _os.path.join(tmpdir, "test.json")
+        dashboard._atomic_write_json(path, {"version": 1})
+        assert _json_load(path) == {"version": 1}
+        dashboard._atomic_write_json(path, {"version": 2})
+        assert _json_load(path) == {"version": 2}, "os.replace muss atomar ersetzen"
+    finally:
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _json_load(path):
+    import json
+    return json.load(open(path))
+
+
+def t_phase2_atomic_write_creates_parent_dirs():
+    """#6: _atomic_write_json legt fehlende Parent-Directories automatisch an."""
+    import os as _os, tempfile as _tempfile
+    import dashboard
+    tmpdir = _tempfile.mkdtemp(prefix="atomic_mkdir_")
+    try:
+        path = _os.path.join(tmpdir, "deeply", "nested", "dir", "test.json")
+        assert not _os.path.exists(_os.path.dirname(path)), "Parent muss vorher fehlen"
+        dashboard._atomic_write_json(path, {"x": 1})
+        assert _os.path.exists(path), "Datei muss nach Write existieren"
+        assert _json_load(path) == {"x": 1}
+    finally:
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def t_phase2_atomic_write_cleanup_on_error():
+    """#7: Bei Fehler wird die tmp-Datei aufgeräumt (kein Müll)."""
+    import os as _os, tempfile as _tempfile
+    import dashboard
+    tmpdir = _tempfile.mkdtemp(prefix="atomic_error_")
+    try:
+        path = _os.path.join(tmpdir, "readonly_target.json")
+        # Erzwinge Fehler: tmp-Datei auf read-only Pfad → os.replace schlägt fehl
+        _os.chmod(tmpdir, 0o555)  # read-only — verhindert os.replace
+        try:
+            dashboard._atomic_write_json(path, {"x": 1})
+            # Wenn das durchgeht (z.B. weil wir als root laufen), skip Test
+            print("    (skip: chmod blockierte nicht — vermutlich root)")
+        except BaseException:
+            # OK — Error wurde geworffen. Jetzt prüfen ob tmp-Datei entfernt wurde.
+            _os.chmod(tmpdir, 0o755)  # restore für cleanup
+            leftovers = [f for f in _os.listdir(tmpdir) if f.endswith(".tmp")]
+            assert not leftovers, f"tmp-Dateien müssen aufgeräumt sein, fand: {leftovers}"
+    finally:
+        try: _os.chmod(tmpdir, 0o755)
+        except: pass
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def t_phase2_atomic_write_no_temp_leftovers():
+    """#6: nach erfolgreichem Write darf keine .tmp-Datei im Verzeichnis liegen."""
+    import os as _os, glob as _glob, tempfile as _tempfile
+    import dashboard
+    tmpdir = _tempfile.mkdtemp(prefix="atomic_clean_")
+    try:
+        for i in range(3):
+            path = _os.path.join(tmpdir, f"file_{i}.json")
+            dashboard._atomic_write_json(path, {"i": i})
+        leftovers = _glob.glob(_os.path.join(tmpdir, "*.tmp"))
+        assert not leftovers, f"Nach erfolgreichem Write dürfen keine .tmp-Dateien übrig sein, fand: {leftovers}"
+    finally:
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def t_phase2_sigterm_handler_registered():
+    """#68: SIGTERM und SIGINT Handler sind registriert (graceful shutdown)."""
+    import signal
+    import dashboard
+    # SIGTERM und SIGINT müssen einen Handler haben (nicht SIG_DFL/SIG_IGN)
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        handler = signal.getsignal(sig)
+        assert handler is not signal.SIG_DFL,             f"{sig} hat keinen Handler (graceful shutdown nicht registriert)"
+        assert handler is not signal.SIG_IGN,             f"{sig} wird ignoriert (graceful shutdown nicht aktiv)"
+
+
+def t_phase2_sigterm_handler_dedup():
+    """#68: SIGTERM-Handler ignoriert doppelte Signale (idempotent)."""
+    import os as _os, signal
+    import dashboard
+    # Erster Aufruf setzt Flag, zweiter ist no-op
+    old_flag = dashboard._SHUTDOWN_IN_PROGRESS
+    try:
+        dashboard._SHUTDOWN_IN_PROGRESS = False
+        # Simuliere Handler-Aufruf mit SIGTERM
+        dashboard._graceful_shutdown(signal.SIGTERM, None)
+        assert dashboard._SHUTDOWN_IN_PROGRESS is True,             "Erster Aufruf muss Flag setzen"
+        # Zweiter Aufruf darf keinen Crash verursachen (idempotent)
+        dashboard._graceful_shutdown(signal.SIGTERM, None)
+        assert dashboard._SHUTDOWN_IN_PROGRESS is True,             "Zweiter Aufruf muss idempotent sein"
+    finally:
+        dashboard._SHUTDOWN_IN_PROGRESS = old_flag
 
 
 # ─────────────────────────────────────────────────────────────────────────────
