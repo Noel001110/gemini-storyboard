@@ -513,12 +513,18 @@
 
       <div class="divider">oder</div>
 
-      <div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Option C · ElevenLabs Voice direkt generieren (Phase 1)</div>
+      <div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Option C · TTS-Provider (ElevenLabs / MiniMax)</div>
       <div class="row" style="align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+        <label style="flex:0 0 200px">Provider
+          <select id="ttsProviderSelect" onchange="onTtsProviderChange()" style="width:100%">
+            <option value="elevenlabs">ElevenLabs</option>
+            <option value="minimax">MiniMax Speech (2.6 HD)</option>
+          </select>
+        </label>
         <label style="flex:1;min-width:240px">Voice auswählen
           <select id="elVoiceSelect" style="width:100%"><option value="">– Voices werden geladen … –</option></select>
         </label>
-        <button onclick="loadElevenLabsVoices()" class="sm ghost" title="Voice-Liste neu laden">↻</button>
+        <button onclick="loadTtsVoices()" class="sm ghost" title="Voice-Liste neu laden">↻</button>
       </div>
       <div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:6px">
         <label style="flex:1;min-width:160px">Stability <span id="elStabVal" class="hint">0.50</span><input type="range" id="elStab" min="0" max="1" step="0.05" value="0.5" style="width:100%"></label>
@@ -1496,38 +1502,74 @@ async function transcribeAudio(){
 // reports the ElevenLabs-specific state, and /api/plan_status reports the scene-plan
 // worker running next (mirroring how Option A drops into the same _transcribe_generate_worker).
 let _elVoices = [];
-async function loadElevenLabsVoices(){
+// Phase 34 — Provider-abstrakte Voice-Loader-Funktion. Dispatched auf Basis
+// der TTS-Provider-Auswahl im #ttsProviderSelect-Dropdown. Wird sowohl beim
+// Initial-Load als auch beim Provider-Wechsel aufgerufen.
+async function loadTtsVoices(){
+  // Beim Initial-Load: Provider aus Backend-Settings holen wenn Dropdown noch
+  // nicht gesetzt ist. Verhindert dass der User "ElevenLabs" sieht obwohl
+  // voice_settings.json:tts_provider = "minimax" ist.
+  const provSel = $('ttsProviderSelect');
+  if (provSel && !provSel.value) {
+    try {
+      const cur = await ch_get('/api/tts_provider');
+      if (cur && cur.tts_provider) provSel.value = cur.tts_provider;
+    } catch (_) {}
+  }
+  const provider = provSel ? provSel.value : 'elevenlabs';
   const sel = $('elVoiceSelect');
   if(!sel) return;
   sel.innerHTML = '<option value="">– lade Voices … –</option>';
-  const r = await ch_get('/api/elevenlabs_voices').catch(() => ({voices:[], error:'Netzwerkfehler'}));
+  const endpoint = provider === 'minimax' ? '/api/minimax_voices' : '/api/elevenlabs_voices';
+  const r = await ch_get(endpoint).catch(() => ({voices:[], error:'Netzwerkfehler'}));
   _elVoices = (r && r.voices) || [];
   sel.innerHTML = '';
   if(!_elVoices.length){
-    sel.innerHTML = `<option value="">– keine Voices verfügbar (${(r&&r.error)||'API-Key prüfen'}) –</option>`;
+    const errMsg = provider === 'minimax'
+      ? 'MiniMax-Key in ~/.minimax_key oder $MINIMAX_API_KEY fehlt'
+      : 'ElevenLabs-Key in ~/.elevenlabs_key fehlt';
+    sel.innerHTML = `<option value="">– keine Voices verfügbar (${(r&&r.error)||errMsg}) –</option>`;
     return;
   }
   sel.innerHTML = '<option value="">– Voice wählen –</option>' + _elVoices.map(v =>
     `<option value="${escHtml(v.voice_id)}">${escHtml(v.name || v.voice_id)}${escHtml(v.category?' ('+v.category+')':'')}</option>`).join('');
-  // Sync settings dropdowns: the helper persists voice_id via the dropdown change handler
+  // Current voice_id vom aktuellen Provider aus den settings holen
   const cur = $('elVoiceSelect');
   const settings = await ch_get('/api/elevenlabs_settings').catch(() => null);
-  if(settings && settings.voice_id){
+  if(settings && settings.tts_provider === provider && settings.voice_id){
     cur.value = settings.voice_id;
   }
   $('elVoiceSelect').onchange = async () => {
-    await ch_api('/api/elevenlabs_settings', {
-      voice_id: $('elVoiceSelect').value,
-      model_id: 'eleven_multilingual_v2',
-      stability: +$('elStab').value,
-      similarity_boost: +$('elSim').value,
-      style: +$('elStyle').value,
-      use_speaker_boost: $('elBoost').value === 'true',
-      output_format: 'mp3_44100_128',
-    });
+    const v = $('elVoiceSelect').value;
+    if(provider === 'elevenlabs'){
+      await ch_api('/api/elevenlabs_settings', {
+        voice_id: v,
+        model_id: 'eleven_multilingual_v2',
+        stability: +$('elStab').value,
+        similarity_boost: +$('elSim').value,
+        style: +$('elStyle').value,
+        use_speaker_boost: $('elBoost').value === 'true',
+        output_format: 'mp3_44100_128',
+        tts_provider: 'elevenlabs',
+      });
+    } else {
+      await ch_api('/api/elevenlabs_settings', {
+        voice_id: v,
+        model_id: 'minimax-speech-2.6-hd',
+        tts_provider: 'minimax',
+      });
+    }
   };
   _elWireSliders();
   _elRefreshGenBtn();
+}
+
+// Phase 34 — Provider-Wechsel-Handler. Setzt tts_provider in den settings,
+// lädt die Voice-Liste neu, und schreibt Provider-spezifische Default-Settings.
+async function onTtsProviderChange(){
+  const provider = $('ttsProviderSelect').value;
+  await ch_api('/api/tts_provider', { tts_provider: provider });
+  await loadTtsVoices();
 }
 
 function _elWireSliders(){
@@ -1685,7 +1727,7 @@ const _origSwitchChannel = window.switchChannel;
 if(_origSwitchChannel){
   window.switchChannel = async function(id, name){
     await _origSwitchChannel(id, name);
-    try { await loadElevenLabsVoices(); } catch(_) {}
+    try { await loadTtsVoices(); } catch(_) {}
   };
 }
 

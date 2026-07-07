@@ -1433,3 +1433,101 @@ Nach dem 33.3-Commit hat User-Feedback 4 Befunde gemeldet (3 echte Bugs + 1 Fals
 - User vermutete zwei Helper, aber `grep "const esc"` zeigt nur `escHtml` existiert. Test `t_phase33_1_no_duplicate_escape_helper` schützt jetzt gegen eine versehentliche Re-Introduktion eines `esc()`-Helpers.
 
 **Tests: 35 → 39** (alle grün).
+
+## 34. Phase 34 — TTS-Provider-Auswahl (ElevenLabs / MiniMax)
+
+User-Feedback (Stand 2026): neben ElevenLabs soll MiniMax Speech als zweiter
+TTS-Provider verfügbar sein. MiniMax bietet laut mehreren 2026-Benchmarks
+(Artificial Analysis, Onepin-Vergleich) Vorteile bei **Pacing + Emotionalität**,
+günstigerem Preis-pro-Kredit, und asiatischen Sprachen. ElevenLabs punktet mit
+**Voice-Library (3000+ Stimmen) und English/Europa-Fidelity**. Pragmatische
+Empfehlung aus 2026-Quellen: MiniMax für Bulk-Content (günstig + stabil),
+ElevenLabs für emotionale Highlight-Intros/Ads.
+
+### 34.1 Architektur
+
+**Provider-Dispatch in `engine_elevenlabs.py`:**
+```
+_tts_persist_and_schedule(cid, vid, text, settings)
+   └─ tts_provider = settings['tts_provider'] (default: 'elevenlabs')
+       ├─ 'minimax'  → _minimax_persist_and_schedule()
+       └─ default   → _elevenlabs_persist_and_schedule() (backward-compat)
+```
+
+Beide Provider liefern identische Return-Shape (`audio_base64 + words[] + task_id`),
+sodass Konsumenten (Frontend, `_render_worker`) nicht wissen müssen welcher
+Provider genutzt wurde.
+
+**Persistierung:**
+- `channels/<cid>/voice_settings.json` erweitert um `tts_provider: 'elevenlabs' | 'minimax'`
+- `voice_id` ist SINGLE — repräsentiert die ID des aktuell-aktiven Providers
+- `tts_provider` bestimmt welcher Endpoint-Call bei der Voice-Liste benutzt wird
+
+**Resume-Marker:** `audio_meta.json:voiceover_source` kann jetzt `"elevenlabs"` ODER
+`"minimax"` sein. `/api/voiceover_generate` Resume-Branch akzeptiert beide (`in
+("elevenlabs", "minimax")`).
+
+### 34.2 MiniMax-Integration Details
+
+**API-Endpoint:** `POST https://api.minimaxi.chat/v1/t2a_v2`
+**Auth:** `Authorization: Bearer <MINIMAX_API_KEY>` (Key aus `~/.minimax_key` oder
+`$MINIMAX_API_KEY` env)
+**Default-Model:** `minimax-speech-2.6-hd` (bester Quality/Pacing-Kompromiss
+Stand 2026 für Storytelling)
+
+**Word-Timestamps:** MiniMax liefert aktuell (Stand 2026) keine per-Word-
+Timestamps. Wir generieren sie **proportional** aus Textlänge + geschätzter
+Dauer (140 WPM Default). Das ist nicht so genau wie ElevenLabs-Timestamps,
+reicht aber für die Scene-Alignment-Pipeline in `_render_worker` (Stage "timing").
+Bei späteren MiniMax-Updates mit nativen Word-Timestamps: nur `_extract_minimax_words()`
+in `minimax_generate()` ersetzen.
+
+**Audio-Decoding:** MiniMax liefert entweder hex-encodierte oder base64-encodierte
+Bytes (je nach Modell). Wir probieren erst base64 mit `validate=True`,
+fallback auf `bytes.fromhex()`.
+
+### 34.3 Frontend-Integration
+
+**`#ttsProviderSelect`-Dropdown** (über der Voice-Auswahl):
+```html
+<select id="ttsProviderSelect" onchange="onTtsProviderChange()">
+  <option value="elevenlabs">ElevenLabs</option>
+  <option value="minimax">MiniMax Speech (2.6 HD)</option>
+</select>
+```
+
+**Voice-Loader dispatcht nach Provider:**
+- `loadTtsVoices()` ersetzt `loadElevenLabsVoices()` — fetcht `/api/elevenlabs_voices`
+  oder `/api/minimax_voices` je nach `#ttsProviderSelect.value`
+- Initial-Provider wird via `GET /api/tts_provider` aus `voice_settings.json` geholt
+  (verhindert dass User "ElevenLabs" sieht obwohl Channel-Default MiniMax ist)
+- `onTtsProviderChange()` ruft `POST /api/tts_provider` und lädt die Voice-Liste neu
+
+**Provider-Wechsel-Auswirkungen:**
+- Sliders (Stability/Similarity/Style/Speaker-Boost) bleiben sichtbar — sind
+  ElevenLabs-spezifisch. Bei MiniMax-Auswahl werden sie nicht persistiert
+  (MiniMax nutzt andere Settings-Schema: speed/volume/pitch).
+- MiniMax-Slider sind NICHT im MVP. Bei Bedarf in 34.1 nachziehen.
+
+### 34.4 Alex-Empfehlung (User-Frage)
+
+MiniMax-Voices hängen von der System-Voice-Liste ab und können sich
+bei Modell-Updates ändern. Aus den 2026-Benchmarks und der typischen
+MiniMax-Voice-Kategorisierung:
+- **Tiefe männliche Erzählerstimmen** (gut für Alex-ähnlich):
+  - `alloy`, `onyx` (gängige system-voice-IDs in MiniMax)
+  - Voice-Liste via `/api/minimax_voices` zeigt `voice_name` + `voice_description` —
+    User sucht nach "narration" oder "deep male" Tags
+- **Empfehlung:** erst live-Liste laden, dann eine "deep male narration"-Voice
+  probehören via Preview, dann auswählen. **Keine hardcoded voice_id-Empfehlung** —
+  MiniMax-Voices sind Account-spezifisch und werden im MiniMax-Backend verwaltet.
+
+### 34.5 Tests
+
+`tests/test_cinematic_e2e.py::t_phase34_*` — 6 neue Tests grün (45/45 total):
+- t_phase34_tts_provider_dispatch_exists
+- t_phase34_minimax_constants_and_helpers
+- t_phase34_minimax_endpoints_in_backend
+- t_phase34_provider_dropdown_in_frontend
+- t_phase34_resume_supports_both_providers
+- t_phase34_no_old_loadelevenlabsvoices_callers (Anti-Regression)

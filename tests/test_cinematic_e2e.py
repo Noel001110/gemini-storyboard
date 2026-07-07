@@ -684,6 +684,14 @@ def main():
         run(t_phase33_1_esc_handler_no_leak, "33.3.1 Bug-3: ESC-Handler wird vor Re-Open entfernt")
         run(t_phase33_1_no_duplicate_escape_helper, "33.3.1 Bug-4: nur escHtml existiert (kein doppelter esc-Helper)")
 
+        summary_section("Phase 34: TTS-Provider-Auswahl (ElevenLabs / MiniMax)")
+        run(t_phase34_tts_provider_dispatch_exists, "34: _tts_persist_and_schedule dispatcher vorhanden")
+        run(t_phase34_minimax_constants_and_helpers, "34: MiniMax-Konstanten + _minimax_key + minimax_generate")
+        run(t_phase34_minimax_endpoints_in_backend, "34: Backend /api/minimax_voices + /api/tts_provider")
+        run(t_phase34_provider_dropdown_in_frontend, "34: Frontend #ttsProviderSelect + loadTtsVoices()")
+        run(t_phase34_resume_supports_both_providers, "34: Resume-Marker akzeptiert both elevenlabs + minimax")
+        run(t_phase34_no_old_loadelevenlabsvoices_callers, "34: keine alten loadElevenLabsVoices-Caller mehr")
+
         print(f"\n=== Result ===")
         print(f"  Passed: {PASSED}")
         print(f"  Failed: {FAILED}")
@@ -1073,6 +1081,104 @@ def t_phase33_1_no_duplicate_escape_helper():
     matches = _re.findall(r"\b(?:function|const)\s+esc\s*[(=]", html)
     assert len(matches) == 0, \
         f"33.3.1 Bug-4: zweite Escape-Helper gefunden — nur escHtml sollte existieren. matches={matches}"
+
+
+# ─── Phase 34 — TTS-Provider-Auswahl (ElevenLabs / MiniMax) ─────────────────
+
+def t_phase34_tts_provider_dispatch_exists():
+    """Phase 34: _tts_persist_and_schedule dispatcher entscheidet anhand von
+    tts_provider-Feld in den settings zwischen ElevenLabs und MiniMax. Die alte
+    _elevenlabs_persist_and_schedule bleibt als Provider-Default erhalten."""
+    py = open(os.path.join(ROOT, "engine_elevenlabs.py")).read()
+    assert "def _tts_persist_and_schedule" in py, \
+        "Phase 34 missing: _tts_persist_and_schedule dispatcher"
+    # Dispatch-Logik: tts_provider == "minimax" → MiniMax-Pfad, sonst ElevenLabs
+    assert 'tts_provider' in py, "Phase 34 missing: tts_provider dispatch check"
+    assert '_minimax_persist_and_schedule' in py, \
+        "Phase 34 missing: _minimax_persist_and_schedule für MiniMax-Pfad"
+
+def t_phase34_minimax_constants_and_helpers():
+    """Phase 34: MiniMax-Konstanten + _minimax_key() + minimax_generate() existieren.
+    Rückgabe-Shape identisch zu elevenlabs_generate() für provider-agnostic
+    Konsumenten."""
+    py = open(os.path.join(ROOT, "engine_elevenlabs.py")).read()
+    assert "MINIMAX_API" in py and 'https://api.minimaxi.chat/v1' in py, \
+        "Phase 34 missing: MiniMax API base URL"
+    assert "MINIMAX_DEFAULT_MODEL" in py and 'minimax-speech-2.6-hd' in py, \
+        "Phase 34 missing: MiniMax Default-Model (2.6 HD per ARCHITECTURE §34 Empfehlung)"
+    assert "def _minimax_key" in py, "Phase 34 missing: _minimax_key() helper"
+    assert "def minimax_generate" in py, "Phase 34 missing: minimax_generate() function"
+    # Identische Return-Shape zu elevenlabs_generate
+    assert py.count('"audio_base64"') >= 2, \
+        "Phase 34: minimax_generate muss audio_base64 + words zurückgeben (provider-shape-parity)"
+    assert py.count('"task_id"') >= 2, \
+        "Phase 34: minimax_generate muss task_id zurückgeben (provider-shape-parity)"
+
+def t_phase34_minimax_endpoints_in_backend():
+    """Phase 34: Backend exponiert /api/minimax_voices + /api/tts_provider.
+    GET tts_provider liest aus voice_settings.json, POST schreibt tts_provider dort."""
+    py = open(os.path.join(ROOT, "dashboard.py")).read()
+    assert '"/api/minimax_voices"' in py, \
+        "Phase 34 missing: backend /api/minimax_voices endpoint"
+    assert '"/api/tts_provider"' in py, \
+        "Phase 34 missing: backend /api/tts_provider endpoint"
+    # MiniMax-voice-Endpoint ruft get_voice auf mit Bearer-Auth
+    assert 'get_voice' in py or '/v1/get_voice' in py or 'voice_list' in py, \
+        "Phase 34 missing: MiniMax /v1/get_voice (oder kompatibler) Endpoint-Call"
+    # Provider-Validierung in POST
+    assert '"minimax"' in py and '"elevenlabs"' in py, \
+        "Phase 34: tts_provider-Werte müssen 'minimax' und 'elevenlabs' sein"
+
+def t_phase34_provider_dropdown_in_frontend():
+    """Phase 34: Frontend-Dropdown #ttsProviderSelect + dynamische Voice-Liste.
+    loadTtsVoices() dispatcht je nach Provider auf /api/elevenlabs_voices oder
+    /api/minimax_voices. onTtsProviderChange() persistiert den Provider-Wechsel."""
+    html = open(os.path.join(ROOT, "dashboard.html")).read()
+    assert 'id="ttsProviderSelect"' in html, \
+        "Phase 34 missing: #ttsProviderSelect dropdown"
+    assert 'function loadTtsVoices' in html, \
+        "Phase 34 missing: loadTtsVoices() function"
+    assert 'function onTtsProviderChange' in html, \
+        "Phase 34 missing: onTtsProviderChange() function"
+    # Dropdown-Optionen
+    assert '<option value="elevenlabs">' in html, \
+        "Phase 34 missing: ElevenLabs-Dropdown-Option"
+    assert '<option value="minimax">' in html, \
+        "Phase 34 missing: MiniMax-Dropdown-Option"
+    # Initial-Provider wird aus /api/tts_provider gefetched
+    assert "ch_get('/api/tts_provider')" in html, \
+        "Phase 34 missing: Initial-Provider-Fetch aus Backend"
+
+def t_phase34_resume_supports_both_providers():
+    """Phase 34: Resume-Marker in /api/voiceover_generate akzeptiert BEIDE
+    Provider (elevenlabs + minimax). Wenn User zwischen Providern wechselt und
+    existierende audio_meta.json noch den alten Provider hat, soll der Resume
+    sauber funktionieren ohne den falschen Provider-Pfad zu nehmen."""
+    py = open(os.path.join(ROOT, "dashboard.py")).read()
+    # Resume-Check muss BEIDE Provider in einem Tuple-Containment prüfen
+    assert 'in ("elevenlabs", "minimax")' in py, \
+        "Phase 34: Resume-Marker muss both Providers in einem Tuple-Containment prüfen"
+    # Anti-Regression: alter Check "voiceover_source == elevenlabs" (Singular) im Resume-Pfad
+    # darf nicht mehr exklusiv ElevenLabs-only filtern.
+    import re as _re
+    # Suche das Resume-Resume-Block-Kontext
+    resume_idx = py.find('if (meta.get("voiceover_source")')
+    assert resume_idx > 0, "Phase 34: Resume-Check nicht gefunden"
+    block = py[resume_idx:resume_idx + 300]
+    assert '"minimax"' in block, \
+        "Phase 34: Resume-Block muss 'minimax' als zulässigen Provider haben"
+
+def t_phase34_no_old_loadelevenlabsvoices_callers():
+    """Phase 34: Anti-Regression — die alte loadElevenLabsVoices() darf nirgendwo
+    mehr aufgerufen werden (außer in loadTtsVoices selbst nicht). Sie ist durch
+    die provider-abstrakte loadTtsVoices() ersetzt."""
+    html = open(os.path.join(ROOT, "dashboard.html")).read()
+    # Definition darf noch da sein (kein Hard-Removal nötig) aber Calls müssen weg.
+    import re as _re
+    # Suche alle loadElevenLabsVoices( Vorkommen (nicht loadTtsVoices)
+    matches = _re.findall(r"\bloadElevenLabsVoices\b", html)
+    assert len(matches) == 0, \
+        f"Phase 34 anti-regression: loadElevenLabsVoices() darf NICHT mehr vorkommen (gefunden: {len(matches)} mal)"
 
 
 if __name__ == "__main__":

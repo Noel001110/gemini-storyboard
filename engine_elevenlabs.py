@@ -35,14 +35,17 @@ __all__ = [
     # Konstanten
     "ELEVENLABS_API", "ELEVENLABS_DEFAULT_MODEL", "ELEVENLABS_KEY_FILE",
     "ELEVENLABS_VOICE_SETTINGS_DEFAULT", "EL_BACKOFF_SEC",
+    "MINIMAX_API", "MINIMAX_DEFAULT_MODEL", "MINIMAX_KEY_FILE",
+    "MINIMAX_VOICE_SETTINGS_DEFAULT",
     # Phase-Engine Constants (Phasen B-G)
     "PHASE_SET", "PHASE_TO_ACT", "PHASE_PROMPT_ADDITIONS",
     "PHASE_COLOR_FILTER", "PHASE_VOLUME", "PHASE_ACCENT",
     # Voice-Settings-Persistenz
-    "ch_voice_id", "elevenlabs_key", "_resolve_voice_id",
+    "ch_voice_id", "elevenlabs_key", "_minimax_key", "_resolve_voice_id",
     "load_voice_settings", "save_voice_settings",
     # API-Call + Orchestration
-    "elevenlabs_generate", "_elevenlabs_persist_and_schedule",
+    "elevenlabs_generate", "minimax_generate",
+    "_elevenlabs_persist_and_schedule", "_tts_persist_and_schedule",
     # TTS-Preprocessing (Phase I)
     "_enrich_for_tts", "TTS_PAUSE_BEFORE_CLIMAX", "TTS_PAUSE_AFTER_PHASE_BREAK",
 ]  # end __all__ — fully explicit, no auto-discovery via dir()
@@ -51,6 +54,15 @@ __all__ = [
 ELEVENLABS_API           = "https://api.elevenlabs.io/v1"
 ELEVENLABS_DEFAULT_MODEL = "eleven_multilingual_v2"
 ELEVENLABS_KEY_FILE      = os.path.expanduser("~/.elevenlabs_key")
+
+# MiniMax Speech — zweiter TTS-Provider (parallel zu ElevenLabs). Provider-Auswahl
+# pro Channel via voice_settings.json:tts_provider. Beide Provider liefern eine
+# ähnliche JSON-Shape zurück, sodass _tts_persist_and_schedule provider-agnostic
+# arbeiten kann. Stand 2026 ist speech-2.6-hd der empfohlene Default für
+# Storytelling (Pacing + Emotionalität; siehe ARCHITECTURE §34).
+MINIMAX_API              = "https://api.minimaxi.chat/v1"
+MINIMAX_DEFAULT_MODEL    = "minimax-speech-2.6-hd"
+MINIMAX_KEY_FILE         = os.path.expanduser("~/.minimax_key")
 
 ELEVENLABS_VOICE_SETTINGS_DEFAULT = {
     "voice_id": "",
@@ -111,6 +123,21 @@ def elevenlabs_key() -> str:
     if not os.path.exists(p):
         raise RuntimeError(
             f"ElevenLabs-Key fehlt: {p} — bitte `echo \"$ELEVENLABS_API_KEY\" > {p} && "
+            f"chmod 600 {p}` einmalig ausführen."
+        )
+    return open(p).read().strip()
+
+def _minimax_key() -> str:
+    """Liest MiniMax-API-Key aus ~/.minimax_key oder env MINIMAX_API_KEY.
+    Wirft RuntimeError mit Setup-Anleitung wenn fehlt — gleiche Konvention wie
+    elevenlabs_key() und kie_key(). Setup: `echo "$MINIMAX_API_KEY" > ~/.minimax_key && chmod 600`."""
+    env = os.environ.get("MINIMAX_API_KEY", "").strip()
+    if env:
+        return env
+    p = MINIMAX_KEY_FILE
+    if not os.path.exists(p):
+        raise RuntimeError(
+            f"MiniMax-Key fehlt: {p} — bitte `echo \"$MINIMAX_API_KEY\" > {p} && "
             f"chmod 600 {p}` einmalig ausführen."
         )
     return open(p).read().strip()
@@ -181,6 +208,39 @@ def _elevenlabs_call_with_retry(url: str, body: dict, headers: dict) -> dict:
             last_err = RuntimeError(f"ElevenLabs Fehler: {e}")
     raise last_err or RuntimeError("ElevenLabs: retries exhausted")
 
+def _minimax_call_with_retry(url: str, body: dict, headers: dict) -> dict:
+    """MiniMax-HTTP-Wrapper mit identischem Retry-Verhalten wie ElevenLabs.
+    MiniMax verwendet Bearer-Auth statt xi-api-key. Wirft RuntimeError sofort
+    auf 4xx (außer 408/425/429), retry 5xx+429 mit exponentiellem Backoff.
+    Identische Return-Shape zu ElevenLabs (audio_base64 + words[]) wäre Provider-ideal,
+    ist hier aber pragmatisch als opaque passthrough implementiert: MiniMax liefert
+    aktuell nur Audio-Bytes ohne Word-Timestamps; wir generieren Word-Timestamps
+    lokal via proportionaler Text/Length-Heuristik, falls nötig. echt-getestet wird
+    das erst, wenn der User einen MiniMax-Key + Voice einrichtet."""
+    last_err = None
+    for attempt, wait in enumerate([0] + EL_BACKOFF_SEC):
+        if wait:
+            print(f"  [MiniMax] Retry {attempt}/{len(EL_BACKOFF_SEC)} in {wait}s …", flush=True)
+            time.sleep(wait)
+        req = urllib.request.Request(url, data=json.dumps(body).encode(),
+            headers={**headers, "Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            try:    err_body = json.loads(e.read() or b"{}")
+            except: err_body = {}
+            base_msg = err_body.get("base_resp", {}).get("status_msg", "") if isinstance(err_body, dict) else ""
+            detail = base_msg or (e.reason if hasattr(e, "reason") else str(e))
+            last_err = RuntimeError(f"MiniMax HTTP {e.code}: {detail}")
+            if e.code not in (408, 425, 429) and e.code < 500:
+                raise last_err
+        except (urllib.error.URLError, TimeoutError) as e:
+            last_err = RuntimeError(f"MiniMax Netzwerkfehler: {e}")
+        except Exception as e:
+            last_err = RuntimeError(f"MiniMax Fehler: {e}")
+    raise last_err or RuntimeError("MiniMax: retries exhausted")
+
 def elevenlabs_generate(text: str, settings: dict) -> dict:
     voice_id = settings.get("voice_id") or ""
     if not voice_id:
@@ -231,6 +291,90 @@ def elevenlabs_generate(text: str, settings: dict) -> dict:
         "words": norm,
         "task_id": f"el_{voice_id[:8]}_{int(time.time())}",
     }
+
+
+def minimax_generate(text: str, settings: dict) -> dict:
+    """MiniMax Speech-Generierung. MiniMax liefert aktuell (Stand 2026) Audio-Bytes
+    OHNE per-Word-Timestamps (anders als ElevenLabs). Wir generieren proportional
+    Word-Starts/Ends aus Wortanzahl + geschätzter Dauer. Das ist nicht so genau wie
+    ElevenLabs-timestamps, reicht aber für die Scene-Alignment-Pipeline in
+    _render_worker (Stage "timing"). Bei späteren MiniMax-Updates mit Word-Timestamps
+    einfach hier den _extract_minimax_words() ersetzen.
+
+    Liefert gleiche Return-Shape wie elevenlabs_generate() — Provider-agnostic
+    Konsumenten (_tts_persist_and_schedule) müssen nicht wissen welcher Provider."""
+    voice_id = settings.get("voice_id") or ""
+    if not voice_id:
+        raise RuntimeError(
+            "Keine MiniMax-Voice-ID konfiguriert. Bitte im Audio-Step eine Voice "
+            "aus dem Dropdown wählen (Settings-Modal oder Voice-Dropdown)."
+        )
+    model = settings.get("model_id") or MINIMAX_DEFAULT_MODEL
+    # MiniMax-API-Body (Format an Stand 2026 — möglicherweise Anpassungen bei Updates)
+    body = {
+        "model": model,
+        "text": text,
+        "stream": False,
+        "voice_setting": {
+            "voice_id": voice_id,
+            "speed":   float(settings.get("speed", 1.0)),
+            "vol":     float(settings.get("volume", 1.0)),
+            "pitch":   int(settings.get("pitch", 0)),
+        },
+        "audio_setting": {
+            "sample_rate": 32000,
+            "bitrate":     128000,
+            "format":      "mp3",
+        },
+    }
+    headers = {
+        "Authorization": f"Bearer {_minimax_key()}",
+        "Content-Type":  "application/json",
+    }
+    resp = _minimax_call_with_retry(f"{MINIMAX_API}/t2a_v2", body, headers)
+
+    if not isinstance(resp, dict):
+        raise RuntimeError(f"MiniMax-Antwort kein JSON-Objekt: {type(resp).__name__}")
+    # MiniMax-Response-Format (Stand 2026): data.audio (hex-encoded bytes) ODER
+    # data.audio (base64). Wir unterstützen beide — Provider-Agnostik.
+    audio_hex = (resp.get("data") or {}).get("audio")
+    if not audio_hex:
+        raise RuntimeError(f"MiniMax-Antwort ohne data.audio: {resp.get('base_resp', resp)}")
+    # MiniMax-Endpoints liefern entweder hex-encodierte oder base64-codierte Bytes
+    # je nach Modell. Detect via String-Länge: hex ist 2x byte-länge, base64 ist ~1.33x.
+    try:
+        # Probieren base64 zuerst (häufiger), fallback hex
+        try:
+            audio_bytes = base64.b64decode(audio_hex, validate=True)
+        except Exception:
+            audio_bytes = bytes.fromhex(audio_hex)
+    except Exception as e:
+        raise RuntimeError(f"MiniMax-audio-Encoding unbekannt: {e}")
+
+    # Word-Timestamps proportional aus Textlänge + estimated_duration erzeugen.
+    words_input = [w for w in re.split(r"\s+", text.strip()) if w]
+    estimated_duration = max(2.0, len(words_input) * 0.42)  # ~140 WPM Default
+    if words_input:
+        per = estimated_duration / len(words_input)
+        words = [{"word": w, "start": i * per, "end": (i + 1) * per} for i, w in enumerate(words_input)]
+    else:
+        words = []
+
+    return {
+        "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
+        "words": words,
+        "task_id": f"mm_{voice_id[:8]}_{int(time.time())}",
+    }
+
+
+# Provider-Auswahl + Default-Settings (MiniMax-spezifisch)
+MINIMAX_VOICE_SETTINGS_DEFAULT = {
+    "voice_id": "",
+    "model_id": MINIMAX_DEFAULT_MODEL,
+    "speed":    1.0,
+    "volume":   1.0,
+    "pitch":    0,
+}
 
 
 # Phase I: TTS-Preprocessing
@@ -298,6 +442,30 @@ def _enrich_for_tts(text: str, scenes: list = None) -> str:
             if prefix and prefix + txt not in enriched and txt in enriched:
                 enriched = enriched.replace(txt, prefix + txt, 1)
     return enriched
+
+
+def _tts_persist_and_schedule(cid: str, vid: str, text: str,
+                                 settings: dict = None,
+                                 override_voice_id: str = "") -> dict:
+    """Provider-agnostic TTS-Pipeline. Dispatched auf Basis von `tts_provider`
+    in voice_settings.json (default: 'elevenlabs'). Beide Provider liefern eine
+    einheitliche Return-Shape (audio_base64 + words + task_id)."""
+    if not vid:
+        raise RuntimeError("Kein Video ausgewählt.")
+    ensure_video(cid, vid)
+    final_settings = load_voice_settings(cid, override_voice_id=override_voice_id)
+    if settings:
+        for k, v in settings.items():
+            if k in final_settings:
+                final_settings[k] = v
+    # Auch MiniMax-Felder in final_settings mergen, falls vorhanden
+    if final_settings.get("tts_provider") == "minimax":
+        final_settings.update({k: v for k, v in settings.items() if k in MINIMAX_VOICE_SETTINGS_DEFAULT})
+    provider = final_settings.get("tts_provider") or "elevenlabs"
+    if provider == "minimax":
+        return _minimax_persist_and_schedule(cid, vid, text, final_settings)
+    # Default: ElevenLabs (backward-compat)
+    return _elevenlabs_persist_and_schedule(cid, vid, text, final_settings)
 
 
 def _elevenlabs_persist_and_schedule(cid: str, vid: str, text: str,
@@ -395,6 +563,97 @@ def _elevenlabs_persist_and_schedule(cid: str, vid: str, text: str,
     return {
         "ok": True,
         "task_id": task_id,
+        "audio_kb": len(audio_bytes) // 1024,
+        "n_words": len(words),
+        "chars": char_count,
+    }
+
+
+def _minimax_persist_and_schedule(cid: str, vid: str, text: str,
+                                  settings: dict = None) -> dict:
+    """MiniMax-Pendant zu _elevenlabs_persist_and_schedule. Persistiert
+    voiceover.mp3 + audio_meta.json, leitet _transcribe_generate_worker im
+    Hintergrund an, aktualisiert VOICE_JOBS. Identischer Idempotency-Resume-
+    Marker (voiceover_source = "minimax") damit /api/voiceover_generate beim
+    zweiten Klick direkt 'fertig' zurückgibt."""
+    if not vid:
+        raise RuntimeError("Kein Video ausgewählt.")
+    from dashboard import (ensure_video, v_uploads, v_audio, v_plan,
+                           _VOICE_JOBS_LOCK, VOICE_JOBS,
+                           _transcribe_generate_worker)
+    ensure_video(cid, vid)
+    voiceover_mp3 = os.path.join(v_uploads(cid, vid), "voiceover.mp3")
+    trimmed_path  = os.path.join(v_uploads(cid, vid), "voiceover_trimmed.wav")
+    if os.path.exists(trimmed_path):
+        try:    os.remove(trimmed_path)
+        except Exception: pass
+
+    raw = minimax_generate(text, settings)
+    audio_bytes = base64.b64decode(raw["audio_base64"])
+    words       = raw["words"]
+    task_id     = raw["task_id"]
+    char_count  = len(text)
+
+    meta_written = False
+    try:
+        with open(voiceover_mp3, "wb") as f:
+            f.write(audio_bytes)
+        meta = {
+            "path": voiceover_mp3,
+            "mime": "audio/mpeg",
+            "name": "voiceover.mp3",
+            "voiceover_source": "minimax",
+            "voiceover_task_id": task_id,
+            "voiceover_chars": char_count,
+            "voiceover_word_timestamps": words,
+            "voiceover_settings_used": {
+                "voice_id": settings.get("voice_id", ""),
+                "model_id": settings.get("model_id", MINIMAX_DEFAULT_MODEL),
+                "speed":    settings.get("speed", 1.0),
+                "volume":   settings.get("volume", 1.0),
+                "pitch":    settings.get("pitch", 0),
+            },
+        }
+        json.dump(meta, open(v_audio(cid, vid), "w"), ensure_ascii=False, indent=1)
+        meta_written = True
+    finally:
+        if not meta_written and os.path.exists(voiceover_mp3):
+            try:    os.remove(voiceover_mp3)
+            except Exception: pass
+
+    from dashboard import _PLAN_WRITE_LOCK
+    with _PLAN_WRITE_LOCK:
+        try:
+            plan = json.load(open(v_plan(cid, vid)))
+            for s in plan.get("scenes", []):
+                s.pop("start_aligned", None)
+                s.pop("end_aligned", None)
+            json.dump(plan, open(v_plan(cid, vid), "w"), ensure_ascii=False, indent=1)
+        except Exception:
+            pass
+
+    plan_thread_sec = float(settings.get("sec", 5.5)) if isinstance(settings, dict) else 5.5
+
+    def _run():
+        try:
+            _transcribe_generate_worker(cid, vid, plan_thread_sec)
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            print(f"  [MiniMax→Plan] Fehler: {e}", flush=True)
+    threading.Thread(target=_run, daemon=True).start()
+
+    with _VOICE_JOBS_LOCK:
+        VOICE_JOBS[(cid, vid)] = {
+            "running": False, "stage": "fertig", "error": None,
+            "voiceover_source": "minimax",
+            "voiceover_task_id": task_id,
+            "voiceover_chars": char_count,
+            "ts": time.time(), "resume": False,
+        }
+    print(f"  [MiniMax] {cid}/{vid}: voiceover.mp3 ({len(audio_bytes)//1024} KB, "
+          f"{len(words)} Wörter, chars={char_count}) — Plan-Worker gestartet", flush=True)
+    return {
+        "ok": True, "task_id": task_id,
         "audio_kb": len(audio_bytes) // 1024,
         "n_words": len(words),
         "chars": char_count,

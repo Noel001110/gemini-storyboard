@@ -3703,6 +3703,45 @@ class H(BaseHTTPRequestHandler):
                 } for v in voices]})
             except Exception as e:
                 return self._send(200, {"voices": [], "error": str(e)})
+        # MiniMax-Provider: Voice-Liste vom Account holen. MiniMax-System-Voices
+        # sind nach Geschlecht + Sprache+ID kategorisiert (z.B. 'alloy', 'onyx' für
+        # tiefe männliche Erzähler; siehe ARCHITECTURE §34 für die Alex-Empfehlung).
+        if p == "/api/minimax_voices":
+            try:
+                req = urllib.request.Request(f"{MINIMAX_API}/get_voice",
+                    headers={"Authorization": f"Bearer {_minimax_key()}",
+                             "Accept": "application/json"})
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    data = json.load(r)
+                # MiniMax-Response-Format: data.system_voice (Liste) + data.voice_cloning
+                # + data.voice_generation. Wir flattenen in ein einheitliches Format.
+                sys_voices = (data.get("system_voice") or [])
+                return self._send(200, {"voices": [{
+                    "voice_id": v.get("voice_id"),
+                    "name": v.get("voice_name") or v.get("voice_id"),
+                    "category": "system",
+                    "description": v.get("voice_description", ""),
+                } for v in sys_voices]})
+            except Exception as e:
+                return self._send(200, {"voices": [], "error": str(e)})
+        if p == "/api/tts_provider":
+            # Phase 34: GET gibt aktuelle Provider-Config zurück, POST setzt sie.
+            # Provider-Auswahl wird in voice_settings.json:tts_provider persistiert.
+            if d.get("tts_provider") is not None:
+                # POST: Provider wechseln
+                new_provider = d.get("tts_provider", "").strip()
+                if new_provider not in ("elevenlabs", "minimax", ""):
+                    return self._send(400, {"error": f"Unknown tts_provider: {new_provider}"})
+                s = load_voice_settings(cid)
+                s["tts_provider"] = new_provider
+                # Bei Provider-Wechsel voice_id NICHT automatisch zurücksetzen —
+                # gleicher voice_id-String kann bei beiden Providern identisch
+                # sein (zufällig) oder halt Müll sein. User sieht es im Dropdown.
+                save_voice_settings(cid, s)
+                return self._send(200, {"ok": True, "tts_provider": new_provider})
+            # GET
+            s = load_voice_settings(cid)
+            return self._send(200, {"tts_provider": s.get("tts_provider", "elevenlabs")})
         if p == "/api/elevenlabs_settings":
             return self._send(200, load_voice_settings(cid))
         if p == "/api/master":
@@ -4162,14 +4201,15 @@ class H(BaseHTTPRequestHandler):
                 meta = json.load(open(meta_path)) if os.path.exists(meta_path) else {}
             except Exception:
                 meta = {}
-            if (meta.get("voiceover_source") == "elevenlabs"
+            if (meta.get("voiceover_source") in ("elevenlabs", "minimax")
                 and os.path.exists(meta.get("path", "")) if meta else False
                 and meta.get("voiceover_word_timestamps")
                 and os.path.exists(plan_p)):
+                src = meta.get("voiceover_source")
                 with _VOICE_JOBS_LOCK:
                     VOICE_JOBS[(cid, vid)] = {
                         "running": False, "stage": "fertig (resume)",
-                        "error": None, "voiceover_source": "elevenlabs",
+                        "error": None, "voiceover_source": src,
                         "voiceover_task_id": meta.get("voiceover_task_id"),
                         "voiceover_chars": meta.get("voiceover_chars"),
                         "ts": time.time(), "resume": True,
@@ -4201,7 +4241,7 @@ class H(BaseHTTPRequestHandler):
                     "ts": time.time(), "resume": False,
                 }
             try:
-                result = _elevenlabs_persist_and_schedule(cid, vid, text,
+                result = _tts_persist_and_schedule(cid, vid, text,
                     settings=settings if sec is None else {**settings})
                 return self._send(200, result)
             except Exception as e:
