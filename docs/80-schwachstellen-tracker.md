@@ -102,7 +102,7 @@ Quelle: `docs/Architekturanalyse und Schwachstellenbericht — Storyboard Genera
 | ID | Maßnahme | Status | Beleg / Lücke |
 |:----|:----|:----|:----|
 | #38 | /health-Endpoint | ✅ | `3e28bc4` GET /health + Uptime + Git-Commit |
-| #40 | strukturiertes JSON-Logging | ❌ | Alle Logs sind `print()`-Statements |
+| #40 | strukturiertes JSON-Logging | ✅ | `10dbd60` _log() mit JSON/Text-Modus (LOG_JSON env) |
 | #65 | Docker Log-Rotation | ❌ | — |
 | #67 | Metrics-Endpoint | ❌ | — |
 
@@ -198,11 +198,11 @@ Aus den 80 IDs sind in der MD-Tabelle **69 dokumentiert**. Die folgenden 11 IDs 
 |:----|:----:|:----:|:----:|:----:|:----:|:----:|
 | 1 (Architektur) | 3 | 2 | 0 | 7 | — | 12 |
 | 2 (Daten) | 5 | 0 | 0 | 5 | — | 10 |
-| 3 (Sicherheit) | 3 | 2 | 0 | 12 | — | 17 |
+| 3 (Sicherheit) | 4 | 2 | 0 | 11 | — | 17 |
 | 4 (KI-Pipeline) | 2 | 2 | 0 | 14 | — | 18 |
 | 5 (Frontend/DX) | 0 | 1 | 0 | 11 | — | 12 |
 | Unbekannt | — | — | — | — | 11 | 11 |
-| **Total** | **13** | **7** | **0** | **49** | **11** | **80** |
+| **Total** | **14** | **7** | **0** | **48** | **11** | **80** |
 
 → **80 Schwachstellen, davon 5 done, 7 partial, 1 in progress, 56 open, 11 unknown.**
 
@@ -210,7 +210,7 @@ Aus den 80 IDs sind in der MD-Tabelle **69 dokumentiert**. Die folgenden 11 IDs 
 
 2. ~~**#38** /health-Endpoint~~ ✅
 2. ~~**#14**~~ ✅
-3. **#40** Strukturiertes JSON-Logging
+3. ~~**#40**~~ ✅
 4. **#56** Ruff Linting
 5. **#69** Temp-Files sauber löschen (Crash-Recovery)
-3. **#40** Strukturiertes JSON-Logging
+3. ~~**#40**~~ ✅
