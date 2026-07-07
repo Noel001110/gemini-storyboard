@@ -21,6 +21,16 @@ CHANNELS_FILE = os.path.join(CHANNELS_DIR, "channels.json")
 # bleiben global erreichbar.
 from engine_elevenlabs import *  # noqa: F401,F403
 
+# ── Phase M.2: Szenen-Segmentierung + Sequenz-Ketten nach engine/scenes.py ─────
+# Re-Export für Rückwärtskompatibilität. Aufrufer wie `_batch_generate_worker`
+# referenzieren weiterhin `dashboard._resolve_chain_refs` etc. — die Wildcard
+# hier hält den alten Code lauffähig, ohne dass ich 200+ Zeilen patchen muss.
+from engine.scenes import (  # noqa: F401,F403
+    MAX_SCENE_SEC, PACING_TARGET_SEC, NORMAL_HARD_CAP_SEC, PACING_WARN_THRESHOLD,
+    split_units, segment_by_pacing, _renumber_seq_pos, _apply_visual_sequences_direct,
+    _wait_for_chain_scene, _resolve_chain_refs,
+)
+
 # ── Background job tracking ───────────────────────────────────────────────────
 # {job_id: {status:"running"|"done"|"error", progress:0-100, file, source_url, error}}
 JOBS: dict = {}
@@ -639,206 +649,6 @@ def clean_script(s):
     s = re.sub(r"\(?\b\d{1,2}:\d{2}\b\)?", " ", s)   # Timestamps entfernen
     s = re.sub(r"\s+", " ", s).strip()
     return s
-
-def split_units(text):
-    # Sätze, lange Sätze zusätzlich an Kommas/Semikola
-    out = []
-    for sent in re.findall(r"[^.!?]+[.!?]?", text):
-        sent = sent.strip()
-        if not sent:
-            continue
-        if len(sent.split()) <= 22:
-            out.append(sent)
-        else:
-            for part in re.split(r"(?<=[,;:])\s+", sent):
-                if part.strip():
-                    out.append(part.strip())
-    return out
-
-MAX_SCENE_SEC = 6.0          # hard cap — no scene may hold longer than this, regardless of pacing label
-PACING_TARGET_SEC = {"calm": 5.0, "punchy": 1.1}   # "normal" target comes from the user's own sec-per-image input
-NORMAL_HARD_CAP_SEC = 5.5     # Quick-Win Q (2026-07): cap the "normal" target at 5.5s.
-                               # Previous value was 4.0s — too tight for narrative mid-form docs
-                               # (~120 scenes per 8-min script). At sec_per_img=5.5 the same script
-                               # yields ~87 scenes, ~25-33% fewer cuts, still below MAX_SCENE_SEC.
-PACING_WARN_THRESHOLD = 0.30  # if >30% of units come back "punchy", the classifier likely over-fired on drama
-                               # rather than found real reveals/cliffhangers — warn instead of silently
-                               # exploding the scene (and KIE credit) count.
-
-def segment_by_pacing(units: list, pacing: list, wpm: float, normal_sec: float,
-                       sequences: list = None, callouts: list = None) -> list:
-    """Groups atomic text units (from split_units) into scenes using a per-unit pacing
-    label ("calm"/"normal"/"punchy") that analyze_script() already assigned in the SAME
-    pass it used to read the emotional arc — so pacing can't drift from what the model
-    already decided is the climax vs. the setup (two independent judgments of "how
-    important is this moment" would eventually disagree with each other).
-
-    calm beats can be grouped together and held up to MAX_SCENE_SEC; punchy beats are
-    never merged with neighbors and get compressed to ~1s each (occasionally split into
-    two rapid images for a "gut punch"); normal beats use the user's own sec-per-image
-    dial. Missing/unparseable pacing data (e.g. analyze_script failed) defaults every
-    unit to "normal", which reproduces the old fixed-interval behavior exactly — same
-    resilience pattern as the rest of the pipeline's LLM-call fallbacks.
-
-    `sequences` (optional): analyze_script()'s "visual_sequences" list, same index space
-    as `pacing` (unit indices, NOT final scene indices — units get grouped/split below,
-    so a unit's position and a scene's position are not 1:1 here, unlike the audio-
-    transcription path where scenes already equal beats before analyze_script runs). A
-    sequence boundary forces a scene cut exactly like a pacing-label change already does,
-    so a "calm" merge can never silently span across two different sequences. seq_pos is
-    NOT taken from the LLM's per-unit value — it's reassigned 0,1,2... per seq_id AFTER
-    grouping, since one scene can now represent multiple original units (calm merge) or
-    one unit can become two scenes (punchy split), so the raw per-unit position no longer
-    lines up with the final scene count."""
-    label_by_i = {p.get("beat"): p.get("label", "normal") for p in (pacing or []) if isinstance(p, dict)}
-    seq_by_i = {}
-    reason_by_sid = {}
-    for seq in (sequences or []):
-        if not isinstance(seq, dict):
-            continue
-        sid = seq.get("seq_id")
-        if sid is not None and seq.get("reason"):
-            reason_by_sid[sid] = seq["reason"]
-        for beat_i in seq.get("beats", []) or []:
-            if sid is not None:
-                seq_by_i[beat_i] = sid
-    callout_by_i = {c.get("beat"): c.get("text") for c in (callouts or [])
-                    if isinstance(c, dict) and c.get("text")}
-    targets = {"calm": PACING_TARGET_SEC["calm"],
-               "normal": max(1.5, min(normal_sec, NORMAL_HARD_CAP_SEC)),
-               "punchy": PACING_TARGET_SEC["punchy"]}
-    hard_cap_words = max(3, round(MAX_SCENE_SEC * wpm / 60.0))
-
-    n_punchy = sum(1 for i in range(len(units)) if label_by_i.get(i, "normal") == "punchy")
-    if units and n_punchy / len(units) > PACING_WARN_THRESHOLD:
-        print(f"  [Plan] WARNUNG: {n_punchy}/{len(units)} Einheiten als 'punchy' eingestuft "
-              f"({n_punchy/len(units)*100:.0f}%) — ungewöhnlich hoch, ggf. Fehlklassifizierung", flush=True)
-
-    segs, seg_seq_ids, seg_labels, seg_callouts = [], [], [], []
-    cur, cur_label, cur_seq, cur_callout = [], None, None, None
-    def flush():
-        nonlocal cur, cur_seq, cur_callout
-        if cur:
-            segs.append(" ".join(cur))
-            seg_seq_ids.append(cur_seq)
-            seg_labels.append(cur_label)
-            seg_callouts.append(cur_callout)
-            cur = []
-            cur_seq = None
-            cur_callout = None
-
-    for i, u in enumerate(units):
-        label = label_by_i.get(i, "normal")
-        if label not in targets:
-            label = "normal"
-        seq_id = seq_by_i.get(i)
-        callout = callout_by_i.get(i)
-        words = u.split()
-        target_words = max(2, round(targets[label] * wpm / 60.0))
-
-        if label == "punchy":
-            # Never merged with neighbors. If the unit is long enough to naturally carry
-            # two quick hits, split it into two punchy-length pieces instead of one
-            # longer one — the "two rapid images" gut-punch effect. Falls back to
-            # hard-cap-sized chunks instead if it's so long that even halving it would
-            # still blow MAX_SCENE_SEC (rare, but a single scene must never exceed it).
-            # Every resulting piece inherits this unit's seq_id/callout (if any) —
-            # splitting a unit never breaks it out of its sequence or drops its callout.
-            flush()
-            if len(words) > hard_cap_words * 2:
-                for j in range(0, len(words), hard_cap_words):
-                    segs.append(" ".join(words[j:j+hard_cap_words])); seg_seq_ids.append(seq_id); seg_labels.append(label); seg_callouts.append(callout)
-            elif len(words) > target_words * 1.8:
-                mid = len(words) // 2
-                segs.append(" ".join(words[:mid])); seg_seq_ids.append(seq_id); seg_labels.append(label); seg_callouts.append(callout)
-                segs.append(" ".join(words[mid:])); seg_seq_ids.append(seq_id); seg_labels.append(label); seg_callouts.append(callout)
-            else:
-                segs.append(u); seg_seq_ids.append(seq_id); seg_labels.append(label); seg_callouts.append(callout)
-            cur_label = None
-            continue
-
-        # A single unit can itself be longer than the hard cap (e.g. one long calm
-        # sentence) — split it on its own before any merging logic runs, otherwise it
-        # becomes one indivisible scene that blows past MAX_SCENE_SEC no matter what
-        # target/label says (the exact bug class fixed once already for the old
-        # fixed-interval segment(), reappearing here for the same underlying reason).
-        if len(words) > hard_cap_words:
-            flush()
-            for j in range(0, len(words), hard_cap_words):
-                segs.append(" ".join(words[j:j+hard_cap_words])); seg_seq_ids.append(seq_id); seg_labels.append(label); seg_callouts.append(callout)
-            cur_label = None
-            continue
-
-        # calm/normal: keep grouping with the running buffer as long as the label AND
-        # sequence membership match, and doing so doesn't blow the hard MAX_SCENE_SEC
-        # cap; otherwise start fresh. A sequence boundary is treated exactly like a
-        # label change — both force a cut.
-        if cur and (cur_label != label or cur_seq != seq_id or len(cur) + len(words) > hard_cap_words):
-            flush()
-        cur.extend(words)
-        cur_label = label
-        cur_seq = seq_id
-        if callout:
-            cur_callout = callout
-        if len(cur) >= target_words:
-            flush()
-            cur_label = None
-    flush()
-
-    scenes, t = [], 0.0
-    for i, seg in enumerate(segs):
-        dur = len(seg.split()) / (wpm / 60.0)
-        scene = {"i": i, "start": round(t, 1), "dur": round(dur, 1), "text": seg,
-                 "pacing": seg_labels[i] or "normal"}
-        if seg_seq_ids[i] is not None:
-            scene["seq_id"] = seg_seq_ids[i]
-            reason = reason_by_sid.get(seg_seq_ids[i])
-            if reason:
-                scene["seq_reason"] = reason
-        if seg_callouts[i]:
-            scene["callout"] = seg_callouts[i]
-        scenes.append(scene)
-        t += dur
-
-    _renumber_seq_pos(scenes)
-    return scenes
-
-def _renumber_seq_pos(scenes: list) -> None:
-    """Assigns seq_pos 0,1,2... per seq_id in final scene order, in-place. Used by both
-    segmentation paths: the manual-script path (where merging/splitting means the LLM's
-    raw per-unit position no longer lines up with final scenes) and the audio-
-    transcription path (where it's defensive — the LLM's "beats" list should already be
-    in order, but trusting our own recount instead of the raw value costs nothing and
-    guards against an out-of-order response)."""
-    seq_counters = {}
-    for scene in scenes:
-        sid = scene.get("seq_id")
-        if sid is None:
-            continue
-        scene["seq_pos"] = seq_counters.get(sid, 0)
-        seq_counters[sid] = scene["seq_pos"] + 1
-
-def _apply_visual_sequences_direct(scenes: list, sequences: list) -> None:
-    """Audio-transcription path only: scenes are already 1:1 with the beats given to
-    analyze_script() (no grouping/splitting happens for this path), so seq_id can be
-    assigned by direct index instead of tracked through segmentation like the manual
-    path needs (see segment_by_pacing's `sequences` handling)."""
-    for seq in (sequences or []):
-        if not isinstance(seq, dict):
-            continue
-        sid = seq.get("seq_id")
-        if sid is None:
-            continue
-        reason = seq.get("reason")
-        for beat_i in seq.get("beats", []) or []:
-            if isinstance(beat_i, int) and 0 <= beat_i < len(scenes):
-                scenes[beat_i]["seq_id"] = sid
-                # Only needed on the anchor (seq_pos==0 after renumbering below), but
-                # stored on every beat of the sequence since we don't know yet which one
-                # will end up as the anchor — cheap, and unused fields are harmless.
-                if reason:
-                    scenes[beat_i]["seq_reason"] = reason
-    _renumber_seq_pos(scenes)
 
 def fmt_t(s):
     return f"{int(s)//60}:{int(s)%60:02d}"
@@ -1521,65 +1331,26 @@ def _image_job_worker_inner(job_id: str, task_id: str, out_path: str, plan_path:
     _mark_scene_error(plan_path, scene_i)
 
 
-def _wait_for_chain_scene(plan_path: str, seq_id, target_pos: int, timeout: float = 170.0) -> dict:
-    """Blocks until the scene at (seq_id, target_pos) in plan.json has a source_url, has
-    failed, or the timeout elapses. Necessary because the batch worker dispatches up to
-    MAX_CONCURRENT_IMAGE_GENS scenes at once (ThreadPoolExecutor, not the strictly
-    sequential loop this feature was originally designed against) — an anchor (seq_pos 0)
-    and its first continuation (seq_pos 1) can land in the SAME concurrent batch, so the
-    continuation must not read plan.json before the anchor's image actually finished
-    uploading. Returns the scene dict (possibly without source_url if it failed or timed
-    out) rather than raising — the caller falls back to no chain ref in that case."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            plan = json.load(open(plan_path))
-            match = next((s for s in plan["scenes"]
-                          if s.get("seq_id") == seq_id and s.get("seq_pos") == target_pos), None)
-            if match and (match.get("source_url") or match.get("status") == "fehler"):
-                return match
-        except Exception:
-            pass
-        time.sleep(2)
-    try:
-        plan = json.load(open(plan_path))
-        return next((s for s in plan["scenes"]
-                     if s.get("seq_id") == seq_id and s.get("seq_pos") == target_pos), {})
-    except Exception:
-        return {}
-
-
-def _resolve_chain_refs(plan_path: str, scene: dict) -> tuple:
-    """Returns (ref_urls, debug_info) for a scene that's part of a visual sequence
-    (seq_id/seq_pos set by segment_by_pacing or _apply_visual_sequences_direct). seq_pos
-    0 is the anchor shot — no chain reference needed, just the normal channel character
-    reference. seq_pos >= 1 references BOTH the sequence's anchor image AND its immediate
-    predecessor (deduplicated when they're the same image, i.e. seq_pos == 1) — a single
-    fixed foundation image is what keeps nano-banana-2 visually consistent; chaining only
-    off the immediate predecessor would accumulate drift with every new generation."""
-    if scene.get("seq_id") is None or scene.get("seq_pos", 0) == 0:
-        return [], {}
-    seq_id, pos = scene["seq_id"], scene["seq_pos"]
-    anchor = _wait_for_chain_scene(plan_path, seq_id, 0)
-    prev = anchor if pos - 1 == 0 else _wait_for_chain_scene(plan_path, seq_id, pos - 1)
-    refs, debug = [], {}
-    if anchor.get("source_url"):
-        refs.append(anchor["source_url"]); debug["chain_anchor_file"] = anchor.get("file")
-    if prev.get("source_url") and prev.get("file") != anchor.get("file"):
-        refs.append(prev["source_url"]); debug["chain_prev_file"] = prev.get("file")
-    return refs, debug
-
-
 def _batch_generate_worker(cid: str, vid: str):
     """Runs 'Alle Bilder generieren' entirely server-side — survives page reloads and
     tab closes. Dispatches up to MAX_CONCURRENT_IMAGE_GENS scenes at once (KIE's real
     limits support 100+ concurrent tasks, see IMAGE_GEN_SEMAPHORE) instead of one at a
-    time. Image scenes have no ordering dependency on each other — each is built fresh
-    from the channel's fixed master prompt + character reference/description, never from
-    another scene's generated output — so dispatch order doesn't matter for correctness.
-    (Sequential, order-dependent continuity — e.g. a Veo clip extending the previous
-    scene's last frame — is a completely separate, still fully-sequential per-click code
-    path around MAX_CHAIN_LENGTH; this function never touches it.)"""
+    time.
+
+    IMPORTANT — scene ordering IS a dependency for visual sequences (see
+    CINEMATIC_UPGRADE_PLAN.md §11): a scene with seq_pos >= 1 references BOTH its
+    sequence anchor (seq_pos 0) AND its immediate predecessor via
+    _resolve_chain_refs(). The anchor must be present in plan.json before a
+    continuation reads from it — see _wait_for_chain_scene for the poll/timeout
+    mechanism.
+
+    The `todo` list below MUST preserve the original scene order — see
+    CINEMATIC_UPGRADE_PLAN.md §11.3 Schutzregel 1. No `sort`/`sorted`/`reverse` on
+    `todo`. Enforced by t_seq_todo_preserves_scene_order.
+
+    (Sequential, order-dependent Veo extension of a previous scene's last frame is a
+    completely separate, still fully-sequential per-click code path around
+    MAX_CHAIN_LENGTH; this function never touches it.)"""
     key = (cid, vid)
     plan_path = v_plan(cid, vid)
     try:
