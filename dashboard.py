@@ -71,6 +71,15 @@ from engine.prompts import (  # noqa: F401,F403
     make_thumbnail_prompt, gen_thumbnail_image,
 )
 
+# ── Phase Q + 38: Stil-Presets nach engine/presets.py ─────────────────────────
+# Re-Export. IMAGE_MASTER_DEFAULT ist jetzt = PRESET_MASTERS[DEFAULT_PRESET]
+# (= "flat_cartoon_doc"), nicht mehr der karge Stick-Figure-Platzhalter.
+# Bestehende Kanäle behalten ihren master_prompt.txt — keine Migration nötig.
+from engine.presets import (  # noqa: F401,F403
+    PRESET_MASTERS, PRESET_DESCRIPTIONS, DEFAULT_PRESET,
+    IMAGE_MASTER_DEFAULT, VIDEO_MASTER_DEFAULT,
+)
+
 # ── Background job tracking ───────────────────────────────────────────────────
 # {job_id: {status:"running"|"done"|"error", progress:0-100, file, source_url, error}}
 JOBS: dict = {}
@@ -291,31 +300,6 @@ def set_video_mode(cid, vid, mode):
     for v in videos:
         if v["id"] == vid: v["mode"] = mode
     save_videos(cid, videos)
-
-IMAGE_MASTER_DEFAULT = """\
-CHARACTER VISUAL (used as reference for every image):
-Minimalist 2D stick figure — round circle head, straight line limbs, no facial features drawn.
-Pure black thin strokes on pure white #FFFFFF background.
-No color, no shading, no fill. Flat line art only.
-
-SCENE STYLE:
-Each image shows the stick figure in a pose or action that visually represents the scene moment.
-Keep proportions consistent. Simple bold lines. White background always empty.
-"""
-
-VIDEO_MASTER_DEFAULT = """\
-CHARACTER (repeat verbatim in every video prompt):
-Simple 2D stick figure — round head, straight limbs, thin black lines on pure white background.
-
-STORY ARC:
-[Describe the overall narrative: who is the protagonist, what is their journey,
-what are the key emotional beats from beginning to end. 3-5 sentences.]
-
-VISUAL STYLE RULES (always apply):
-2D flat line art animation. Pure white #FFFFFF background throughout.
-No photorealism. No color. No mouth movement. No lip sync.
-Camera: Ken Burns zoom or slow pan matching scene emotion.
-"""
 
 # ── Channel list ──────────────────────────────────────────────────────────────
 def load_channels():
