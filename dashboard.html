@@ -29,8 +29,8 @@
           'app-text':     '#111827',
           'app-mut':      '#6b7280',
           'app-mut-2':    '#9ca3af',
-          'app-acc':      '#4f46e5',
-          'app-acc-soft': '#eef2ff',
+          'app-acc':      '#c13838',
+          'app-acc-soft': '#fce8e8',
           'app-ok':       '#16a34a',
           'app-warn':     '#d97706',
           'app-danger':   '#dc2626',
@@ -45,9 +45,12 @@
 
 <style>
   :root{
-    --bg:#f7f7f8; --surface:#ffffff; --surface-2:#f2f3f5; --border:#e5e7eb;
-    --text:#111827; --mut:#4b5563; --mut-2:#6b7280;
-    --acc:#4f46e5; --acc-soft:#eef2ff; --acc-hover:#4338ca;
+    /* Phase 33.7: neutrale Werkstatt-UI statt SaaS-Lila.
+       Papierweiß-Flächen + Tiefschwarz-Text + Tusche-Rot-Akzent (PHASE_ACCENT["CLIMAX"]).
+       Kontrast alle Text/Hintergrund-Kombinationen ≥ 4.5:1 (WCAG AA). */
+    --bg:#fafaf9; --surface:#ffffff; --surface-2:#f3f3f2; --border:#e5e5e4;
+    --text:#111827; --mut:#374151; --mut-2:#6b7280;
+    --acc:#c13838; --acc-soft:#fce8e8; --acc-hover:#a02828;
     --ok:#16a34a; --ok-soft:#f0fdf4;
     --warn:#d97706; --warn-soft:#fffbeb;
     --danger:#dc2626; --danger-soft:#fef2f2;
@@ -279,10 +282,10 @@
     <div class="p-6 space-y-6">
       <!-- Brand-Color-Picker (Phase 33.3.1 Bug-1: hat jetzt einen Save-Button + persistiert via /api/channels/brand_color) -->
       <div>
-        <label class="block text-xs font-semibold text-app-mut uppercase tracking-wide mb-2">Brand-Farbe</label>
+        <label class="block text-xs font-semibold text-app-mut uppercase tracking-wide mb-2">Sidebar-Akzentfarbe <span class="text-app-mut-2 normal-case font-normal">(rein kosmetisch)</span></label>
         <div class="flex items-center gap-3">
           <input type="color" id="settingsBrandColor" oninput="syncBrandColorFields('picker')" class="w-12 h-10 rounded-md border border-app-border cursor-pointer">
-          <input id="settingsBrandColorText" type="text" placeholder="#4f46e5" pattern="#(?:[0-9a-fA-F]{3}){1,2}" maxlength="7" oninput="syncBrandColorFields('text')" class="w-24 px-2 py-1.5 border border-app-border rounded-md text-xs font-mono">
+          <input id="settingsBrandColorText" type="text" placeholder="#374151" pattern="#(?:[0-9a-fA-F]{3}){1,2}" maxlength="7" oninput="syncBrandColorFields('text')" class="w-24 px-2 py-1.5 border border-app-border rounded-md text-xs font-mono">
           <button onclick="saveSettingsBrandColor()" class="px-3 py-1.5 bg-app-acc text-white text-xs font-medium rounded-md hover:opacity-90">💾 Speichern</button>
           <span class="text-xs text-app-mut">Sidebar-Dot links + Kanal-Hintergrund. Default: HSL-Hash aus Channel-Namen.</span>
         </div>
@@ -773,9 +776,10 @@ async function loadChannels(){
 // Phase 33.3 — HSL-Farbton aus Channel-Namen ableiten wenn keine brand_color
 // explizit gesetzt. Konsistent für gleiche Namen, deterministisch (kein Zufall).
 function nameToHsl(name){
-  let h = 0;
-  for (let i = 0; i < name.length; i++) h = ((h << 5) - h + name.charCodeAt(i)) | 0;
-  return `hsl(${Math.abs(h) % 360}, 60%, 55%)`;
+  // Phase 33.7: Zufalls-HSL-Fallback entfernt. Wenn kein brand_color gesetzt ist,
+  // bekommt jeder Kanal das neutrale Graphit (--mut). Verhindert visuelles Chaos
+  // und macht die UI zur ruhigen Werkstatt statt eines Kaleidoskops.
+  return null;  // Caller fällt auf CSS-Default zurück
 }
 
 async function switchChannel(id, name){
@@ -2620,9 +2624,11 @@ function stepperState(){
       return this.completed[n] ? '✓' : String(n);
     },
     circleClass(n){
-      if (this.completed[n])     return 'bg-app-ok border-app-ok text-white';
+      // Phase 33.7: erledigt + aktiv beide im Tusche-Rot-Akzent → konsistente Lesbarkeit
+      // (vorher: erledigt=grün hatte nur 3.4:1 Kontrast für weiße Ziffer — WCAG-AA-Fail).
+      if (this.completed[n])     return 'bg-app-acc border-app-acc text-white';
       if (n === this.currentStep) return 'bg-app-acc border-app-acc text-white';
-      return 'bg-white border-app-border text-app-mut';
+      return 'bg-app-surface border-app-border text-app-mut';
     },
     labelClass(n){
       return (this.completed[n] || n === this.currentStep)
