@@ -39,12 +39,16 @@ import re
 
 __all__ = [
     "IMAGE_PROMPT_CHUNK_SIZE", "IMAGE_PROMPT_MIN_LEN",
+    "SCRIPT_SYSTEM", "TITLE_SYSTEM", "THUMBNAIL_PROMPT_SYSTEM",
+    "HOOK_PROMPT_ADDITION",  # Phase L
     "_phase_prompt_addition",
     "_build_image_prompt", "_build_video_prompt",
     "load_char_refs", "analyze_char_image", "gen_charsheet",
     "_anonymized_words", "_validate_image_prompt_entry",
     "_image_prompt_chunk", "_image_prompt_single_retry",
     "visual_prompts",
+    "generate_script", "generate_titles",
+    "make_thumbnail_prompt", "gen_thumbnail_image",
 ]
 
 
@@ -275,11 +279,23 @@ def _phase_prompt_addition(phase: str) -> str:
 
 # ── Prompt-Komposition ───────────────────────────────────────────────────────
 
-def _build_image_prompt(scene_prompt, master, char_refs, phase=""):
+# Phase L — Hook-Style-Cue (analog PHASE_PROMPT_ADDITIONS, aber für Hook-Szenen).
+# Hart injiziert wie die Phase-Cues, damit der Hook-Charakter garantiert wird und
+# nicht von einem weichen LLM-Hint abhängt.
+HOOK_PROMPT_ADDITION = (
+    "single striking focal subject, maximum negative space, poster-like composition, "
+    "immediate visual hook that stops the scroll — viewer must understand the image in "
+    "under one second"
+)
+
+
+def _build_image_prompt(scene_prompt, master, char_refs, phase="", is_hook=False):
     """Compose the final image-generation prompt: scene text + character refs (if any)
-    + PHASE_PROMPT_ADDITIONS hard-injection (Phase C, Juli 2026) + master prompt.
-    The phase cue is hard-injected (not just hinted to the LLM) to make Phase C a
-    real constraint instead of an LLM-soft-compliance thing.
+    + PHASE_PROMPT_ADDITIONS hard-injection (Phase C, Juli 2026) + HOOK_PROMPT_ADDITION
+    hard-injection (Phase L) + master prompt.
+
+    The phase cue and hook cue are hard-injected (not just hinted to the LLM) so they
+    become real constraints, not soft compliance.
     """
     char_hint = ""
     if char_refs:
@@ -293,7 +309,10 @@ def _build_image_prompt(scene_prompt, master, char_refs, phase=""):
         phase_cue = _phase_prompt_addition(phase)
         if phase_cue:
             phase_hint = f"\n\nSTYLE ({phase}): {phase_cue}"
-    return scene_prompt + char_hint + phase_hint + "\n\n" + master
+    hook_hint = ""
+    if is_hook:
+        hook_hint = f"\n\nHOOK STYLE: {HOOK_PROMPT_ADDITION}"
+    return scene_prompt + char_hint + phase_hint + hook_hint + "\n\n" + master
 
 
 def _build_video_prompt(scene_prompt: str, vid_master: str) -> str:

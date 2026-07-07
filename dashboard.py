@@ -40,7 +40,7 @@ from engine.render import (  # noqa: F401,F403
     _probe_video_encoder, _apply_sync_invariant,
     _build_motion, _normalize_motion, _motion_for_scene, _overlay_specs_for_scene,
     _render_clip, _assemble_clips, _render_selfcheck,
-    _transition_for_scene, _has_transition_before,
+    _transition_for_scene, _transition_after_hook, _has_transition_before,
     _clip_duration_sec, _crossfade_clips,
     render_text_overlay_png, render_title_card_png_via_venv,
 )
@@ -61,6 +61,7 @@ from engine.audio import (  # noqa: F401,F403
 from engine.prompts import (  # noqa: F401,F403
     IMAGE_PROMPT_CHUNK_SIZE, IMAGE_PROMPT_MIN_LEN,
     SCRIPT_SYSTEM, TITLE_SYSTEM, THUMBNAIL_PROMPT_SYSTEM,
+    HOOK_PROMPT_ADDITION,
     _phase_prompt_addition,
     _build_image_prompt, _build_video_prompt,
     load_char_refs, analyze_char_image, gen_charsheet,
@@ -524,7 +525,10 @@ def analyze_script(beats):
         '  "callouts": [{"beat": N, "text": "short number/date/stat, max ~6 chars"}],\n'
         '  "phases": [{"beat": N, "phase": "OPENING" | "RISING_ACTION" | "CLIMAX" | "RESOLUTION"}],\n'
         '  "act_breaks": [N],\n'
-        '  "climax_beat": N\n'
+        '  "climax_beat": N,\n'
+        '  "hook": {"beat": N, "type": "quote" | "scene" | "thesis" | "none", '
+        '"strength": "strong" | "weak"},\n'
+        '  "throughline_question": "one-sentence question that drives the whole video, OR empty string"\n'
         "}\n\n"
         'Rule: set "anonymize": true for every real, identifiable named person (public '
         "figures, named victims/individuals) — these get depicted later only as a "
@@ -570,6 +574,21 @@ def analyze_script(beats):
         "- climax_beat: the SINGLE beat index of the highest-tension moment — where the "
         "protagonist confronts the decisive turn. -1 if the script has no clear climax "
         "(purely informational scripts).\n\n"
+        "HOOK (Phase L) — the cold-open moment that should grab the viewer in 0:00–0:05:\n"
+        '- hook.beat: index of the beat that opens the video, 0..2 for a cold-open, '
+        "or the same as the first beat with no clear hook if it starts with context/definition. "
+        "-1 if no hook is identifiable at all.\n"
+        '- hook.type: what kind of hook — "quote" (a striking statement/number), "scene" '
+        '(a vivid concrete situation), "thesis" (a claim or proposition), or "none" '
+        "(the opening is purely contextual/definitional, no cold-open).\n"
+        '- hook.strength: "strong" if it would make the viewer stop scrolling (a person, '
+        "scene, number, or claim that hits immediately), \"weak\" if it tries but doesn't "
+        'land, or "none" if type is "none".\n'
+        '- throughline_question: ONE-SENTENCE question (max 200 chars) that the entire '
+        "video answers — phrased in a way the viewer would recognize and want to know the "
+        'answer to. EMPTY STRING IS VALID if the script has no question (e.g. purely '
+        "informational/encyclopedic scripts). NIEMALS eine Frage erfinden, die das Skript "
+        "nicht trägt — wenn das Skript keine Frage stellt, leerer String.\n\n"
         "BEATS:\n" + json.dumps(beats, ensure_ascii=False)
     )
     for attempt in (1, 2):

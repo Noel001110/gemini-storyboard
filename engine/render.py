@@ -75,7 +75,7 @@ __all__ = [
     "_build_motion", "_normalize_motion", "_motion_for_scene",
     "_overlay_specs_for_scene",
     "_render_clip", "_assemble_clips", "_render_selfcheck",
-    "_transition_for_scene", "_has_transition_before",
+    "_transition_for_scene", "_transition_after_hook", "_has_transition_before",
     "_clip_duration_sec", "_crossfade_clips",
     "render_text_overlay_png", "render_title_card_png_via_venv",
 ]
@@ -235,15 +235,28 @@ def _motion_for_scene(scene: dict, prev_scene: dict) -> dict:
     Otherwise picks from _PHASE_MOTION_CANDIDATES (LLM-driven phase) or falls back to
     _PACING_MOTION_CANDIDATES (position-fallback / legacy).
 
-    Phase L will add `is_hook` here — but ONLY if scene is not a sequence continuation
-    (CINEMATIC_UPGRADE_PLAN.md §11.3 Schutzregel 2).
+    Phase L: Hook-Szenen (scene['is_hook'] = True) erzwingen snap_zoom_in mit höherer
+    Intensität (1.2) — AUSSER die Szene ist Fortsetzung einer Sequenz (CINEMATIC_UPGRADE_PLAN.md
+    §11.3 Schutzregel 2: Motion-Vererbung schlägt jede neue Motion-Regel). Hook
+    gewinnt nur, wenn die Szene einen eigenen Look hat (= Anker einer Sequenz oder
+    eigenständige Szene).
     """
     dur = scene.get("dur", 3.0)
     if dur < 1.2:
         return _build_motion("static", 1.0)
 
-    if (scene.get("seq_id") is not None and scene.get("seq_pos", 0) >= 1
-            and prev_scene and prev_scene.get("motion")):
+    is_seq_continuation = (
+        scene.get("seq_id") is not None
+        and scene.get("seq_pos", 0) >= 1
+        and prev_scene
+        and prev_scene.get("motion")
+    )
+
+    # Phase L Hook-Override (Schutzregel 2: Sequenz-Vererbung schlägt Hook)
+    if scene.get("is_hook") and not is_seq_continuation:
+        return _build_motion("snap_zoom_in", 1.2)
+
+    if is_seq_continuation:
         name = _normalize_motion(prev_scene["motion"]).get("name", "zoom_in")
     else:
         phase = scene.get("phase")
@@ -438,6 +451,13 @@ def _transition_for_scene(scene: dict, idx: int) -> tuple:
     - scene.phase_source == "llm" mit phase → CLIMAX=wipe, OPENING/RESOLUTION=fade,
       RISING_ACTION=smooth (Phase hat Vorrang vor Pacing).
     - sonst: Pacing-Heuristik.
+
+    Phase L: Wenn die Szene VOR scene[idx] (also scene[idx-1]) eine Hook-Szene war,
+    erzwingen wir einen hard cut (kein weicher Fade aus dem Hook raus — der Hook-Beat
+    muss wie ein Schlag sitzen). Wir wissen hier nur die aktuelle Szene; der Caller
+    übergibt die scenes-Liste via prev_is_hook-Logik im Render-Worker.
+    Aktuell: keine API-Änderung — Hook-Übergang wird über die Library hart gesteuert
+    via xfade mit duration=0, was effektiv ein hartes Schneiden ist.
     """
     phase = scene.get("phase", "")
     phase_source = scene.get("phase_source", "")
@@ -456,6 +476,15 @@ def _transition_for_scene(scene: dict, idx: int) -> tuple:
     lib = TRANSITION_LIBRARY[family]
     transition_type = lib["types"][scene.get("i", idx) % len(lib["types"])]
     return transition_type, lib["sfx"], lib["duration"]
+
+
+def _transition_after_hook(prev_scene: dict) -> tuple:
+    """Phase L: Übergang NACH einer Hook-Szene → immer hard cut (kurz, kein Fade).
+
+    Wird vom Render-Worker aufgerufen statt _transition_for_scene, wenn die
+    vorherige Szene is_hook war. Hard cut = xfade mit duration=0 (effektiv Schneiden).
+    """
+    return ("fade", None, 0.0)  # 0.0s = instant cut, kein SFX (Hook-Szene hat schon Aufmerksamkeit)
 
 
 def _has_transition_before(scenes: list, idx: int) -> bool:
