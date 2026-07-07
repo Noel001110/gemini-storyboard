@@ -55,6 +55,15 @@ from engine.audio import (  # noqa: F401,F403
     _phase_modulate_music, _build_final_audio,
 )
 
+# ── Phase M.5: Prompt-Komposition + Char-Sheet-Pipeline nach engine/prompts.py ──
+# Re-Export für Rückwärtskompatibilität. _build_image_prompt wird z.B. in
+# _batch_generate_worker und _veo_job_worker aufgerufen.
+from engine.prompts import (  # noqa: F401,F403
+    _phase_prompt_addition,
+    _build_image_prompt, _build_video_prompt,
+    load_char_refs, analyze_char_image, gen_charsheet,
+)
+
 # ── Background job tracking ───────────────────────────────────────────────────
 # {job_id: {status:"running"|"done"|"error", progress:0-100, file, source_url, error}}
 JOBS: dict = {}
@@ -983,20 +992,6 @@ def story_phase(i: int, total: int) -> str:
 # schema-drift → full fallback instead of mixing reliable fallback with uncertain LLM data.
 # PHASE_SET / PHASE_TO_ACT / PHASE_PROMPT_ADDITIONS / PHASE_COLOR_FILTER / PHASE_VOLUME /
 # PHASE_ACCENT moved to engine_elevenlabs.py (Phase J engine refactor).
-PHASE_COVERAGE_THRESHOLD = 0.8  # <80% LLM coverage → full fallback (no mixing)
-
-def _phase_prompt_addition(phase: str) -> str:
-    """Inline lookup of phase-specific prompt cues. Kept as thin wrapper for clarity
-    at call sites — actual logic is `PHASE_PROMPT_ADDITIONS.get(phase, "")`.
-
-    Historical note: was originally intended as a function to inject phase-cues
-    into the image-prompt chunk, but `_image_prompt_chunk` already injects
-    `[Phase: X]` annotations inline. The use here is inside `_build_image_prompt`
-    — a HARD injection of the phase STYLE into the final KIE-bound prompt — making
-    Phase C a real constraint (vs. a soft hint that the LLM might forget)."""
-    return PHASE_PROMPT_ADDITIONS.get(phase, "")
-
-# Phase G: per-phase music-bed volume. OPENING / RESOLUTION get a quieter bed (the
 # narration carries the moment), CLIMAX gets the loudest (cinematic swell). These
 # values are multiplies on the music input BEFORE sidechaincompress ducks under the
 # voice — sidechaincompress then takes what each phase gave it. With only the single
@@ -1036,6 +1031,7 @@ TTS_PAUSE_MARKERS = {
 # jetzt NUR in engine_elevenlabs.py als __all__-Exports. Diese Notiz dokumentiert
 # die Migration; die ursprüngliche Definition wurde 2026-07 entfernt (Phase-J-clean-up).
 # AUF KEINEN FALL neue Definitionen hier hinzufügen — siehe engine_elevenlabs.py.
+PHASE_COVERAGE_THRESHOLD = 0.8  # <80% LLM coverage → full fallback (no mixing)
 
 def _assign_phases(scenes: list, analysis: dict, total: int) -> None:
     """Phase 3: assign each scene a STORY-PHASE, preferring LLM data when available.
@@ -1089,95 +1085,6 @@ def _assign_phases(scenes: list, analysis: dict, total: int) -> None:
     print(f"  [Phase] {n_llm}/{total} LLM, {n_fb}/{total} fallback "
           f"(coverage={coverage*100:.0f}%, hysteresis={'ON' if use_llm else 'OFF'}), "
           f"{len(phase_break_sorted)} title-card(s)", flush=True)
-
-VIDEO_PROMPT_MIN_LEN    = 280  # chars — forces setting/light/camera to be spelled out, not just a mood word
-
-# ---------- Character sheets ----------
-
-def load_char_refs(cid="default"):
-    refs = []
-    for f in os.listdir(ch_sheets(cid)):
-        if f.endswith(".json"):
-            try:
-                meta = json.load(open(os.path.join(ch_sheets(cid), f)))
-                refs.append(meta)
-            except Exception:
-                pass
-    return refs
-
-def analyze_char_image(img_bytes, mime="image/png"):
-    """Ask Gemini Vision to extract a text-only design description from a reference image."""
-    instr = (
-        "This image shows a character to be used as a visual design reference for a stick-figure animation. "
-        "Write a precise CHARACTER DESIGN SPECIFICATION based on what you see. "
-        "Describe ONLY the design elements: head shape and size relative to body, body proportions, "
-        "line weight (thin/medium/thick), clothing details, eye style, mouth style, any distinguishing marks. "
-        "Do NOT describe the pose, walking direction, or composition — only the visual design. "
-        "Write as a concise spec (max 80 words) that could be used to draw this character consistently in any pose."
-    )
-    b64 = base64.b64encode(img_bytes).decode()
-    msgs = [{"role": "user", "content": [
-        {"type": "text", "text": instr},
-        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
-    ]}]
-    return post_kie_text(msgs, temp=0.2).strip()
-
-
-def gen_charsheet(cid, name, description):
-    """Generate a character reference sheet image and return the bytes."""
-    prompt = (
-        f"CHARACTER REFERENCE SHEET — '{name}'.\n"
-        f"Draw this stick figure in 5 different poses, arranged in a single horizontal row on a white background. "
-        f"Label each pose below it with its name.\n\n"
-        f"Poses: 1-Neutral (standing still) · 2-Happy (arms up, curved smile) · "
-        f"3-Sad (shoulders drooping, frown) · 4-Shocked (arms spread wide, circle mouth) · "
-        f"5-Walking (one leg forward)\n\n"
-        f"Character design: {description}\n\n"
-        f"All 5 poses MUST share identical proportions, head size, and identifying features. "
-        f"White background (#FFFFFF), black ink only, medium-weight lines, no shading. "
-        f"Label each pose clearly below in small neat text."
-    )
-    # Pre-33.2 cleanup: backslash inside an f-string expression part is illegal on Python 3.11/3.12 (PEP 701, allowed only in 3.13+). Extracting the regex sanitizer value to its own line keeps the server startable on 3.11/3.12 Docker images.
-    tmp_name = re.sub(r"[^\\w]", "_", name)
-    tmp = os.path.join(ch_sheets(cid), f"_tmp_{tmp_name}.jpg")
-    res = gen_image(prompt, "", tmp)
-    if res["ok"]:
-        data = open(tmp, "rb").read()
-        try: os.unlink(tmp)
-        except: pass
-        return data
-    raise RuntimeError(f"Character sheet generation failed: {res.get('error')}")
-
-
-# ---------- Bildgenerierung via KIE.ai ----------
-
-def _build_image_prompt(scene_prompt, master, char_refs, phase=""):
-    """Compose the final image-generation prompt: scene text + character refs (if any)
-    + PHASE_PROMPT_ADDITIONS hard-injection (Phase C, Juli 2026) + master prompt.
-    The phase cue is hard-injected (not just hinted to the LLM) to make Phase C a
-    real constraint instead of an LLM-soft-compliance thing.
-    """
-    char_hint = ""
-    if char_refs:
-        for cr in char_refs:
-            desc = cr.get("description", ""); name = cr.get("name", "Figur")
-            if desc:
-                char_hint += (f"\n\nCHARACTER DESIGN for '{name}': {desc}"
-                              f"\nApply this exact design in whatever pose this scene requires.")
-    phase_hint = ""
-    if phase:
-        phase_cue = _phase_prompt_addition(phase)
-        if phase_cue:
-            phase_hint = f"\n\nSTYLE ({phase}): {phase_cue}"
-    return scene_prompt + char_hint + phase_hint + "\n\n" + master
-
-
-def _build_video_prompt(scene_prompt: str, vid_master: str) -> str:
-    """Append the literal master prompt to the scene action description.
-    Veo only ever sees the final submitted string — it has no access to the
-    dashboard's master prompt field, so the style must be embedded here every
-    time, not just hinted to the LLM that writes the scene description."""
-    return scene_prompt.strip() + "\n\nVISUAL STYLE (apply exactly):\n" + vid_master.strip()
 
 
 VALID_IMAGE_MODELS = ("nano-banana-2", "nano-banana-2-lite")
