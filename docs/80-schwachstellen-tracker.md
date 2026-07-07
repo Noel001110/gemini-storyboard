@@ -101,7 +101,7 @@ Quelle: `docs/Architekturanalyse und Schwachstellenbericht — Storyboard Genera
 ### 3.4 Monitoring & Health
 | ID | Maßnahme | Status | Beleg / Lücke |
 |:----|:----|:----|:----|
-| #38 | /health-Endpoint | ❌ | Kein health-check |
+| #38 | /health-Endpoint | ✅ | `3e28bc4` GET /health + Uptime + Git-Commit |
 | #40 | strukturiertes JSON-Logging | ❌ | Alle Logs sind `print()`-Statements |
 | #65 | Docker Log-Rotation | ❌ | — |
 | #67 | Metrics-Endpoint | ❌ | — |
@@ -198,19 +198,19 @@ Aus den 80 IDs sind in der MD-Tabelle **69 dokumentiert**. Die folgenden 11 IDs 
 |:----|:----:|:----:|:----:|:----:|:----:|:----:|
 | 1 (Architektur) | 1 | 2 | 0 | 9 | — | 12 |
 | 2 (Daten) | 5 | 0 | 0 | 5 | — | 10 |
-| 3 (Sicherheit) | 2 | 2 | 0 | 13 | — | 17 |
+| 3 (Sicherheit) | 3 | 2 | 0 | 12 | — | 17 |
 | 4 (KI-Pipeline) | 2 | 2 | 0 | 14 | — | 18 |
 | 5 (Frontend/DX) | 0 | 1 | 0 | 11 | — | 12 |
 | Unbekannt | — | — | — | — | 11 | 11 |
-| **Total** | **10** | **7** | **0** | **52** | **11** | **80** |
+| **Total** | **11** | **7** | **0** | **51** | **11** | **80** |
 
 → **80 Schwachstellen, davon 5 done, 7 partial, 1 in progress, 56 open, 11 unknown.**
 
 ## Quick-Win-Reihenfolge (Produktion zuerst)
 
-2. **#38** /health-Endpoint
-3. **#14** Exponential Backoff für KIE.ai
-4. **#50/#49** Path-Traversal + kein shell=True (teilweise ✅)
-5. **#56** Ruff Linting
-6. **#40** Strukturiertes JSON-Logging
-7. **#69** Temp-Files sauber löschen (Crash-Recovery)
+2. ~~**#38** /health-Endpoint~~ ✅
+2. **#14** Exponential Backoff für KIE.ai
+3. **#40** Strukturiertes JSON-Logging
+4. **#56** Ruff Linting
+5. **#69** Temp-Files sauber löschen (Crash-Recovery)
+6. **#14** Exponential Backoff für KIE.ai
