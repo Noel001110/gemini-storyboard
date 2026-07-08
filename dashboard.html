@@ -1198,7 +1198,7 @@ function _watchRunningScenes(){
 // generation loop lives in the Python process and keeps running even if this tab (or
 // every tab) closes. Polling this is what makes state always correct on load/reload.
 let _batchPollTimer = null;
-function _setGenAllUI(running, currentIs){
+function _setGenAllUI(running, currentIs, planStatus){
   $('genAllBtn').style.display = running ? 'none' : '';
   const stopBtn = $('stopAllBtn');
   stopBtn.style.display = running ? '' : 'none';
@@ -1207,15 +1207,23 @@ function _setGenAllUI(running, currentIs){
   if(running){
     bar.style.display = 'flex';
     const list = currentIs || [];
+    // Plan-Worker (Gemini) Status sichtbar — User sieht Fehler sofort statt "Generiert gerade" Lüge
+    const planStep = planStatus && planStatus.running ? planStatus.step : null;
+    const planErr = planStatus && planStatus.error;
     if(list.length){
       const labels = list.map(i => {
         const scene = SCENES.find(s=>s.i===i);
         const txt = scene ? (scene.text||'').slice(0,40) + ((scene.text||'').length>40?'…':'') : '';
         return `#${i+1}${txt ? ` „${txt}"` : ''}`;
       });
-      $('batchStatusText').textContent = `Generiert gerade ${list.length} Szene(n) parallel — ${labels.join(' · ')}`;
+      let txt = `Generiert gerade ${list.length} Szene(n) parallel — ${labels.join(' · ')}`;
+      if(planErr) txt = `⚠ Plan-Fehler: ${planErr} — ${txt}`;
+      else if(planStep) txt += ` (Plan: ${planStep})`;
+      $('batchStatusText').textContent = txt;
     } else {
-      $('batchStatusText').textContent = 'Generiert gerade …';
+      let txt = planStep ? `Plan-Worker: ${planStep}` : 'Generiert gerade …';
+      if(planErr) txt = `⚠ Plan-Fehler: ${planErr}`;
+      $('batchStatusText').textContent = txt;
     }
   } else {
     bar.style.display = 'none';
@@ -1224,24 +1232,38 @@ function _setGenAllUI(running, currentIs){
 function startBatchPoll(){
   if(_batchPollTimer) return;
   if(_watchTimer){ clearInterval(_watchTimer); _watchTimer = null; } // batch supersedes the lone-scene watcher
-  _setGenAllUI(true, []);
+  _setGenAllUI(true, [], null);
   const poll = async () => {
     const st = await ch_get('/api/generate_all_status').catch(() => null);
+    // Plan-Worker (Gemini) parallel pollen — User sieht Fehler sofort
+    const planSt = await ch_get('/api/plan_status').catch(() => null);
     if(!st) return;
-    if(st.running){
-      _setGenAllUI(true, st.current_i);
-      $('prog').textContent = `${st.done} / ${st.total}`;
-      $('barFill').style.width = (st.total ? st.done/st.total*100 : 0) + '%';
+    if(st.running || (planSt && planSt.running)){
+      _setGenAllUI(true, st.current_i || [], planSt);
+      if(st.total){
+        $('prog').textContent = `${st.done} / ${st.total}`;
+        $('barFill').style.width = (st.total ? st.done/st.total*100 : 0) + '%';
+      }
       await _refreshScenesFromPlan();
     } else {
       clearInterval(_batchPollTimer); _batchPollTimer = null;
-      _setGenAllUI(false);
+      _setGenAllUI(false, [], planSt);
       await _refreshScenesFromPlan();
       const doneCount = SCENES.filter(s=>s.file).length;
       $('prog').textContent = `${doneCount} / ${SCENES.length}`;
       $('barFill').style.width = (SCENES.length ? doneCount/SCENES.length*100 : 0) + '%';
       updateRenderCardVisibility();
       updateProduceCardVisibility();
+      // Plan-Worker Fallback-Warnung anzeigen
+      if(planSt && planSt.error){
+        alert('Plan-Generierung abgebrochen: ' + planSt.error);
+      } else {
+        // Check plan for fallback prompts (Gemini fehlgeschlagen, Fallback benutzt)
+        const fallbackCount = SCENES.filter(s => (s.prompt||'').startsWith('Scene illustrating')).length;
+        if(fallbackCount > 0){
+          alert(`Achtung: ${fallbackCount} Szene(n) haben Fallback-Prompts bekommen (Gemini Vision war nicht erreichbar).\n\nBitte klicke „Plan neu generieren" erneut wenn KIE wieder antwortet.`);
+        }
+      }
       if(st.error){
         alert('Generierung abgebrochen: ' + st.error);
       }
