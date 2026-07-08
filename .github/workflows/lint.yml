@@ -1,0 +1,55 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ruff:
+    name: Ruff Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ruff
+        run: pip install ruff==0.6.9
+      - name: Ruff check
+        run: ruff check . --output-format=github
+      - name: Ruff format check
+        run: ruff format --check .
+
+  mypy:
+    name: Mypy Type-Check (engine/* only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install mypy
+        run: pip install mypy==1.11.2
+      - name: Mypy on engine/
+        run: mypy engine/
+
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          # Zero-Framework: keine pip-deps, nur stdlib
+          echo "No pip deps needed for the unit tests"
+      - name: Run unit tests
+        run: python3 tests/test_cinematic_e2e.py
+        env:
+          # Tests laufen ohne externe API-Keys
+          KIE_KEY_FILE: /dev/null
+          ELEVENLABS_KEY_FILE: /dev/null

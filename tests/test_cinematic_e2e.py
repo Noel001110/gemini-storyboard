@@ -764,6 +764,15 @@ def main():
         run(t_bug_b1_charref_upload_validates_base64, "B-1: handler hat try/except + validate=False + name-check + mkdir")
         run(t_bug_b1_charref_upload_roundtrip, "B-1 E2E: valid upload schreibt PNG+JSON, keine 5xx")
 
+        summary_section("Phase 5.3 — Ruff Linting + CI (#56, #51)")
+        run(t_phase5_ruff_config_exists, "#56: pyproject.toml existiert mit [tool.ruff] section")
+        run(t_phase5_ruff_config_has_lint_categories, "#56: ruff Lint-Kategorien konfiguriert (E, W, F, I, B, UP)")
+        run(t_phase5_ruff_isort_first_party, "#56: isort known-first-party = engine, engine_elevenlabs, render_overlay")
+        run(t_phase5_ruff_format_configured, "#56: ruff format Konfiguration (double quotes, lf)")
+        run(t_phase5_mypy_configured, "#51: mypy für engine/* strict, dashboard gemildert")
+        run(t_phase5_ci_workflow_exists, "#56: .github/workflows/lint.yml existiert")
+        run(t_phase5_lint_script_exists, "#56: scripts/lint.sh ist executable")
+
         summary_section("Phase 3.4 — Strukturiertes JSON-Logging (#40)")
         run(t_phase3_log_text_mode_by_default, "#40: Default-Modus ist menschenlesbar (backward-compat)")
         run(t_phase3_log_json_mode_via_env, "#40: LOG_JSON=1 → JSON-Modus aktiv")
@@ -2736,6 +2745,92 @@ def t_char_filter_load_char_refs():
             shutil.rmtree(test_ch_dir, ignore_errors=True)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 5.3 — Ruff Linting + CI (#56, #51)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def t_phase5_ruff_config_exists():
+    """#56: pyproject.toml existiert mit [tool.ruff] section."""
+    import os as _os
+    pyp = _os.path.join(ROOT, "pyproject.toml")
+    assert _os.path.exists(pyp), f"pyproject.toml fehlt: {pyp}"
+    content = open(pyp).read()
+    assert "[tool.ruff]" in content, "[tool.ruff] section fehlt in pyproject.toml"
+    assert "line-length" in content, "line-length nicht konfiguriert"
+    assert "target-version" in content, "target-version nicht konfiguriert"
+
+
+def t_phase5_ruff_config_has_lint_categories():
+    """#56: ruff Lint-Kategorien umfassen die wichtigsten Checks."""
+    import os as _os
+    pyp = _os.path.join(ROOT, "pyproject.toml")
+    content = open(pyp).read()
+    # Pflicht-Kategorien
+    for cat in ('"E"', '"W"', '"F"', '"I"', '"B"', '"UP"'):
+        assert cat in content, f"Lint-Kategorie {cat} fehlt in ruff config"
+    # Mypy auch konfiguriert
+    assert "[tool.mypy]" in content, "[tool.mypy] section fehlt"
+
+
+def t_phase5_ruff_isort_first_party():
+    """#56: isort kennt unsere Top-Level-Module."""
+    import os as _os
+    pyp = _os.path.join(ROOT, "pyproject.toml")
+    content = open(pyp).read()
+    for mod in ('"engine"', '"engine_elevenlabs"', '"render_overlay"'):
+        assert mod in content, f"isort known-first-party: {mod} fehlt"
+
+
+def t_phase5_ruff_format_configured():
+    """#56: ruff format Konfiguration (double quotes, lf line endings)."""
+    import os as _os
+    pyp = _os.path.join(ROOT, "pyproject.toml")
+    content = open(pyp).read()
+    assert "quote-style" in content and "double" in content, "quote-style double fehlt"
+    assert "line-ending" in content and "lf" in content, "line-ending lf fehlt"
+
+
+def t_phase5_mypy_configured():
+    """#51: mypy für engine/* strict, dashboard gemildert (Pre-Phase-M-Code)."""
+    import os as _os
+    pyp = _os.path.join(ROOT, "pyproject.toml")
+    content = open(pyp).read()
+    # engine.* strict
+    assert "tool.mypy.overrides" in content, "mypy.overrides fehlt"
+    assert "engine.*" in content, "engine.* override fehlt"
+    assert "strict" in content, "strict mode fehlt für engine"
+    # dashboard gemildert
+    assert "dashboard" in content, "dashboard override fehlt"
+    assert "ignore_errors" in content, "ignore_errors für dashboard fehlt"
+
+
+def t_phase5_ci_workflow_exists():
+    """#56: GitHub Actions Workflow für Lint existiert."""
+    import os as _os
+    wf = _os.path.join(ROOT, ".github", "workflows", "lint.yml")
+    assert _os.path.exists(wf), f"GitHub Actions Workflow fehlt: {wf}"
+    content = open(wf).read()
+    # Pflicht-Jobs
+    for job in ("ruff", "mypy", "test"):
+        assert f"  {job}:" in content or f"    {job}:" in content or f"{job}:" in content, \
+            f"Job {job} fehlt in CI workflow"
+    # Actions/checkout
+    assert "actions/checkout" in content, "actions/checkout fehlt"
+
+
+def t_phase5_lint_script_exists():
+    """#56: scripts/lint.sh ist executable und führt ruff + syntax-check aus."""
+    import os as _os, stat
+    script = _os.path.join(ROOT, "scripts", "lint.sh")
+    assert _os.path.exists(script), f"scripts/lint.sh fehlt: {script}"
+    assert _os.access(script, os.X_OK), "scripts/lint.sh muss executable sein"
+    content = open(script).read()
+    assert "ruff" in content, "lint.sh muss ruff aufrufen"
+    assert "py_compile" in content, "lint.sh muss Syntax-Check machen"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 3.4 — Strukturiertes JSON-Logging (#40)
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 3.4 — Strukturiertes JSON-Logging (#40)
 # ─────────────────────────────────────────────────────────────────────────────
