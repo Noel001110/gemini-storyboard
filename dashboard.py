@@ -1237,23 +1237,22 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
                 # between), so they had zero reference to each other. This attaches the
                 # FIRST generated scene of the same character as a fixed visual anchor.
                 entity_refs, entity_debug = _resolve_entity_ref(plan_path, scene)
-                # Globale Charakter-Referenz anhängen, sobald die Szene eine Figur zeigt
-                # (Entity beginnt mit "char_"). Die frühere Zusatzprüfung "Entity muss
-                # als id in plan['characters'] stehen" war zu fragil: wenn analyze_script
-                # (flaky Gemini-JSON) die characters-Liste LEER lässt, matchte NICHTS mehr
-                # → die Referenz wurde NIE angehängt → generische Strichmännchen statt
-                # des Referenz-Stils. Der char_-Prefix allein ist das verlässliche Signal.
-                # Juli 2026 (User-Vorschlag nach Farb-Inkonsistenz-Report): NIE zwei
-                # Referenzbilder gleichzeitig mitschicken — KIE muss sonst selbst
-                # entscheiden, welchem der widersprüchlichen Bilder es mehr Gewicht gibt,
-                # was zu genau der Art von Zufalls-Inkonsistenz führte, die wir gerade
-                # gefixt haben (mal Referenzstil übernommen, mal nicht). Entweder/Oder:
-                # hat der Charakter schon ein generiertes Bild (chain_refs = gleicher
-                # Shot, entity_refs = erste Erscheinung desselben Charakters), gilt NUR
-                # das als Referenz — das globale Settings-Referenzbild (char_ref_url)
-                # nur für die ALLERERSTE Erscheinung eines Charakters in diesem Video.
+                # Juli 2026 (User-Report: "sobald kein Mensch im Prompt ist, denkt er
+                # sich was aus, wird fast hyperrealistisch"): das globale Referenzbild
+                # früher NUR bei entity.startswith("char_") mitgeschickt — das war Restlogik
+                # aus der Zeit, als das Referenzbild noch als erzwungene CHARAKTER-Vorgabe
+                # galt ("das ist exakt diese Person"), wo ein Referenzbild in einer reinen
+                # Landschafts-/Symbol-Szene tatsächlich riskiert hätte, ungewollt eine Person
+                # hineinzuzeichnen. Seit dem Umbau auf reinen STIL-Anker (siehe Master-Prompt:
+                # "match the reference image's art style") gilt dieses Risiko nicht mehr — im
+                # Gegenteil, OHNE Referenzbild hatte jede Nicht-Charakter-Szene gar keinen
+                # visuellen Anker mehr und driftete stilistisch ab (genau der "kein Guss"-
+                # Effekt). Jetzt: Referenzbild an JEDE Szene, außer es gibt bereits eine
+                # spezifischere eigene Referenz (chain_refs = gleicher Shot, entity_refs =
+                # erste Erscheinung desselben Charakters) — dann NIE zwei Bilder gleichzeitig
+                # (siehe Farb-Inkonsistenz-Fix), sondern nur die spezifischere.
                 has_prior_ref = bool(chain_refs) or bool(entity_refs)
-                use_char_ref = bool(char_ref_url) and entity.startswith("char_") and not has_prior_ref
+                use_char_ref = bool(char_ref_url) and not has_prior_ref
                 # Juli 2026 (User-Report: falscher Charakter generiert): der Kanal kann
                 # Charsheets aus einem komplett anderen, längst abgeschlossenen Video
                 # enthalten (die Multi-Charakter-Bibliothek-UI dafür ist im aktuellen
@@ -3520,15 +3519,17 @@ class H(BaseHTTPRequestHandler):
             # _image_job_worker once this scene's generation fully finishes.
             IMAGE_GEN_SEMAPHORE.acquire()
             char_ref_url = get_channel_char_ref(cid)
-            # Juli 2026 (User-Vorschlag nach Farb-Inkonsistenz-Report): NIE zwei
-            # Referenzbilder gleichzeitig — entweder das schon generierte Bild dieses
-            # Charakters (entity_refs), oder — nur bei dessen allererster Erscheinung in
-            # diesem Video — das globale Settings-Referenzbild. Nie beide zusammen, sonst
-            # muss KIE selbst zwischen zwei widersprüchlichen Bildern gewichten (siehe
-            # _batch_generate_worker für die ausführliche Begründung). Keine
-            # Charsheet-Text/Bild-Injection mehr (alte, kanalweite Charsheets aus einem
-            # anderen Video überstimmten sonst die Szenenbeschreibung).
-            use_char_ref = bool(char_ref_url) and entity.startswith("char_") and not entity_refs
+            # Juli 2026 (User-Report: "sobald kein Mensch im Prompt ist, denkt er sich
+            # was aus"): Referenzbild jetzt an JEDE Szene (nicht mehr nur char_-Entities)
+            # — es ist ein reiner STIL-Anker (siehe Master-Prompt), kein erzwungenes
+            # "diese Person muss hier stehen" mehr, daher unproblematisch auch für
+            # Landschafts-/Symbol-Szenen. Nur wenn schon ein spezifischeres, bereits
+            # generiertes Bild desselben Charakters existiert (entity_refs), gilt NUR das
+            # — nie beide Referenzbilder gleichzeitig (siehe Farb-Inkonsistenz-Fix in
+            # _batch_generate_worker). Keine Charsheet-Text/Bild-Injection mehr (alte,
+            # kanalweite Charsheets aus einem anderen Video überstimmten sonst die
+            # Szenenbeschreibung).
+            use_char_ref = bool(char_ref_url) and not entity_refs
             refs = entity_refs + ([char_ref_url] if use_char_ref else [])
             try:
                 task_id = _kie_submit_image(full_prompt, model=get_video_image_model(cid, vid),

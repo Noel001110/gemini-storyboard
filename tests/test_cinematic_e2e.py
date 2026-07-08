@@ -3529,10 +3529,13 @@ def t_phase_q38_existing_master_never_overwritten():
     unangetastet. Konkret: ein bestehender Custom-Master darf nach Q.4-Migration
     nicht durch den Default-Preset ersetzt worden sein.
     """
-    # Tatsächliche Verifikation: die 3 default-Kanäle haben jetzt master_prompt.txt
+    # Tatsächliche Verifikation: die Fixture-Kanäle haben jetzt master_prompt.txt
     # (von der Q.4-Migration geschrieben). Diese dürfen NICHT leer sein und müssen
-    # den neuen flat_cartoon_doc-Preset enthalten.
-    for ch_id in ("default", "test"):
+    # den neuen flat_cartoon_doc-Preset enthalten. NICHT 'default' hier prüfen — das
+    # ist der Nutzer's echter, aktiver Kanal (nicht git-getrackt), dessen master_prompt.txt
+    # legitim vom Nutzer angepasst wird (siehe Juli 2026 Referenzbild-Stil-Fix); dieser
+    # Test darf nur gegen eine unberührte Fixture assertieren, nicht gegen Live-Daten.
+    for ch_id in ("test",):
         master_path = os.path.join(ROOT, "channels", ch_id, "master_prompt.txt")
         if os.path.exists(master_path):
             content = open(master_path).read()

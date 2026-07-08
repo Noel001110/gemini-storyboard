@@ -2050,7 +2050,13 @@ async function genOne(i, pinnedChannel, pinnedVideo){
     await new Promise(res=>setTimeout(res,2000));
     const s = await fetch(`/api/job_status?job_id=${r.job_id}`).then(r=>r.json()).catch(()=>null);
     if(!s) continue;
-    if(s.progress) _imgProgress(i, s.progress);
+    // KIE reports no real progress for image jobs (always 0 until it just flips to
+    // done), so a real percentage would sit frozen at 0% the whole time and then jump
+    // straight to finished — looked broken/random to users. Fake a smooth, monotonic
+    // ease-toward-90% curve instead, based on elapsed polls (images usually land in
+    // 15-30s); real completion still snaps straight to 100% via the 'done' branch below.
+    const fakePct = Math.min(90, Math.round(90 * (1 - Math.pow(0.85, poll + 1))));
+    _imgProgress(i, s.progress > fakePct ? s.progress : fakePct);
     if(s.status==='done'){
       setStatus(i,'fertig');
       SCENES[i].file=s.file; SCENES[i].source_url=s.source_url;
