@@ -695,7 +695,7 @@ def make_thumbnail_prompt(full_script: str, master_style: str) -> str:
 
 
 def gen_thumbnail_image(prompt: str, master_style: str, out_path: str,
-                         model: str = "nano-banana-2", ref_urls: list = None) -> dict:
+                         model: str = "nano-banana-2", ref_urls: list | None = None) -> dict:
     """Submits + polls + downloads a 16:9 thumbnail image. Reuses the same KIE image
     pipeline as scene generation, just with thumbnail-specific dimensions/prompt."""
     # Lazy-imports: KIE pipeline functions live in dashboard.py

@@ -273,7 +273,7 @@ def _motion_for_scene(scene: dict, prev_scene: dict) -> dict:
 
 # ── Overlay-Specs ─────────────────────────────────────────────────────────────
 
-def _overlay_specs_for_scene(scene: dict, clip_dur: float, overlay_opts: dict) -> list:
+def _overlay_specs_for_scene(scene: dict, clip_dur: float, overlay_opts: dict | None) -> list:
     """Decides which text overlays (if any) apply to this scene and their on-screen
     window. Returns a list of (style, text, t0, t1) tuples, evaluated in the order they
     should be layered (chapter title first/bottom-most, caption last/top-most is NOT
@@ -315,7 +315,7 @@ def _overlay_specs_for_scene(scene: dict, clip_dur: float, overlay_opts: dict) -
 # ── Render-Funktionen (ffmpeg) ───────────────────────────────────────────────
 
 def _render_clip(img_path: str, scene: dict, out_path: str, fps: int = RENDER_FPS,
-                  overlay_opts: dict = None) -> None:
+                  overlay_opts: dict | None = None) -> None:
     """Renders one scene's still image into a short Ken-Burns clip, optionally with text
     overlays composited on top. Resume-safe: skips if out_path exists and non-empty.
     Phase E: for kind=='title_card', generates the title-card PNG on the fly.

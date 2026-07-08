@@ -76,7 +76,7 @@ def split_units(text):
 
 
 def segment_by_pacing(units: list, pacing: list, wpm: float, normal_sec: float,
-                       sequences: list = None, callouts: list = None) -> list:
+                       sequences: list | None = None, callouts: list | None = None) -> list:
     """Group atomic units into scenes using per-unit pacing labels.
 
     Full rationale (kept identical to dashboard.py Z. 670-692):

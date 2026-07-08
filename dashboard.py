@@ -1008,7 +1008,7 @@ def _kie_retry_with_backoff(fn, max_attempts: int = 4, base_sleep_s: float = 2.0
             time.sleep(wait)
     raise RuntimeError(f"KIE nach {max_attempts} Versuchen aufgegeben: {last_err}")
 
-def _kie_submit_image(full_prompt: str, model: str = "nano-banana-2", ref_urls: list = None) -> str:
+def _kie_submit_image(full_prompt: str, model: str = "nano-banana-2", ref_urls: list | None = None) -> str:
     """Submit image task to KIE, return task_id.
 
     ref_urls: reference image URL(s) for visual consistency. IMPORTANT — the correct
@@ -2007,7 +2007,7 @@ def gen_image(scene_prompt, master, out_path, char_refs=None):
 
 
 
-def _multipart_upload(url: str, field: str, filename: str, data: bytes, mime: str, extra_fields: dict = None) -> str:
+def _multipart_upload(url: str, field: str, filename: str, data: bytes, mime: str, extra_fields: dict | None = None) -> str:
     """Generic multipart/form-data upload, returns response body."""
     boundary = b"----upload-" + str(int(time.time())).encode()
     body = b""
@@ -2148,7 +2148,7 @@ def make_t2v_prompt(scene_text: str, scene_i: int, total_scenes: int,
 VEO_API = "https://api.kie.ai/api/v1/veo"
 MAX_CHAIN_LENGTH = 4  # max consecutive extends before forcing a fresh anchor shot
 
-def gen_veo(video_prompt: str, image_urls: list = None,
+def gen_veo(video_prompt: str, image_urls: list | None = None,
             generation_type: str = "TEXT_2_VIDEO",
             model: str = "veo3_lite",
             resolution: str = "1080p",
