@@ -92,7 +92,7 @@ def _anonymized_words(analysis: dict) -> set:
     return words
 
 
-def _validate_image_prompt_entry(entry: dict, anonymized_words: set = frozenset()) -> bool:
+def _validate_image_prompt_entry(entry: dict, anonymized_words: "set | frozenset" = frozenset()) -> bool:
     ip = (entry.get("image_prompt") or "").strip()
     if len(ip) < IMAGE_PROMPT_MIN_LEN:
         return False
@@ -112,7 +112,7 @@ def _validate_image_prompt_entry(entry: dict, anonymized_words: set = frozenset(
 
 
 def _image_prompt_chunk(chunk_beats: list, chunk_offset: int, total: int,
-                         analysis_ctx: str, chunk_phases: list = None) -> list:
+                         analysis_ctx: str, chunk_phases: list | None = None) -> list:
     """One LLM call for a small chunk of scenes (still images — no story-phase/camera-move
     logic like video; instead forces explicit character-consistency notes, since stills have
     no 'last frame of previous clip' anchor to inherit continuity from).
@@ -190,16 +190,33 @@ Return a JSON array of {len(chunk_beats)} objects, one per line above, in the sa
 
 
 def _image_prompt_single_retry(beat_text: str, beat_i: int, total: int, analysis_ctx: str) -> dict:
-    """Focused single-scene retry for entries that failed validation in the batch call."""
-    try:
-        result = _image_prompt_chunk([beat_text], beat_i, total, analysis_ctx)
-        return result[0]
-    except Exception as e:
-        print(f"  [Plan] Bild-Einzel-Retry Szene {beat_i} fehlgeschlagen: {e}", flush=True)
-        return {
-            "scene": beat_i + 1, "concrete_entity": "",
-            "image_prompt": f"Scene illustrating: {beat_text[:80]}. Simple, clear composition.",
-        }
+    """Focused single-scene retry for entries that failed validation in the batch call.
+
+    Juli 2026 (User-Report: mehrere Szenen landeten mit einem barebones
+    "Scene illustrating: ... Simple, clear composition."-Notprompt statt eines echten
+    Bild-Prompts — kein visueller roter Faden, Stilbrüche): vorher genau EIN Versuch,
+    dann sofort der unmarkierte Fallback bei jedem Fehler (auch einem simplen,
+    transienten JSON-Parse-Fehler). Jetzt bis zu 3 Versuche; erst wenn wirklich alle
+    scheitern, greift der Fallback — und der wird als "prompt_error" markiert statt
+    unauffällig wie eine normale Szene durchzugehen, damit er auffindbar und gezielt
+    nachbearbeitbar bleibt statt stillschweigend eine schwache Bild-Generierung zu
+    verursachen.
+    """
+    last_err: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            result = _image_prompt_chunk([beat_text], beat_i, total, analysis_ctx)
+            return result[0]
+        except Exception as e:
+            last_err = e
+            print(f"  [Plan] Bild-Einzel-Retry Szene {beat_i} Versuch {attempt}/3 fehlgeschlagen: {e}", flush=True)
+    print(f"  [Plan] FEHLER: Szene {beat_i} — Prompt-Generierung nach 3 Versuchen endgueltig "
+          f"gescheitert ({last_err}). Als prompt_error markiert.", flush=True)
+    return {
+        "scene": beat_i + 1, "concrete_entity": "",
+        "image_prompt": f"Scene illustrating: {beat_text[:80]}. Simple, clear composition.",
+        "prompt_error": True,
+    }
 
 
 def visual_prompts(scenes, analysis=None):
@@ -232,21 +249,36 @@ def visual_prompts(scenes, analysis=None):
     def _fetch_image_chunk(chunk, chunk_offset, chunk_phases=None):
         """Try the chunk; on failure (incl. truncated/malformed JSON on large chunks),
         split in half and retry each half instead of giving up the whole chunk to the
-        generic fallback — a truncation only costs half the chunk, not all of it."""
+        generic fallback — a truncation only costs half the chunk, not all of it.
+
+        Juli 2026: at the leaf (chunk size 1, can't split further) this used to give up
+        after a single failed attempt — same "either it works or the scene silently gets
+        a near-empty placeholder prompt" problem as _image_prompt_single_retry. Now
+        retries 3x at the leaf before falling back, and the fallback is marked
+        prompt_error=True so it's never mistaken for a normal, fully-formed prompt.
+        """
         try:
             return _image_prompt_chunk(chunk, chunk_offset, total, analysis_ctx, chunk_phases)
         except Exception as e:
             if len(chunk) <= 1:
-                print(f"  [Plan] Bild-Chunk-Fehler (Szene {chunk_offset}): {e} — Fallback", flush=True)
+                last_err = e
+                for attempt in range(2, 4):
+                    try:
+                        return _image_prompt_chunk(chunk, chunk_offset, total, analysis_ctx, chunk_phases)
+                    except Exception as e2:
+                        last_err = e2
+                        print(f"  [Plan] Bild-Chunk-Fehler (Szene {chunk_offset}) Versuch {attempt}/3: {e2}", flush=True)
+                print(f"  [Plan] FEHLER: Szene {chunk_offset} — Chunk-Generierung nach 3 Versuchen "
+                      f"endgueltig gescheitert ({last_err}). Als prompt_error markiert.", flush=True)
                 return [{"image_prompt": f"Scene illustrating: {chunk[0][:80]}. Simple, clear composition.",
-                         "concrete_entity": ""}]
+                         "concrete_entity": "", "prompt_error": True}]
             mid = len(chunk) // 2
             print(f"  [Plan] Bild-Chunk-Fehler: {e} — teile Chunk und wiederhole …", flush=True)
             left  = _fetch_image_chunk(chunk[:mid], chunk_offset, (chunk_phases or [])[:mid])
             right = _fetch_image_chunk(chunk[mid:], chunk_offset + mid, (chunk_phases or [])[mid:])
             return left + right
 
-    prompts: list[str] = []
+    prompts: list[dict] = []
     phases = [s.get("phase", "") for s in scenes]
     chunks = [beats[i:i+IMAGE_PROMPT_CHUNK_SIZE] for i in range(0, total, IMAGE_PROMPT_CHUNK_SIZE)]
     chunks_phases = [phases[i:i+IMAGE_PROMPT_CHUNK_SIZE] for i in range(0, total, IMAGE_PROMPT_CHUNK_SIZE)]
@@ -263,6 +295,7 @@ def visual_prompts(scenes, analysis=None):
             prompts.append({
                 "prompt": str(entry.get("image_prompt") or f"Scene illustrating: {beats[beat_i][:80]}."),
                 "concrete_entity": str(entry.get("concrete_entity") or ""),
+                "prompt_error": bool(entry.get("prompt_error", False)),
             })
         offset += len(chunk)
 

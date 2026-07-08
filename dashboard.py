@@ -1224,6 +1224,28 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
             except Exception:
                 pass
 
+            # Juli 2026 (User: "entweder es geht richtig oder gar nicht, der Rest ist
+            # Verschwendung"): eine Szene mit prompt_error=True hat KEINEN echten
+            # Bild-Prompt bekommen (nur einen barebones Notprompt nach 3 gescheiterten
+            # LLM-Versuchen, siehe visual_prompts). Ein KIE-Aufruf darauf würde nur eine
+            # schwache, stilistisch beliebige Bild-Generierung verschwenden. Batch
+            # überspringt sie und markiert sie klar als "fehler" statt sie unauffällig
+            # mitlaufen zu lassen — manuelles Nachbessern des Prompts vor Einzel-Klick
+            # bleibt möglich.
+            if scene.get("prompt_error"):
+                print(f"  [BatchGen] Szene {i}: prompt_error — übersprungen, "
+                      f"Prompt manuell prüfen und Szene einzeln generieren", flush=True)
+                with _PLAN_WRITE_LOCK:
+                    try:
+                        p2 = json.load(open(plan_path))
+                        for s in p2["scenes"]:
+                            if s["i"] == i:
+                                s["status"] = "fehler"
+                        _atomic_write_json(plan_path, p2, ensure_ascii=False, indent=1)
+                    except Exception:
+                        pass
+                return
+
             scene_key = (cid, vid, i)
             fn = f"{i:03d}.jpg"
             out_path = os.path.join(v_out(cid, vid), fn)
@@ -1774,10 +1796,23 @@ def _plan_generate_worker(cid: str, vid: str, text: str, wpm: float, sec: float)
             PLAN_JOBS[key]["step"] = f"Schreibe Bild-Prompts für {len(scenes)} Szenen …"
         prompts = visual_prompts(scenes, analysis)
 
+        prompt_error_scenes = []
         for s, pr in zip(scenes, prompts):
             s["prompt"] = pr["prompt"]; s["concrete_entity"] = pr["concrete_entity"]; s["file"] = None
             s["status"] = "geplant"; s["t"] = fmt_t(s["start"])
             s["video_prompt"] = ""
+            # Juli 2026 (User-Report: mehrere Szenen mit barebones "Scene illustrating: ..."
+            # Notprompt statt echtem Bild-Prompt — sichtbar am fehlenden roten Faden).
+            # visual_prompts() markiert das jetzt explizit statt es unauffällig durchgehen
+            # zu lassen — hier nur durchreichen + fürs Log sammeln, damit der Nutzer sofort
+            # sieht, welche Szenen manuelle Nacharbeit brauchen.
+            s["prompt_error"] = pr.get("prompt_error", False)
+            if s["prompt_error"]:
+                prompt_error_scenes.append(s["i"])
+        if prompt_error_scenes:
+            print(f"  [Plan] WARNUNG: {len(prompt_error_scenes)} Szene(n) mit fehlgeschlagener "
+                  f"Prompt-Generierung (prompt_error): {prompt_error_scenes} — Prompt-Text vor "
+                  f"Bild-Generierung manuell prüfen/überschreiben.", flush=True)
         _assign_phases(scenes, analysis, len(scenes))
         # Phase H: also default 'speaker' here for the manual-script path (Phase I's
         # `_transcribe_generate_worker` does the same). Combined they ensure every
@@ -2539,8 +2574,16 @@ def _transcribe_generate_worker(cid: str, vid: str, sec: float) -> dict:
 
     tx(4, "Schreibe Bild-Prompts …")
     prompts = visual_prompts(scenes, analysis)
+    prompt_error_scenes = []
     for s, pr in zip(scenes, prompts):
         s["prompt"] = pr["prompt"]; s["concrete_entity"] = pr["concrete_entity"]
+        s["prompt_error"] = pr.get("prompt_error", False)
+        if s["prompt_error"]:
+            prompt_error_scenes.append(s["i"])
+    if prompt_error_scenes:
+        print(f"  [Plan] WARNUNG: {len(prompt_error_scenes)} Szene(n) mit fehlgeschlagener "
+              f"Prompt-Generierung (prompt_error): {prompt_error_scenes} — Prompt-Text vor "
+              f"Bild-Generierung manuell prüfen/überschreiben.", flush=True)
     # video_prompt stays empty — only generated on demand per scene, see /api/plan comment
     for s in scenes:
         s["video_prompt"] = ""

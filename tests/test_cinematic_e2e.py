@@ -947,7 +947,7 @@ def t_round5_image_job_worker_race_detect():
     batch passing through Scene 5 would BOTH submit."""
     src = open(os.path.join(ROOT, "dashboard.py")).read()
     idx = src.find("def _batch_generate_worker")
-    body = src[idx:idx + 15000]   # large slice — body of this function is ~13K
+    body = src[idx:idx + 18000]   # large slice — function has grown with later fixes' comments
     # The dedup-block must be present in the batch worker
     assert "if existing_job and JOBS.get(existing_job, {}).get(\"status\") == \"running\":" in body, \
         "Round-5 Fix-4 missing: _batch_generate_worker has no ACTIVE_SCENE_JOBS-dedup check"
