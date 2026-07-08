@@ -98,6 +98,12 @@ def _validate_image_prompt_entry(entry: dict, anonymized_words: set = frozenset(
         return False
     entity = (entry.get("concrete_entity") or "").strip().lower()
     if entity and entity not in ("none", "n/a", "-"):
+        # Juli 2026 (User-Report): the LLM sometimes echoes the raw internal entity id
+        # (with its literal underscores, e.g. "char_elizabeth_holmes") straight into the
+        # visible image_prompt instead of writing a natural-language description — KIE
+        # then sees a meaningless code-like token instead of an actual description.
+        if "_" in entity and entity in ip.lower():
+            return False
         words = [w for w in re.findall(r"[a-zA-Z]{4,}", entity)
                  if w not in ("char", "loc", "sym", "anonymized") and w.lower() not in anonymized_words]
         if words and not any(w.lower() in ip.lower() for w in words):

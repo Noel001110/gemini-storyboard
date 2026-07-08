@@ -763,13 +763,33 @@ def analyze_script(beats):
         "nicht trägt — wenn das Skript keine Frage stellt, leerer String.\n\n"
         "BEATS:\n" + json.dumps(beats, ensure_ascii=False)
     )
+    result = {}
     for attempt in (1, 2):
         try:
             txt = post_gemini_native([{"role": "user", "content": instr}], json_mode=True, temp=0.2)
-            return json.loads(txt)
+            result = json.loads(txt)
         except Exception as e:
             print(f"Analyse-Fehler (Versuch {attempt}):", e)
-    return {}
+            continue
+        # Juli 2026 (User-Report: "Elizabeth Holmes" ungefiltert im Bild-Prompt +
+        # inkonsistente concrete_entity-IDs quer über das Video): eine leere
+        # characters-Liste bei einem NICHT-trivialen Skript ist kein harmloser
+        # Rand-, sondern ein Qualitätsfehler — ohne sie hat jeder nachfolgende
+        # Chunk-Aufruf (visual_prompts) keinen gemeinsamen Anker mehr und erfindet
+        # pro Chunk eine eigene, inkonsistente Entity-ID für dieselbe Person UND die
+        # "anonymize real named person"-Regel greift nie (leere Liste = niemand zum
+        # Anonymisieren). Bei leerem Ergebnis + genug Beats für ein "echtes" Skript:
+        # einmal erneut versuchen, bevor wir das Risiko eingehen.
+        if not result.get("characters") and len(beats) >= 5 and attempt == 1:
+            print(f"  [Analyse] characters-Liste leer bei {len(beats)} Beats — "
+                  f"wiederhole einmal (Versuch {attempt})", flush=True)
+            continue
+        return result
+    if not result.get("characters"):
+        print(f"  [Analyse] WARNUNG: characters-Liste bleibt leer nach Retry "
+              f"({len(beats)} Beats) — Charakter-Konsistenz/Anonymisierung könnte "
+              f"in dieser Generierung nicht greifen.", flush=True)
+    return result
 
 
 def story_phase(i: int, total: int) -> str:
