@@ -1,0 +1,72 @@
+[project]
+name = "gemini-storyboard"
+version = "0.1.0"
+description = "Storyboard video generator with cinematic pipeline (Phase A–P) and dashboard"
+requires-python = ">=3.11"
+# Wir pinnen keine Runtime-Deps: die Pipeline ist Zero-Framework (nur stdlib + ffmpeg-subprocess
+# + KIE.ai + ElevenLabs API-Keys). Dev-Deps sind unten separat aufgeführt.
+
+[tool.ruff]
+# Phase 5.3 (#56): Ruff Linting als CI-Quality-Gate. Konfig aus der Plan-Empfehlung
+# §1.4 "keine zwei Stellen für eine Entscheidung" → eine zentrale Lint-Konfig.
+line-length = 110
+target-version = "py311"
+extend-exclude = [
+    "legacy/",         # Phase Q.1: alte Pipelines, kein Refactor
+    ".venv_whisper/",  # isolierte venv (Pillow-Subprocess)
+    "build/",
+    "dist/",
+]
+
+[tool.ruff.lint]
+# Pragmatischer Start: nur die wichtigsten Kategorien. Strenger nach und nach.
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes (undef vars, unused imports, etc.)
+    "I",    # isort (import-Sortierung)
+    "B",    # bugbear (wahrscheinliche Bugs)
+    "UP",   # pyupgrade (modernisiere Python-Syntax)
+    "C4",   # flake8-comprehensions
+    "RET",  # return-statement Best-Practices
+    "SIM",  # flake8-simplify
+]
+ignore = [
+    "E501",  # line-too-long (von Ruff separat behandelt, hier kein Soft-Wrap)
+    "B008",  # function-call-in-default-argument (in dashboard.py verbreitet: list/dict defaults in helper)
+    "E402",  # module-level-import-not-at-top (lazy-imports für cycle-avoidance: KEIN Fehler hier)
+    "E731",  # lambda-assignment (in Test-Skripts als Helper gebraucht)
+    "F401",  # unused-import (in lazy-loaded Modulen oft unvermeidbar)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["engine", "engine_elevenlabs", "render_overlay"]
+combine-as-imports = true
+
+[tool.ruff.lint.per-file-ignores]
+# Tests dürfen etwas lockerer sein (Magic-Numbers, asserts, etc.)
+"tests/**/*.py" = ["E501", "B011"]
+# dashboard.py ist der Pre-Phase-M-Rest — historisch, nicht alles linter-clean
+# Spätere Phasen: dashboard.py < 1000 Z, dann strict = true
+"dashboard.py" = ["E501", "B008", "E402", "F401"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+# Phase 5.3 (#51): Mypy Type-Hints (initial nur für engine/ — noch nicht für dashboard.py)
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+strict_optional = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[[tool.mypy.overrides]]
+module = ["engine.*"]
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["dashboard", "engine_elevenlabs", "render_overlay"]
+ignore_errors = true   # Pre-Phase-M-Code, noch nicht getypt
