@@ -293,6 +293,63 @@ def _resolve_chain_refs(plan_path: str, scene: dict) -> tuple:
     return refs, debug
 
 
+# ── Cross-scene character continuity (Juli 2026, User-Report: "Elizabeth sieht in
+# jeder Szene anders aus") ─────────────────────────────────────────────────────
+# _resolve_chain_refs only chains scenes inside the SAME visual sequence (seq_id) —
+# most videos never group repeated-character scenes into a sequence at all (e.g. a
+# character reappearing in scene 0, 3 and 5 with nothing in between), so those scenes
+# had ZERO reference to each other and nano-banana-2 redesigned the character from
+# scratch every time. This mirrors the sequence anchor's drift-avoidance reasoning:
+# always reference the FIRST generated occurrence of a character (a fixed anchor),
+# never the most recent one — chaining off "whatever came last" would let the design
+# drift a little further with every repeat appearance.
+
+def _wait_for_entity_anchor_scene(plan_path: str, entity: str, anchor_i: int, timeout: float = 170.0) -> dict:
+    """Block until the scene at index `anchor_i` (the first scene showing `entity`) has
+    source_url, has failed, or the timeout elapses. Same reasoning as
+    _wait_for_chain_scene: the batch worker can dispatch the anchor and a later repeat
+    of the same character in the same concurrent wave."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            plan = json.load(open(plan_path))
+            match = next((s for s in plan["scenes"]
+                          if s.get("i") == anchor_i and s.get("concrete_entity") == entity), None)
+            if match and (match.get("source_url") or match.get("status") == "fehler"):
+                return match
+        except Exception:
+            pass
+        time.sleep(2)
+    try:
+        plan = json.load(open(plan_path))
+        return next((s for s in plan["scenes"] if s.get("i") == anchor_i), {})
+    except Exception:
+        return {}
+
+
+def _resolve_entity_ref(plan_path: str, scene: dict) -> tuple:
+    """Returns (ref_urls, debug_info): the first already-generated (or in-flight)
+    scene showing the same concrete_entity as `scene`, so every repeat appearance of a
+    character reuses the very first generated image of them as a visual anchor —
+    independent of visual sequences (see module comment above)."""
+    entity = str(scene.get("concrete_entity", ""))
+    if not entity.startswith("char_"):
+        return [], {}
+    try:
+        plan = json.load(open(plan_path))
+    except Exception:
+        return [], {}
+    earlier = [s for s in plan.get("scenes", [])
+               if s.get("concrete_entity") == entity and s.get("i", -1) < scene.get("i", -1)]
+    if not earlier:
+        return [], {}
+    anchor_i = min(s["i"] for s in earlier)
+    anchor = _wait_for_entity_anchor_scene(plan_path, entity, anchor_i)
+    if anchor.get("source_url"):
+        return [anchor["source_url"]], {"entity_anchor_file": anchor.get("file"), "entity_anchor_i": anchor_i}
+    return [], {}
+
+
 # ── Phase O: Wort-Akzent-Puls ─────────────────────────────────────────────────
 
 # Pause-Schwelle für Akzent-Kandidaten (Plan §4.4)

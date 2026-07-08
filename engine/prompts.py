@@ -289,23 +289,65 @@ HOOK_PROMPT_ADDITION = (
 )
 
 
-def _build_image_prompt(scene_prompt, master, char_refs, phase="", is_hook=False):
+def _filter_char_refs_for_entity(char_refs, entity=""):
+    """Only a charsheet whose name exactly matches this scene's concrete_entity belongs
+    in that scene's prompt as a TEXT character-design override.
+
+    Deliberately excludes the generic global 'char_ref' charsheet (the single reference
+    image set in Settings) from this text filter — it is a visual style anchor, attached
+    separately as an *image* reference (see dashboard.py's char_ref_url handling), never
+    as a forced textual "this exact build/outfit wins" directive. An earlier version of
+    this filter treated 'char_ref' as always-included text, which meant its
+    Gemini-Vision-derived description (e.g. "stout build, teal sweater, brown trousers")
+    silently overrode the scene's own, correct character description ("blonde hair,
+    black turtleneck") in every single scene — producing a wrong-looking character that
+    matched neither the reference image's actual look nor the intended prompt.
+
+    Without any filtering at all, EVERY charsheet ever created in the channel gets glued
+    onto EVERY scene's prompt regardless of which video/character it belongs to — a
+    channel previously used for a different video (e.g. a journalist story) leaves
+    behind charsheets that then silently contaminate a brand-new, unrelated video.
+    """
+    if not char_refs:
+        return []
+    entity_key = entity[5:] if entity.startswith("char_") else entity
+    entity_key = entity_key.strip().lower()
+    if not entity_key:
+        return []
+    out = []
+    for cr in char_refs:
+        if not _is_valid_char_description(cr.get("description", "")):
+            continue
+        safe = (cr.get("safe") or "").lower()
+        if safe == entity_key:
+            out.append(cr)
+    return out
+
+
+def _build_image_prompt(scene_prompt, master, char_refs, phase="", is_hook=False, entity=""):
     """Compose the final image-generation prompt: scene text + character refs (if any)
     + PHASE_PROMPT_ADDITIONS hard-injection (Phase C, Juli 2026) + HOOK_PROMPT_ADDITION
     hard-injection (Phase L) + master prompt.
 
-    Char-Ref-Filter (Phase 1): Müll-Injection-Schutz. Descriptions die wie Test-Müll aussehen
-    (zu kurz, oder explizite Stick-Figure-Markierungen) werden übersprungen — der Master-
-    Prompt würde sonst von inkonsistenten Specs übersteuert.
+    Char-Ref-Filter (Phase 1): Müll-Injection-Schutz, plus entity-scoping (Phase 1b) via
+    `_filter_char_refs_for_entity` — see that function's docstring for why unscoped
+    injection was actively wrong.
     """
     char_hint = ""
-    if char_refs:
-        for cr in char_refs:
-            desc = cr.get("description", ""); name = cr.get("name", "Figur")
-            if not _is_valid_char_description(desc):
-                continue
-            char_hint += (f"\n\nCHARACTER DESIGN for '{name}': {desc}"
-                          f"\nApply this exact design in whatever pose this scene requires.")
+    relevant_refs = _filter_char_refs_for_entity(char_refs, entity)
+    for cr in relevant_refs:
+        desc = cr.get("description", ""); name = cr.get("name", "Figur")
+        char_hint += (f"\n\nCHARACTER DESIGN for '{name}': {desc}"
+                      f"\nApply this exact design in whatever pose this scene requires.")
+    if relevant_refs:
+        # Without this, the scene's own (auto-written, reference-unaware) text
+        # description can invent conflicting physical traits — e.g. the scene text
+        # says "blonde hair" while the actual reference photo/charsheet is brunette —
+        # and the model has no instruction on which one to trust.
+        char_hint += ("\n\nIMPORTANT: The character design(s) above, and any attached "
+                      "reference image, define this character's true appearance (hair, "
+                      "face, outfit, build). If the scene description below conflicts "
+                      "with them, the character design / reference image wins.")
     phase_hint = ""
     if phase:
         phase_cue = _phase_prompt_addition(phase)

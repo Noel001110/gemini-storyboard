@@ -93,6 +93,7 @@ from engine.scenes import (  # noqa: F401,F403
     ACCENT_PAUSE_THRESHOLD_SEC, ACCENT_MIN_SCENE_DUR_SEC,
     split_units, segment_by_pacing, _renumber_seq_pos, _apply_visual_sequences_direct,
     _wait_for_chain_scene, _resolve_chain_refs,
+    _wait_for_entity_anchor_scene, _resolve_entity_ref,
     _is_accent_eligible, _compute_accent_t,
 )
 
@@ -195,6 +196,15 @@ _BATCH_JOBS_LOCK = threading.Lock()
 PLAN_JOBS: dict = {}
 _PLAN_JOBS_LOCK = threading.Lock()
 
+# Thumbnail generation — same server-side-job pattern as PLAN_JOBS above. Used to be a
+# fully synchronous HTTP request (make_thumbnail_prompt + gen_thumbnail_image incl. KIE
+# submit+poll+download, 30-60s inline), which froze the browser with a spinner and no
+# progress. Now a worker thread does the work while the client polls /api/thumbnail_status.
+# {(cid, vid): {"running": bool, "step": str, "error": str|None, "done": bool,
+#               "file": str|None, "prompt": str|None, "ts": float}}
+THUMB_JOBS: dict = {}
+_THUMB_JOBS_LOCK = threading.Lock()
+
 # Auto-rendering (images -> Ken Burns clips -> concat -> audio mux -> final.mp4) —
 # same server-side-job pattern as BATCH_JOBS/PLAN_JOBS above, for the same reason:
 # survives reloads, a second start call is refused while one is already running.
@@ -279,6 +289,7 @@ def _cleanup_stale_jobs(max_age_hours: float = MAX_AGE_JOBS_HOURS):
                 del JOBS[job_id]
                 removed += 1
     for d, lock in ((BATCH_JOBS, _BATCH_JOBS_LOCK), (PLAN_JOBS, _PLAN_JOBS_LOCK),
+                    (THUMB_JOBS, _THUMB_JOBS_LOCK),
                     (RENDER_JOBS, _RENDER_JOBS_LOCK), (PRODUCE_JOBS, _PRODUCE_JOBS_LOCK),
                     (VOICE_JOBS, _VOICE_JOBS_LOCK)):
         with lock:
@@ -1170,7 +1181,6 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
           f"(bis zu {MAX_CONCURRENT_IMAGE_GENS} parallel)", flush=True)
 
     master = read_master(cid)
-    char_refs = load_char_refs(cid)
     image_model = get_video_image_model(cid, vid)
     char_ref_url = get_channel_char_ref(cid)
 
@@ -1208,16 +1218,25 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
                 while JOBS.get(existing_job_id, {}).get("status") == "running":
                     time.sleep(2)
             else:
-                # Chain-refs resolution can BLOCK (waiting on a sibling sequence scene,
-                # see _wait_for_chain_scene) — deliberately done here, outside any lock,
-                # so a waiting scene never holds _ACTIVE_SCENE_JOBS_LOCK/_BATCH_JOBS_LOCK
-                # and doesn't block unrelated scenes from registering/checking in.
+                # Chain-refs + entity-ref resolution can BLOCK (waiting on a sibling
+                # sequence scene or the character's first occurrence, see
+                # _wait_for_chain_scene / _wait_for_entity_anchor_scene) — deliberately
+                # done here, outside any lock, so a waiting scene never holds
+                # _ACTIVE_SCENE_JOBS_LOCK/_BATCH_JOBS_LOCK and doesn't block unrelated
+                # scenes from registering/checking in.
                 chain_refs, chain_debug = _resolve_chain_refs(plan_path, scene)
                 # Conditional character reference (not blindly attached to every scene):
                 # only when this scene's chosen concrete_entity actually IS a character
                 # from the analysis — pure landscape/symbol scenes skip it, saving KIE
                 # tokens and avoiding mis-conditioning a scene with no character in it.
                 entity = str(scene.get("concrete_entity", ""))
+                # Cross-scene character continuity (Juli 2026, User-Report: "Elizabeth
+                # sieht in jeder Szene anders aus"): _resolve_chain_refs only chains
+                # scenes inside the same visual sequence — most repeat appearances of a
+                # character have no seq_id at all (e.g. scene 0/3/5 with nothing in
+                # between), so they had zero reference to each other. This attaches the
+                # FIRST generated scene of the same character as a fixed visual anchor.
+                entity_refs, entity_debug = _resolve_entity_ref(plan_path, scene)
                 # Globale Charakter-Referenz anhängen, sobald die Szene eine Figur zeigt
                 # (Entity beginnt mit "char_"). Die frühere Zusatzprüfung "Entity muss
                 # als id in plan['characters'] stehen" war zu fragil: wenn analyze_script
@@ -1225,17 +1244,17 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
                 # → die Referenz wurde NIE angehängt → generische Strichmännchen statt
                 # des Referenz-Stils. Der char_-Prefix allein ist das verlässliche Signal.
                 use_char_ref = bool(char_ref_url) and entity.startswith("char_")
-                # Phase 2 (Audit-Fix): Charsheets als Bild-Referenzen anhängen.
-                # load_char_refs() liefert pro validiertem Char ein image_data_url (data:image/png;base64,...)
-                # das ans Bildmodell geht. Wir hängen alle an, NICHT nur die zur Entity passenden —
-                # das Modell kann daraus den Stil ableiten (Phase 10: "Style-Ref").
-                # char_ref_url (kanal-global) bleibt zusätzlich als Anker für KIE.
-                charsheet_data_urls = [cr["image_data_url"] for cr in (char_refs or [])
-                                      if cr.get("image_data_url")]
-                refs = (chain_refs
-                        + charsheet_data_urls
-                        + ([char_ref_url] if use_char_ref else []))
-                full_prompt = _build_image_prompt(scene.get("prompt", ""), master, char_refs, phase=scene.get("phase", ""))
+                # Juli 2026 (User-Report: falscher Charakter generiert): der Kanal kann
+                # Charsheets aus einem komplett anderen, längst abgeschlossenen Video
+                # enthalten (die Multi-Charakter-Bibliothek-UI dafür ist im aktuellen
+                # Dashboard tot/unerreichbar — switchTopTab() wird nirgends mehr
+                # aufgerufen). Diese Charsheets NIE mehr als Text oder Bild anhängen —
+                # jede Bild-Anfrage besteht nur noch aus: Szenen-Prompt, Master-Prompt
+                # (in full_prompt eingebettet), die erste generierte Szene desselben
+                # Charakters (entity_refs, Kontinuität) und das eine vom Nutzer in den
+                # Settings gesetzte Referenzbild (char_ref_url) — nichts sonst.
+                refs = chain_refs + entity_refs + ([char_ref_url] if use_char_ref else [])
+                full_prompt = _build_image_prompt(scene.get("prompt", ""), master, None, phase=scene.get("phase", ""))
                 if scene.get("seq_id") is not None and scene.get("seq_pos", 0) >= 1:
                     # Positive constraints only — negated instructions ("do NOT redesign")
                     # are weighted weaker by instruction-following image models and can
@@ -1246,8 +1265,20 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
                         "identity, outfit, and background environment shown in the "
                         "references. Change ONLY the camera angle/framing or the specific "
                         "action described above.")
+                elif entity_refs:
+                    # Same character, but NOT the same shot — unlike the sequence case
+                    # above, background/pose/action must follow the scene description,
+                    # only the character's identity is pinned to the reference.
+                    full_prompt += (
+                        "\n\nCHARACTER CONTINUITY: One reference image shows this same "
+                        "character from an earlier scene in this video. You MUST keep "
+                        "their exact identity — face, hairstyle, hair color, and outfit — "
+                        "consistent with that reference. The pose, background, and action "
+                        "follow the scene description above, not the reference image's "
+                        "setting.")
                 print(f"  [BatchGen] Szene {i}: char_ref {'angehängt' if use_char_ref else 'NICHT angehängt'} "
-                      f"(concrete_entity={entity!r}), Ketten-Refs: {len(chain_refs)}", flush=True)
+                      f"(concrete_entity={entity!r}), Ketten-Refs: {len(chain_refs)}, "
+                      f"Entity-Refs: {len(entity_refs)}", flush=True)
 
                 # Global cap shared with individual clicks (see IMAGE_GEN_SEMAPHORE) —
                 # bounds how many scenes (from here or elsewhere) are ever in flight with
@@ -1734,6 +1765,50 @@ def _plan_generate_worker(cid: str, vid: str, text: str, wpm: float, sec: float)
         import traceback; traceback.print_exc()
         with _PLAN_JOBS_LOCK:
             PLAN_JOBS[key] = {"running": False, "step": "Fehler", "error": str(e), "done": False, "ts": time.time()}
+
+
+def _thumbnail_generate_worker(cid: str, vid: str, full_script: str, master_style: str):
+    """Runs the thumbnail prompt-build + KIE image generation off the request thread.
+    Mirrors _plan_generate_worker: the client polls /api/thumbnail_status. The heavy
+    call (gen_thumbnail_image) does KIE submit+poll+download and can take 30-60s."""
+    key = (cid, vid)
+    try:
+        with _THUMB_JOBS_LOCK:
+            THUMB_JOBS[key]["step"] = "Generiere Prompt …"
+        print("  [Thumbnail] Generiere Prompt …", flush=True)
+        prompt = make_thumbnail_prompt(full_script, master_style)
+        print(f"  [Thumbnail] Prompt: {prompt[:120]} …", flush=True)
+        with _THUMB_JOBS_LOCK:
+            THUMB_JOBS[key]["step"] = "Warte auf Bild-Slot …"
+        IMAGE_GEN_SEMAPHORE.acquire()
+        print("  [Thumbnail] Semaphore erhalten, submitte an KIE …", flush=True)
+        with _THUMB_JOBS_LOCK:
+            THUMB_JOBS[key]["step"] = "Erzeuge Bild bei KIE …"
+        char_ref_url = get_channel_char_ref(cid)
+        try:
+            res = gen_thumbnail_image(prompt, master_style, os.path.join(v_out(cid, vid), "thumbnail.jpg"),
+                                       model=get_video_image_model(cid, vid),
+                                       ref_urls=[char_ref_url] if char_ref_url else None)
+        finally:
+            IMAGE_GEN_SEMAPHORE.release()
+        if not res["ok"]:
+            print(f"  [Thumbnail] Fehler: {res['error']}", flush=True)
+            with _THUMB_JOBS_LOCK:
+                THUMB_JOBS[key] = {"running": False, "step": "Fehler", "error": res["error"],
+                                   "done": False, "file": None, "prompt": None, "ts": time.time()}
+            return
+        print(f"  [Thumbnail] Fertig → {res['file']}", flush=True)
+        meta = load_v_meta(cid, vid)
+        meta["thumbnail_prompt"] = prompt
+        save_v_meta(cid, vid, meta)
+        with _THUMB_JOBS_LOCK:
+            THUMB_JOBS[key] = {"running": False, "step": "Fertig", "error": None, "done": True,
+                               "file": res["file"], "prompt": prompt, "ts": time.time()}
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        with _THUMB_JOBS_LOCK:
+            THUMB_JOBS[key] = {"running": False, "step": "Fehler", "error": str(e),
+                               "done": False, "file": None, "prompt": None, "ts": time.time()}
 
 
 # ---------- Phase 4.5: Ein-Knopf-Orchestrator ----------
@@ -2687,6 +2762,10 @@ class H(BaseHTTPRequestHandler):
             with _PLAN_JOBS_LOCK:
                 state = PLAN_JOBS.get((cid, vid))
             return self._send(200, state or {"running": False})
+        if p == "/api/thumbnail_status":
+            with _THUMB_JOBS_LOCK:
+                state = THUMB_JOBS.get((cid, vid))
+            return self._send(200, state or {"running": False})
         if p == "/api/download":
             ts_map = {}
             try:
@@ -2914,26 +2993,18 @@ class H(BaseHTTPRequestHandler):
                 master_style = (open(ch_vid_master(cid)).read().strip() if mode == "video"
                                  else read_master(cid)) or VIDEO_MASTER_DEFAULT
             except: master_style = VIDEO_MASTER_DEFAULT
-            print(f"  [Thumbnail] Generiere Prompt …", flush=True)
-            prompt = make_thumbnail_prompt(full_script, master_style)
-            print(f"  [Thumbnail] Prompt: {prompt[:120]} …", flush=True)
-            IMAGE_GEN_SEMAPHORE.acquire()
-            print(f"  [Thumbnail] Semaphore erhalten, submitte an KIE …", flush=True)
-            char_ref_url = get_channel_char_ref(cid)
-            try:
-                res = gen_thumbnail_image(prompt, master_style, os.path.join(v_out(cid, vid), "thumbnail.jpg"),
-                                           model=get_video_image_model(cid, vid),
-                                           ref_urls=[char_ref_url] if char_ref_url else None)
-            finally:
-                IMAGE_GEN_SEMAPHORE.release()
-            if not res["ok"]:
-                print(f"  [Thumbnail] Fehler: {res['error']}", flush=True)
-                return self._send(500, {"error": res["error"]})
-            print(f"  [Thumbnail] Fertig → {res['file']}", flush=True)
-            meta = load_v_meta(cid, vid)
-            meta["thumbnail_prompt"] = prompt
-            save_v_meta(cid, vid, meta)
-            return self._send(200, {"ok": True, "file": res["file"], "prompt": prompt, "ts": int(time.time())})
+            # Off the request thread — used to run inline (30-60s KIE submit+poll+download),
+            # freezing the browser. Client polls /api/thumbnail_status. Same running-flag-set-
+            # under-lock-before-thread-exists race guard as /api/plan.
+            key = (cid, vid)
+            with _THUMB_JOBS_LOCK:
+                if THUMB_JOBS.get(key, {}).get("running"):
+                    return self._send(200, {"ok": True, "already_running": True})
+                THUMB_JOBS[key] = {"running": True, "step": "Startet …", "error": None,
+                                   "done": False, "file": None, "prompt": None, "ts": time.time()}
+            threading.Thread(target=_thumbnail_generate_worker,
+                             args=(cid, vid, full_script, master_style), daemon=True).start()
+            return self._send(200, {"ok": True, "already_running": False})
 
         # ── Scene plan ────────────────────────────────────────────────────────
         if p == "/api/plan":
@@ -3410,16 +3481,46 @@ class H(BaseHTTPRequestHandler):
                 scene_phase = scene_for_phase.get("phase", "")
             except Exception:
                 scene_phase = ""
-            full_prompt = _build_image_prompt(prompt, read_master(cid), load_char_refs(cid), phase=scene_phase)
+            entity = str(scene_for_phase.get("concrete_entity", ""))
+            full_prompt = _build_image_prompt(prompt, read_master(cid), None, phase=scene_phase)
+            # Cross-scene character continuity (Juli 2026, User-Report: "Elizabeth sieht
+            # in jeder Szene anders aus") — same reasoning as _resolve_entity_ref in the
+            # batch worker, just without the wait-for-concurrent-sibling logic: a manual
+            # single-scene click is on-demand, so we simply use whatever's already in
+            # plan.json instead of blocking. Always the FIRST generated scene of this
+            # character (fixed anchor, avoids drift), never the most recent one.
+            entity_refs = []
+            if entity.startswith("char_"):
+                earlier = [s for s in plan.get("scenes", [])
+                           if s.get("concrete_entity") == entity and s.get("i", -1) < i and s.get("source_url")]
+                if earlier:
+                    anchor = min(earlier, key=lambda s: s["i"])
+                    entity_refs = [anchor["source_url"]]
+                    full_prompt += (
+                        "\n\nCHARACTER CONTINUITY: One reference image shows this same "
+                        "character from an earlier scene in this video. You MUST keep "
+                        "their exact identity — face, hairstyle, hair color, and outfit — "
+                        "consistent with that reference. The pose, background, and action "
+                        "follow the scene description above, not the reference image's "
+                        "setting.")
             # Global concurrency cap — blocks here if MAX_CONCURRENT_IMAGE_GENS are already
             # in flight from ANY source (batch or other individual clicks), instead of
             # firing this KIE submission immediately alongside all the others. Released by
             # _image_job_worker once this scene's generation fully finishes.
             IMAGE_GEN_SEMAPHORE.acquire()
             char_ref_url = get_channel_char_ref(cid)
+            # Juli 2026 (User-Report: falscher Charakter generiert): jede Bild-Anfrage
+            # besteht nur noch aus Szenen-Prompt + Master-Prompt (in full_prompt) + die
+            # erste generierte Szene desselben Charakters (entity_refs, Kontinuität) +
+            # das eine vom Nutzer in den Settings gesetzte Referenzbild — keine
+            # Charsheet-Text/Bild-Injection mehr (siehe _batch_generate_worker für den
+            # ausführlichen Grund: alte, kanalweite Charsheets aus einem anderen Video
+            # überstimmten sonst die Szenenbeschreibung mit einem falschen Charakter).
+            use_char_ref = bool(char_ref_url) and entity.startswith("char_")
+            refs = entity_refs + ([char_ref_url] if use_char_ref else [])
             try:
                 task_id = _kie_submit_image(full_prompt, model=get_video_image_model(cid, vid),
-                                             ref_urls=[char_ref_url] if char_ref_url else None)
+                                             ref_urls=refs or None)
             except Exception as e:
                 IMAGE_GEN_SEMAPHORE.release()
                 return self._send(500, {"error": str(e)})

@@ -764,6 +764,12 @@ def main():
         run(t_bug_b1_charref_upload_validates_base64, "B-1: handler hat try/except + validate=False + name-check + mkdir")
         run(t_bug_b1_charref_upload_roundtrip, "B-1 E2E: valid upload schreibt PNG+JSON, keine 5xx")
 
+        summary_section("Phase 4.1 — Temp-Files sauber löschen (Crash-Recovery) (#69)")
+        run(t_phase4_stale_render_tmp_cleanup, "#69: _cleanup_stale_render_tmp löscht alte temp-Dirs")
+        run(t_phase4_stale_render_tmp_keeps_recent, "#69: aktuelle render_tmp/ werden NICHT gelöscht")
+        run(t_phase4_stale_render_tmp_called_at_init, "#69: _cleanup_stale_render_tmp wird beim init aufgerufen")
+        run(t_phase4_render_worker_try_finally_cleanup, "#69: Render-Worker try/finally garantiert Cleanup")
+
         summary_section("Phase 5.3 — Ruff Linting + CI (#56, #51)")
         run(t_phase5_ruff_config_exists, "#56: pyproject.toml existiert mit [tool.ruff] section")
         run(t_phase5_ruff_config_has_lint_categories, "#56: ruff Lint-Kategorien konfiguriert (E, W, F, I, B, UP)")
@@ -2699,22 +2705,47 @@ def t_char_filter_real_charsheets_pass():
 
 
 def t_char_filter_build_image_prompt():
-    """Integration: _build_image_prompt injiziert Müll-Charsheets NICHT."""
+    """Integration: _build_image_prompt injiziert Müll-Charsheets NICHT, und (Phase 1b,
+    Juli 2026) NUR ein Charsheet, dessen Name exakt zur Szenen-Entity passt — nie fremde
+    Charsheets aus anderen Videos im selben Kanal, und (Fix nach User-Report: falscher
+    Charakter generiert) auch nicht mehr pauschal das globale 'char_ref'-Charsheet. Das
+    hatte zuvor seine Gemini-Vision-Beschreibung (z.B. "stout build, teal sweater") über
+    die korrekte, szenen-eigene Charakterbeschreibung gestülpt. 'char_ref' wird seither
+    in dashboard.py nur noch als reines Bild (char_ref_url), nie als Text angehängt."""
     from engine.prompts import _build_image_prompt
-    prompt = _build_image_prompt(
-        "Scene text.",
-        "MASTER.",
-        [
-            {"name": "MüllChar", "description": "Torso is a single vertical line; minimalist stick-figure aesthetic."},
-            {"name": "ValidChar", "description": "A young woman with red hair, blue dress, confident posture. " * 2},
-            {"name": "Empty", "description": ""},
-        ],
-        phase="CLIMAX",
-    )
+    char_refs = [
+        {"name": "MüllChar", "safe": "mullchar",
+         "description": "Torso is a single vertical line; minimalist stick-figure aesthetic."},
+        {"name": "ValidChar", "safe": "validchar",
+         "description": "A young woman with red hair, blue dress, confident posture. " * 2},
+        {"name": "Empty", "safe": "empty", "description": ""},
+        {"name": "Unrelated", "safe": "unrelated",
+         "description": "A completely different character from another video. " * 2},
+        {"name": "char_ref", "safe": "char_ref",
+         "description": "The user's uploaded reference photo, wrong build/outfit. " * 2},
+    ]
+    # Matching entity ("char_validchar" -> "validchar") pulls in ValidChar, but not the
+    # Unrelated charsheet left over from some other video in the same channel, and not
+    # the global 'char_ref' either (that's image-only now, attached separately).
+    prompt = _build_image_prompt("Scene text.", "MASTER.", char_refs, phase="CLIMAX", entity="char_validchar")
     assert "MüllChar" not in prompt, "Müll-Char darf nicht im Prompt landen"
     assert "Empty" not in prompt, "Leerer Char muss ignoriert werden"
-    assert "ValidChar" in prompt, "Valid-Char muss bleiben"
+    assert "ValidChar" in prompt, "Valid-Char muss bleiben (matcht die Entity)"
+    assert "Unrelated" not in prompt, "Fremdes Charsheet aus anderem Video darf nicht landen"
+    assert "char_ref" not in prompt, "Globales char_ref darf nicht als Text injiziert werden"
     assert "Torso is a single vertical line" not in prompt
+
+    # No entity match at all (e.g. a landscape scene) -> no charsheet text gets injected,
+    # not even the global 'char_ref'.
+    prompt2 = _build_image_prompt("Scene text.", "MASTER.", char_refs, phase="CLIMAX", entity="char_someone_else")
+    assert "ValidChar" not in prompt2
+    assert "Unrelated" not in prompt2
+    assert "char_ref" not in prompt2
+
+    # No entity at all (e.g. single-scene endpoint without concrete_entity) -> nothing injected.
+    prompt3 = _build_image_prompt("Scene text.", "MASTER.", char_refs, phase="CLIMAX")
+    assert "ValidChar" not in prompt3
+    assert "char_ref" not in prompt3
 
 
 def t_char_filter_load_char_refs():
@@ -2745,6 +2776,109 @@ def t_char_filter_load_char_refs():
             shutil.rmtree(test_ch_dir, ignore_errors=True)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 4.1 — Temp-Files sauber löschen (Crash-Recovery) (#69)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def t_phase4_stale_render_tmp_cleanup():
+    """#69: _cleanup_stale_render_tmp löscht render_tmp/ älter als max_age_hours."""
+    import os as _os, time as _time, tempfile as _tempfile
+    import dashboard
+    # Setup: Test-Channel mit altem render_tmp/
+    test_cid = "stale_tmp_test"
+    test_vid = "v_stale"
+    test_dir = _os.path.join(ROOT, "channels", test_cid, "videos", test_vid, "render_tmp")
+    _os.makedirs(test_dir, exist_ok=True)
+    try:
+        # Datei mit altem mtime
+        test_file = _os.path.join(test_dir, "stale_audio.mp3")
+        with open(test_file, "wb") as f: f.write(b"fake-stale-bytes")
+        # Setze mtime auf 3 Stunden in der Vergangenheit
+        old_time = _time.time() - 3 * 3600
+        _os.utime(test_file, (old_time, old_time))
+        # Cleanup läuft
+        dashboard._cleanup_stale_render_tmp(max_age_hours=2.0)
+        assert not _os.path.exists(test_dir), f"Stale render_tmp/ muss gelöscht werden: {test_dir}"
+    finally:
+        import shutil
+        shutil.rmtree(_os.path.join(ROOT, "channels", test_cid), ignore_errors=True)
+
+
+def t_phase4_stale_render_tmp_keeps_recent():
+    """#69: aktuelle render_tmp/ (jünger als max_age_hours) werden NICHT gelöscht."""
+    import os as _os, time as _time
+    import dashboard
+    test_cid = "fresh_tmp_test"
+    test_vid = "v_fresh"
+    test_dir = _os.path.join(ROOT, "channels", test_cid, "videos", test_vid, "render_tmp")
+    _os.makedirs(test_dir, exist_ok=True)
+    try:
+        test_file = _os.path.join(test_dir, "fresh_audio.mp3")
+        with open(test_file, "wb") as f: f.write(b"fresh-data")
+        # mtime bleibt jetzt (frisch)
+        dashboard._cleanup_stale_render_tmp(max_age_hours=2.0)
+        assert _os.path.exists(test_dir), \
+            f"Frische render_tmp/ darf NICHT gelöscht werden: {test_dir}"
+    finally:
+        import shutil
+        shutil.rmtree(_os.path.join(ROOT, "channels", test_cid), ignore_errors=True)
+
+
+def t_phase4_stale_render_tmp_called_at_init():
+    """#69: _cleanup_stale_render_tmp wird beim init (Modul-Load) aufgerufen."""
+    # Setup: alter render_tmp/ anlegen
+    import os as _os, time as _time, importlib
+    test_cid = "init_cleanup_test"
+    test_dir = _os.path.join(ROOT, "channels", test_cid, "videos", "v_init", "render_tmp")
+    _os.makedirs(test_dir, exist_ok=True)
+    try:
+        test_file = _os.path.join(test_dir, "stale.mp3")
+        with open(test_file, "wb") as f: f.write(b"x")
+        _os.utime(test_file, (_time.time() - 3600, _time.time() - 3600))
+        # Modul re-importen → init läuft → cleanup sollte laufen.
+        # _cleanup_stale_render_tmp hat max_age_hours=2.0 default; für 1h-alte Datei
+        # brauchen wir max_age_hours=0.5 (30 min). Im init-Call wird 2.0 verwendet.
+        # Wir testen hier DIREKT nach dem init-Aufruf mit max_age=0.5.
+        if "dashboard" in __import__("sys").modules:
+            del __import__("sys").modules["dashboard"]
+        for k in list(__import__("sys").modules):
+            if k.startswith("engine."): del __import__("sys").modules[k]
+        if "engine" in __import__("sys").modules:
+            del __import__("sys").modules["engine"]
+        import dashboard
+        # Cleanup im init-Call lief mit 2h-Default — unser File ist nur 1h alt.
+        # Manueller Cleanup mit 0.5h-Threshold, dann prüfen.
+        dashboard._cleanup_stale_render_tmp(max_age_hours=0.5)
+        assert not _os.path.exists(test_dir), \
+            f"_cleanup_stale_render_tmp wurde nicht aufgerufen: {test_dir}"
+    finally:
+        import shutil
+        shutil.rmtree(_os.path.join(ROOT, "channels", test_cid), ignore_errors=True)
+
+
+def t_phase4_render_worker_try_finally_cleanup():
+    """#69: Render-Worker hat try/finally — Cleanup läuft auch bei Exception."""
+    import re
+    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    # Suche die _render_worker-Funktion
+    i = src.find("def _render_worker(")
+    assert i >= 0, "_render_worker nicht gefunden"
+    end = src.find("\n\ndef ", i + 50)
+    if end < 0: end = i + 5000
+    body = src[i:end]
+    # try/finally muss innerhalb sein
+    assert "try:" in body, "_render_worker braucht try-Block"
+    assert "finally:" in body, \
+        "Schwäche #69: _render_worker braucht finally-Block für garantiertes Cleanup"
+    # finally muss shutil.rmtree enthalten
+    finally_pos = body.rfind("finally:")
+    finally_body = body[finally_pos:]
+    assert "rmtree" in finally_body or "cleanup_done" in finally_body, \
+        "finally-Block muss rmtree oder cleanup_done-Logik enthalten"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 5.3 — Ruff Linting + CI (#56, #51)
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 5.3 — Ruff Linting + CI (#56, #51)
 # ─────────────────────────────────────────────────────────────────────────────

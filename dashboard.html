@@ -1118,17 +1118,39 @@ function renderThumbnailStep(){
 
 async function genThumbnailStep(){
   const btn = $('genThumbBtn'); btn.disabled = true; btn.textContent = '⏳ Generiere …';
-  $('thumbSlotStep').innerHTML = `<div class="slot-empty"><span class="slot-icon">⏳</span><span class="slot-label" style="font-size:10px;">Wird generiert …</span></div>`;
-  const r = await ch_api('/api/generate_thumbnail', {});
-  btn.disabled = false; btn.textContent = '✨ Thumbnail generieren';
-  if(!r.ok){
-    alert('Fehler: '+(r.error||'unbekannt'));
+  const setSlot = (label) => {
+    $('thumbSlotStep').innerHTML = `<div class="slot-empty"><span class="slot-icon">⏳</span><span class="slot-label" style="font-size:10px;">${label}</span></div>`;
+  };
+  setSlot('Wird generiert …');
+  // Startet nur den Server-Worker (30-60s) — der eigentliche Fortschritt kommt per Poll
+  // auf /api/thumbnail_status, statt den Request 30-60s hängen zu lassen (früherer Bug).
+  const start = await ch_api('/api/generate_thumbnail', {});
+  if(!start.ok){
+    btn.disabled = false; btn.textContent = '✨ Thumbnail generieren';
+    alert('Fehler: '+(start.error||'unbekannt'));
     renderThumbnailStep();
     return;
   }
-  VIDEO_META.has_thumbnail = true;
-  VIDEO_META.thumbnail_prompt = r.prompt;
-  renderThumbnailStep();
+  // Poll bis done/error. Gleiches Muster wie der Plan-Status-Poller.
+  while(true){
+    await new Promise(r => setTimeout(r, 1500));
+    const st = await ch_get('/api/thumbnail_status').catch(() => null);
+    if(!st) continue;
+    if(st.step && st.running) setSlot(st.step);
+    if(st.error){
+      btn.disabled = false; btn.textContent = '✨ Thumbnail generieren';
+      alert('Fehler: '+st.error);
+      renderThumbnailStep();
+      return;
+    }
+    if(st.done){
+      btn.disabled = false; btn.textContent = '✨ Thumbnail generieren';
+      VIDEO_META.has_thumbnail = true;
+      VIDEO_META.thumbnail_prompt = st.prompt || VIDEO_META.thumbnail_prompt;
+      renderThumbnailStep();
+      return;
+    }
+  }
 }
 
 
