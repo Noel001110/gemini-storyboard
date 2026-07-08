@@ -67,8 +67,15 @@ def _graceful_shutdown(signum, frame):
     _SHUTDOWN_IN_PROGRESS = True
     _log("INFO", "shutdown_signal", signal=signum)
 
-signal.signal(signal.SIGTERM, _graceful_shutdown)  # Container-Stop
-signal.signal(signal.SIGINT, _graceful_shutdown)   # Ctrl-C
+try:
+    signal.signal(signal.SIGTERM, _graceful_shutdown)  # Container-Stop
+    signal.signal(signal.SIGINT, _graceful_shutdown)   # Ctrl-C
+except ValueError as e:
+    # signal.signal() crasht wenn nicht im Main-Thread (z.B. wenn das dashboard-Modul
+    # von einem HTTP-Handler-Thread re-importiert wird über zirkuläre Imports). In dem
+    # Fall ist der Handler in einem Worker-Thread sowieso nutzlos — wir setzen nur
+    # _SHUTDOWN_IN_PROGRESS = False (default) und loggen.
+    _SHUTDOWN_IN_PROGRESS = False   # Ctrl-C
 
 # ── Phase J: Engine-Refactor — engine_*.py modules ─────────────────────────────
 # ElevenLabs-Integration (Phase 1) + Phase-Engine-Constants (Phasen B-H-I) leben in
@@ -285,6 +292,43 @@ def _cleanup_stale_jobs(max_age_hours: float = MAX_AGE_JOBS_HOURS):
     if removed:
         print(f"  [Cleanup] {removed} veraltete Job-Einträge entfernt (>{max_age_hours}h, abgeschlossen)", flush=True)
 
+
+def _cleanup_stale_render_tmp(max_age_hours: float = 2.0):
+    """Schwäche #69: Render-Temp-Dirs können bei Crash/Disk-Full zurückbleiben.
+    Beim Server-Start alte render_tmp/-Dirs aufräumen die älter als max_age_hours sind.
+    """
+    cutoff = time.time() - max_age_hours * 3600
+    removed = 0
+    freed_bytes = 0
+    if not os.path.isdir(CHANNELS_DIR):
+        return
+    for cid in os.listdir(CHANNELS_DIR):
+        ch_path = os.path.join(CHANNELS_DIR, cid, "videos")
+        if not os.path.isdir(ch_path):
+            continue
+        for vid in os.listdir(ch_path):
+            tmp_dir = os.path.join(ch_path, vid, "render_tmp")
+            if not os.path.isdir(tmp_dir):
+                continue
+            try:
+                _mtimes = [os.path.getmtime(os.path.join(tmp_dir, f)) for f in os.listdir(tmp_dir)]
+                mtime = max(_mtimes) if _mtimes else os.path.getmtime(tmp_dir)
+            except OSError:
+                continue
+            if mtime < cutoff:
+                _size = 0
+                for _f in os.listdir(tmp_dir):
+                    _fp = os.path.join(tmp_dir, _f)
+                    if os.path.isfile(_fp):
+                        try:    _size += os.path.getsize(_fp)
+                        except OSError: pass
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                removed += 1
+                freed_bytes += _size
+    if removed:
+        print(f"  [Cleanup] {removed} alte render_tmp/ aufgeräumt ({freed_bytes//1024}KB freigegeben)", flush=True)
+
+
 def _start_job_cleanup_daemon():
     def loop():
         while True:
@@ -478,6 +522,8 @@ def init_channels():
         _migrate_legacy_video(ch["id"])
 
 init_channels()
+# Schwäche #69: räume alte render_tmp/ von gecrashten Renders
+_cleanup_stale_render_tmp()
 
 # KIE.ai — image generation
 KIE_API      = "https://api.kie.ai/api/v1/jobs"
@@ -1600,24 +1646,31 @@ def _render_worker(cid: str, vid: str):
             fresh_plan["render"] = {"file": "final.mp4", "ts": int(time.time()), "checks": checks}
             _atomic_write_json(plan_path, fresh_plan, ensure_ascii=False, indent=1)
 
-        # Only delete render_tmp after mux + selfcheck succeeded, and only this
+        #         # Only delete render_tmp after mux + selfcheck succeeded, and only this
         # directory — v_render_tmp() is deliberately separate from v_out()/generated/,
         # never the same path, so this can never touch the actual generated images.
+        # Schwäche #69: cleanup_done-Flag damit finally-Block nicht doppelt räumt.
+        cleanup_done = True
         shutil.rmtree(render_dir, ignore_errors=True)
 
         with _RENDER_JOBS_LOCK:
             RENDER_JOBS[key] = {"running": False, "stop_requested": False, "stage": "fertig",
-                                 "done": len(scenes), "total": len(scenes), "error": None, "file": "final.mp4",
-                                 "ts": time.time()}
+                                  "done": len(scenes), "total": len(scenes), "error": None, "file": "final.mp4",
+                                  "ts": time.time()}
         print(f"  [Render] {cid}/{vid}: fertig → final.mp4", flush=True)
     except Exception as e:
         import traceback; traceback.print_exc()
         with _RENDER_JOBS_LOCK:
             prev = RENDER_JOBS.get(key, {})
             RENDER_JOBS[key] = {"running": False, "stop_requested": False, "stage": "error",
-                                 "done": prev.get("done", 0), "total": prev.get("total", 0),
-                                 "error": str(e), "file": None, "ts": time.time()}
+                                  "done": prev.get("done", 0), "total": prev.get("total", 0),
+                                  "error": str(e), "file": None, "ts": time.time()}
         print(f"  [Render] {cid}/{vid}: Fehler: {e}", flush=True)
+    finally:
+        # Schwäche #69: Cleanup läuft IMMER — auch bei Crash, SIGTERM, oder Erfolg.
+        if not cleanup_done:
+            shutil.rmtree(render_dir, ignore_errors=True)
+            _log("INFO", "render_tmp_cleanup_on_error", cid=cid, vid=vid)
 
 
 def _plan_generate_worker(cid: str, vid: str, text: str, wpm: float, sec: float):
@@ -2679,10 +2732,13 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         p = urlparse(self.path).path
+        # Auch im POST vid aus URL-Query parsen — der Browser sendet es in der URL,
+        # nicht im Body. do_GET macht das bereits korrekt.
+        _qs = parse_qs(urlparse(self.path).query)
         try:    d = self._read()
         except: return self._send(400, {"error": "bad json"})
-        cid = d.get("channel", "default")
-        vid = d.get("video", "")
+        cid = d.get("channel", _qs.get("channel", ["default"])[0])
+        vid = d.get("video", _qs.get("video", [""])[0])
 
         # ── Phase 34: TTS-Provider setzen (GET-Pendant liegt in do_GET) ────────
         if p == "/api/tts_provider":
