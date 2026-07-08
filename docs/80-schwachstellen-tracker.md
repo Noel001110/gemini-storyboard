@@ -85,8 +85,8 @@ Quelle: `docs/Architekturanalyse und Schwachstellenbericht — Storyboard Genera
 |:----|:----|:----|:----|
 | #45 | CSRF-Schutz | ❌ | Keine Token-Validierung |
 | #46 | strikte Upload-Checks | ⚠ | B-1-Fix: validate=False, aber keine MIME-Sniffing-Validierung |
-| #49 | Path-Traversal-Verhinderung | ✅ | Hardcoded paths (`ch_sheets(cid)`, `v_plan(cid, vid)`) |
-| #50 | Kein shell=True | ✅ | `subprocess.run([...args])` mit Listen — keine Shell |
+| #49 | Path-Traversal-Verhinderung | ✅ | Phase M: alle ch_sheets/v_plan-Pfade sind os.path.join mit cid/vid aus JSON, nie User-Input |
+| #50 | Kein shell=True | ✅ | Audit: alle subprocess.run-Calls mit Listen-Args (kein shell=True) |
 | #54 | URL-Validierung für ext. APIs | ⚠ | `char_ref_url.txt` wird unkontrolliert an KIE geschickt |
 
 ### 3.3 Docker-Härtung
@@ -165,7 +165,7 @@ Quelle: `docs/Architekturanalyse und Schwachstellenbericht — Storyboard Genera
 | #51 | Type Hints (Mypy) | ⚠ | In `engine/*` teilweise, dashboard.py verstreut |
 | #53 | Magic Numbers entfernen | ⚠ | Konstanten existieren (RENDER_FPS, etc.), aber hartkodierte `time.sleep(2)` etc. |
 | #55 | Zentrales Exception-Handling | ❌ | Pro-Funktion `try/except`, kein globaler Handler |
-| #56 | Ruff Linting | ❌ | Keine `pyproject.toml` |
+| #56 | Ruff Linting | ✅ | `961ac0e` pyproject.toml + scripts/lint.sh + CI | | Keine `pyproject.toml` |
 | #58 | Linting in CI | ❌ | — |
 
 ---
@@ -200,9 +200,9 @@ Aus den 80 IDs sind in der MD-Tabelle **69 dokumentiert**. Die folgenden 11 IDs 
 | 2 (Daten) | 5 | 0 | 0 | 5 | — | 10 |
 | 3 (Sicherheit) | 4 | 2 | 0 | 11 | — | 17 |
 | 4 (KI-Pipeline) | 2 | 2 | 0 | 14 | — | 18 |
-| 5 (Frontend/DX) | 0 | 1 | 0 | 11 | — | 12 |
+| 5 (Frontend/DX) | 1 | 1 | 0 | 10 | — | 12 |
 | Unbekannt | — | — | — | — | 11 | 11 |
-| **Total** | **14** | **7** | **0** | **48** | **11** | **80** |
+| **Total** | **15** | **7** | **0** | **47** | **11** | **80** |
 
 → **80 Schwachstellen, davon 5 done, 7 partial, 1 in progress, 56 open, 11 unknown.**
 
@@ -211,6 +211,6 @@ Aus den 80 IDs sind in der MD-Tabelle **69 dokumentiert**. Die folgenden 11 IDs 
 2. ~~**#38** /health-Endpoint~~ ✅
 2. ~~**#14**~~ ✅
 3. ~~**#40**~~ ✅
-4. **#56** Ruff Linting
+4. ~~**#56**~~ ✅
 5. **#69** Temp-Files sauber löschen (Crash-Recovery)
 3. ~~**#40**~~ ✅
