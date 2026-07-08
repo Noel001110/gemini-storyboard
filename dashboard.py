@@ -1243,16 +1243,27 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
                 # (flaky Gemini-JSON) die characters-Liste LEER lässt, matchte NICHTS mehr
                 # → die Referenz wurde NIE angehängt → generische Strichmännchen statt
                 # des Referenz-Stils. Der char_-Prefix allein ist das verlässliche Signal.
-                use_char_ref = bool(char_ref_url) and entity.startswith("char_")
+                # Juli 2026 (User-Vorschlag nach Farb-Inkonsistenz-Report): NIE zwei
+                # Referenzbilder gleichzeitig mitschicken — KIE muss sonst selbst
+                # entscheiden, welchem der widersprüchlichen Bilder es mehr Gewicht gibt,
+                # was zu genau der Art von Zufalls-Inkonsistenz führte, die wir gerade
+                # gefixt haben (mal Referenzstil übernommen, mal nicht). Entweder/Oder:
+                # hat der Charakter schon ein generiertes Bild (chain_refs = gleicher
+                # Shot, entity_refs = erste Erscheinung desselben Charakters), gilt NUR
+                # das als Referenz — das globale Settings-Referenzbild (char_ref_url)
+                # nur für die ALLERERSTE Erscheinung eines Charakters in diesem Video.
+                has_prior_ref = bool(chain_refs) or bool(entity_refs)
+                use_char_ref = bool(char_ref_url) and entity.startswith("char_") and not has_prior_ref
                 # Juli 2026 (User-Report: falscher Charakter generiert): der Kanal kann
                 # Charsheets aus einem komplett anderen, längst abgeschlossenen Video
                 # enthalten (die Multi-Charakter-Bibliothek-UI dafür ist im aktuellen
                 # Dashboard tot/unerreichbar — switchTopTab() wird nirgends mehr
                 # aufgerufen). Diese Charsheets NIE mehr als Text oder Bild anhängen —
                 # jede Bild-Anfrage besteht nur noch aus: Szenen-Prompt, Master-Prompt
-                # (in full_prompt eingebettet), die erste generierte Szene desselben
-                # Charakters (entity_refs, Kontinuität) und das eine vom Nutzer in den
-                # Settings gesetzte Referenzbild (char_ref_url) — nichts sonst.
+                # (in full_prompt eingebettet), und genau EIN Referenzbild (entweder die
+                # erste generierte Szene desselben Charakters, oder — nur falls es die
+                # noch nicht gibt — das eine vom Nutzer in den Settings gesetzte
+                # Referenzbild) — nichts sonst.
                 refs = chain_refs + entity_refs + ([char_ref_url] if use_char_ref else [])
                 full_prompt = _build_image_prompt(scene.get("prompt", ""), master, None, phase=scene.get("phase", ""))
                 if scene.get("seq_id") is not None and scene.get("seq_pos", 0) >= 1:
@@ -3509,14 +3520,15 @@ class H(BaseHTTPRequestHandler):
             # _image_job_worker once this scene's generation fully finishes.
             IMAGE_GEN_SEMAPHORE.acquire()
             char_ref_url = get_channel_char_ref(cid)
-            # Juli 2026 (User-Report: falscher Charakter generiert): jede Bild-Anfrage
-            # besteht nur noch aus Szenen-Prompt + Master-Prompt (in full_prompt) + die
-            # erste generierte Szene desselben Charakters (entity_refs, Kontinuität) +
-            # das eine vom Nutzer in den Settings gesetzte Referenzbild — keine
-            # Charsheet-Text/Bild-Injection mehr (siehe _batch_generate_worker für den
-            # ausführlichen Grund: alte, kanalweite Charsheets aus einem anderen Video
-            # überstimmten sonst die Szenenbeschreibung mit einem falschen Charakter).
-            use_char_ref = bool(char_ref_url) and entity.startswith("char_")
+            # Juli 2026 (User-Vorschlag nach Farb-Inkonsistenz-Report): NIE zwei
+            # Referenzbilder gleichzeitig — entweder das schon generierte Bild dieses
+            # Charakters (entity_refs), oder — nur bei dessen allererster Erscheinung in
+            # diesem Video — das globale Settings-Referenzbild. Nie beide zusammen, sonst
+            # muss KIE selbst zwischen zwei widersprüchlichen Bildern gewichten (siehe
+            # _batch_generate_worker für die ausführliche Begründung). Keine
+            # Charsheet-Text/Bild-Injection mehr (alte, kanalweite Charsheets aus einem
+            # anderen Video überstimmten sonst die Szenenbeschreibung).
+            use_char_ref = bool(char_ref_url) and entity.startswith("char_") and not entity_refs
             refs = entity_refs + ([char_ref_url] if use_char_ref else [])
             try:
                 task_id = _kie_submit_image(full_prompt, model=get_video_image_model(cid, vid),
