@@ -2971,6 +2971,11 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, {"master": read_master(cid)})
         if p == "/api/image_model":
             return self._send(200, {"model": get_video_image_model(cid, vid), "options": list(VALID_IMAGE_MODELS)})
+        if p == "/api/style_ref":
+            # Channel-level reference image. The frontend (openChannelSettings,
+            # loadStyleRefStatus) calls /api/style_ref — the file is owned by the
+            # channel (channels/<cid>/style_ref.png + .txt), not the video.
+            return self._send(200, {"url": get_channel_style_ref(cid)})
         if p == "/api/overlay_opts":
             return self._send(200, get_video_overlay_opts(cid, vid))
         if p == "/api/plan":

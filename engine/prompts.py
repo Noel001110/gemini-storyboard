@@ -187,9 +187,13 @@ For EACH line in the chunk below, produce an object with ALL of these fields, in
   "callback_check": "Does ANALYSIS.callbacks say this scene references an earlier one? If yes,
                       name the recurring element that MUST appear in image_prompt. Else 'none'.",
   "character_consistency": "Since this is a single still with no motion/continuity anchor from
-                             a previous clip, restate exactly how the character(s) must look
-                             (from ANALYSIS.characters visual_description) so every frame stays
-                             identical — head shape, proportions, distinguishing features.",
+                             a previous clip, ANCHOR the character's identity (head shape,
+                             proportions, distinguishing features like hair color/style,
+                             signature outfit) so they remain recognizable across scenes.
+                             BUT VARY pose, camera angle, framing, and facial expression per
+                             scene to match THIS line's emotional beat — do NOT repeat the
+                             same pose+expression+composition across scenes even if the
+                             underlying identity description is identical.",
   "line_specific_anchor": "BEFORE you write image_prompt: list the ONE specific visual element
                             that makes THIS line different from the lines around it. What would
                             be wrong or missing if you swapped this image with the previous or
@@ -202,8 +206,11 @@ For EACH line in the chunk below, produce an object with ALL of these fields, in
   "image_prompt": "The final image text. MUST visibly include concrete_entity AND the
                     callback_check element (if not 'none'). MUST visibly include the
                     line_specific_anchor — without it the image could belong to ANY scene,
-                    and that is exactly what we are forbidding here. MUST reflect
-                    character_consistency exactly if a character appears. NO art-style words
+                    and that is exactly what we are forbidding here. MUST reflect the
+                    IDENTITY ANCHOR of character_consistency (hair, proportions, signature
+                    outfit) but may VARY pose, framing, expression to match the scene —
+                    repeating the same pose+expression across consecutive scenes makes
+                    characters look like the same photo reused. NO art-style words
                     here (line weight, color palette etc. — that's applied separately from
                     the master prompt). Must explicitly name: (1) the concrete main subject,
                     (2) the setting/location, (3) the composition/framing, AND (4) the
