@@ -571,6 +571,9 @@
         </div>
         <div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:6px">
           <label style="flex:1;min-width:160px">Style <span id="elStyleVal" class="hint">0.00</span><input type="range" id="elStyle" min="0" max="1" step="0.05" value="0" style="width:100%"></label>
+          <label style="flex:1;min-width:160px">Speed <span id="elSpeedVal" class="hint">1.00×</span><input type="range" id="elSpeed" min="0.7" max="1.3" step="0.05" value="1.0" style="width:100%" title="ElevenLabs-API: 1.0 = normal. Range praxisüblich 0.7–1.3."></label>
+        </div>
+        <div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:6px">
           <label style="flex:1;min-width:160px">Speaker Boost <span id="elBoostVal" class="hint">on</span>
             <select id="elBoost" style="width:100%"><option value="true" selected>an</option><option value="false">aus</option></select>
           </label>
@@ -597,9 +600,21 @@
         <span class="hint" id="elPreviewHint" style="display:none"></span>
         <audio id="elPreviewPlayer" controls style="display:none;height:32px;margin-left:8px"></audio>
       </div>
-      <div class="row" style="margin-top:12px;align-items:center;gap:10px;flex-wrap:wrap">
+<div class="row" style="margin-top:12px;align-items:center;gap:10px;flex-wrap:wrap">
         <button id="elGenBtn" onclick="elevenLabsGenerate()" disabled>🎙 Voiceover generieren</button>
-        <span class="hint" id="elGenHint">Erst Skript in Option B eintippen, dann hier generieren</span>
+        <span class="hint" id="elHint">Erst Skript in Option B eintippen, dann hier generieren</span>
+      </div>
+      <!-- Voiceover-Player: erscheint wenn voiceover.mp3 auf Disk existiert.
+           Juli 2026 (User-Report: "generiertes Voiceover wird nicht angezeigt"):
+           Vorher gab es NUR den 2-Sek Preview-Player (🎤 Voice testen) — die echte
+           7-Min MP3 war nirgends abspielbar. Diese Box wird automatisch sichtbar
+           sobald loadVideo() einen vorhandenen voiceover.mp3 entdeckt. -->
+      <div id="elVoiceoverBox" style="display:none;margin-top:12px;padding:10px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm)">
+        <div style="font-size:12px;color:var(--mut);margin-bottom:6px;display:flex;justify-content:space-between;align-items:center">
+          <span>Generiertes Voiceover <span id="elVoiceoverMeta" class="hint"></span></span>
+          <button class="sm ghost" onclick="deleteVoiceover()" style="font-size:11px">🗑 Löschen</button>
+        </div>
+        <audio id="elVoiceoverPlayer" controls preload="metadata" style="width:100%;height:36px"></audio>
       </div>
       <div id="elSteps" class="steps" style="display:none;margin-top:10px">
         <span id="elStep1">① ElevenLabs</span>
@@ -1001,6 +1016,7 @@ async function openVideo(vid, name){
   // one video to another leaves the character panel showing the previous video's
   // sheet list (or empty if no video had been opened before).
   loadCharsheets();
+  refreshVoiceoverPlayer().catch(()=>{});  // zeigt Player wenn voiceover.mp3 existiert
   // Explicit reset, not just left to renderScenes() — without this, switching from a
   // video that HAS scenes to one that doesn't would leave these cards visible with
   // stale content from the previous video, since renderScenes() (which normally hides
@@ -1670,6 +1686,7 @@ async function loadTtsVoices(){
         similarity_boost: +$('elSim').value,
         style: +$('elStyle').value,
         use_speaker_boost: $('elBoost').value === 'true',
+        speed: +$('elSpeed').value,
         output_format: 'mp3_44100_128',
         tts_provider: 'elevenlabs',
       });
@@ -1711,14 +1728,15 @@ function _ttsSlidersVisibility(provider){
 }
 
 function _elWireSliders(){
-  const s = $('elStab'), i = $('elSim'), st = $('elStyle'), b = $('elBoost');
+  const s = $('elStab'), i = $('elSim'), st = $('elStyle'), b = $('elBoost'), sp = $('elSpeed');
   const upd = () => {
     $('elStabVal').textContent = (+s.value).toFixed(2);
     $('elSimVal').textContent  = (+i.value).toFixed(2);
     $('elStyleVal').textContent= (+st.value).toFixed(2);
     $('elBoostVal').textContent= b.value === 'true' ? 'on' : 'off';
+    $('elSpeedVal').textContent= (+sp.value).toFixed(2) + '×';
   };
-  s.oninput = i.oninput = st.oninput = b.onchange = upd;
+  s.oninput = i.oninput = st.oninput = sp.oninput = b.onchange = upd;
   upd();
 }
 
@@ -1894,6 +1912,51 @@ function _elRefreshGenBtn(){
     : `Bereit: ${script.length} Zeichen, ${wordCount(script)} Wörter`;
 }
 
+// Juli 2026: zeige den Voiceover-Player wenn voiceover.mp3 existiert. Wird sowohl
+// von openVideo() (beim Video-Wechsel) als auch nach erfolgreichem ElevenLabs-
+// Generate aufgerufen, damit der User das frisch generierte Audio direkt abspielen
+// kann.
+async function refreshVoiceoverPlayer(){
+  const box = $('elVoiceoverBox');
+  const player = $('elVoiceoverPlayer');
+  const meta = $('elVoiceoverMeta');
+  if(!box || !player) return;
+  // HEAD-Request: schnell, kein Body-Download. Server antwortet 200 wenn MP3 da.
+  try {
+    const r = await fetch('/api/voiceover_file?channel=' + encodeURIComponent(ACTIVE_CHANNEL)
+      + '&video=' + encodeURIComponent(ACTIVE_VIDEO || ''), { method: 'HEAD' });
+    if(r.ok){
+      const size = r.headers.get('Content-Length');
+      const kb = size ? Math.round(size/1024) + ' KB' : '';
+      meta.textContent = kb ? `(${kb})` : '';
+      // Cache-Bust per Timestamp damit nach Re-Generate nicht der alte Player-
+      // State (falsche Position, paused) stehen bleibt.
+      player.src = '/api/voiceover_file?channel=' + encodeURIComponent(ACTIVE_CHANNEL)
+        + '&video=' + encodeURIComponent(ACTIVE_VIDEO || '') + '&t=' + Date.now();
+      box.style.display = '';
+    } else {
+      box.style.display = 'none';
+      player.removeAttribute('src');
+    }
+  } catch(e) {
+    box.style.display = 'none';
+  }
+}
+
+async function deleteVoiceover(){
+  if(!confirm('Voiceover löschen? MP3 + audio_meta.json werden entfernt.')) return;
+  try {
+    await ch_api('/api/voiceover_delete', {});
+    // Local aufräumen + UI refresh
+    const player = $('elVoiceoverPlayer');
+    if(player){ player.pause(); player.removeAttribute('src'); }
+    $('elVoiceoverBox').style.display = 'none';
+    showToast('Voiceover gelöscht ✓');
+  } catch(e){
+    showToast('Fehler: ' + e);
+  }
+}
+
 async function voiceTestPreview(){
   const hint = $('elPreviewHint');
   hint.style.display='inline'; hint.textContent='generiere …';
@@ -1908,6 +1971,7 @@ async function voiceTestPreview(){
         similarity_boost: +$('elSim').value,
         style: +$('elStyle').value,
         use_speaker_boost: $('elBoost').value === 'true',
+        speed: +$('elSpeed').value,
         channel: ACTIVE_CHANNEL,
       }),
     });
@@ -1933,6 +1997,7 @@ function resetVoiceSliders(){
   $('elSim').value  = 0.75;
   $('elStyle').value= 0.0;
   $('elBoost').value= 'true';
+  $('elSpeed').value= 1.0;
   _elWireSliders();
 }
 
@@ -1968,6 +2033,7 @@ function startVoiceoverPoll(){
       $('elStatus').textContent = el_state.resume
         ? 'Bereits vorhanden (Resume), nichts zu tun.'
         : 'Fertig ✓ — Plan geladen.';
+      refreshVoiceoverPlayer().catch(()=>{});  // Player-Größe aktualisieren
       // Reload the plan from server (echoes existing _plan_ready handler)
       const plan = await ch_get('/api/plan').catch(() => null);
       if(plan && plan.scenes){
@@ -2001,6 +2067,7 @@ async function elevenLabsGenerate(){
     similarity_boost: +$('elSim').value,
     style: +$('elStyle').value,
     use_speaker_boost: $('elBoost').value === 'true',
+    speed: +$('elSpeed').value,
     output_format: 'mp3_44100_128',
   });
   $('elStatus').textContent = 'ElevenLabs wird angefragt …';
@@ -2012,6 +2079,7 @@ async function elevenLabsGenerate(){
     similarity_boost: +$('elSim').value,
     style: +$('elStyle').value,
     use_speaker_boost: $('elBoost').value === 'true',
+    speed: +$('elSpeed').value,
   });
   if(r.error || !r.ok){
     $('elStatus').textContent = 'Fehler: '+(r.error||'ElevenLabs fehlgeschlagen');
@@ -2019,6 +2087,7 @@ async function elevenLabsGenerate(){
     return;
   }
   $('elStep1').className = 'done';
+  refreshVoiceoverPlayer().catch(()=>{});  // Player sofort zeigen (MP3 ist schon persistiert)
   startVoiceoverPoll();
 }
 

@@ -77,6 +77,7 @@ ELEVENLABS_VOICE_SETTINGS_DEFAULT = {
     "similarity_boost": 0.75,
     "style": 0.0,
     "use_speaker_boost": True,
+    "speed": 1.0,   # ElevenLabs-API: 0.7–1.2 praxisüblich, >1.0 schneller
     "output_format": "mp3_44100_128",
 }
 
@@ -450,6 +451,12 @@ def elevenlabs_generate(text: str, settings: dict) -> dict:
                 "similarity_boost": float(settings.get("similarity_boost", 0.75)),
                 "style": float(settings.get("style", 0.0)),
                 "use_speaker_boost": bool(settings.get("use_speaker_boost", True)),
+                # ElevenLabs-API-Schema: speed default 1.0. Range 0.7–1.2 praxisüblich.
+                # ElevenLabs v3 hat einige Felder wie previous_request_ids abgelehnt —
+                # falls speed ebenfalls nicht akzeptiert wird, fängt der Catch-Block
+                # in _call_with_retry den 400 ab und der User sieht eine klare
+                # Fehlermeldung statt eines unerwarteten Crashs.
+                "speed": float(settings.get("speed", 1.0)),
             },
             "output_format": settings.get("output_format") or "mp3_44100_128",
         }
@@ -537,6 +544,7 @@ def _elevenlabs_generate_single(text: str, settings: dict, voice_id: str) -> dic
             "similarity_boost": float(settings.get("similarity_boost", 0.75)),
             "style": float(settings.get("style", 0.0)),
             "use_speaker_boost": bool(settings.get("use_speaker_boost", True)),
+            "speed": float(settings.get("speed", 1.0)),
         },
         "output_format": settings.get("output_format") or "mp3_44100_128",
     }

@@ -2858,11 +2858,22 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        # HEAD-Requests dürfen laut HTTP-Spec keinen Body senden — sonst
+        # kann der Browser den Body nicht zuverlässig vom Content-Length abgrenzen
+        # und verschiedene Clients (curl, Python urllib, manche Browser) zeigen
+        # dann merkwürdiges Verhalten.
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def _read(self):
         n = int(self.headers.get("Content-Length", 0))
         return json.loads(self.rfile.read(n) or b"{}")
+
+    def do_HEAD(self):
+        # BaseHTTPRequestHandler leitet HEAD-Requests nicht automatisch auf do_GET
+        # weiter — wir mappen manuell damit /api/voiceover_file per HEAD (für
+        # Player-Refresh ohne Body-Download) abrufbar ist.
+        self.do_GET()
 
     def do_GET(self):
         p = urlparse(self.path).path
@@ -3055,6 +3066,36 @@ class H(BaseHTTPRequestHandler):
             if not vid: return self._send(200, {"text": None})
             data = load_v_script(cid, vid)
             return self._send(200, data or {"text": None})
+        if p == "/api/voiceover_file":
+            # Juli 2026 (User-Report: "generiertes Voiceover wird im Frontend nicht
+            # angezeigt"): bis jetzt hatte der Server keinen Endpunkt der die
+            # voiceover.mp3 aus uploads/ ausliefert — der Python http.server
+            # antwortet 404 auf alles was nicht explizit gemappt ist, deshalb konnte
+            # der Browser das Audio nicht abspielen obwohl die Datei auf Disk lag.
+            # Diese Route streamt die MP3 mit korrektem Content-Type.
+            if not vid:
+                return self._send(400, {"error": "Kein Video ausgewählt"})
+            audio_path = os.path.join(v_uploads(cid, vid), "voiceover.mp3")
+            if not os.path.exists(audio_path):
+                return self._send(404, {"error": "Kein Voiceover vorhanden"})
+            try:
+                with open(audio_path, "rb") as f:
+                    data = f.read()
+                # send_response + send_header + end_headers + body — explizit weil
+                # _send() nur JSON serialisiert
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/mpeg")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Accept-Ranges", "bytes")
+                # Cache-Bust: bei jedem GET andere URL, damit nach Re-Generate
+                # der Browser nicht den alten Player-State behält.
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            except Exception as e:
+                return self._send(500, {"error": f"Audio-Serve fehlgeschlagen: {e}"})
+
         if p == "/api/plan_status":
             with _PLAN_JOBS_LOCK:
                 state = PLAN_JOBS.get((cid, vid))
@@ -3540,11 +3581,28 @@ class H(BaseHTTPRequestHandler):
                 "stability": d.get("stability") if d.get("stability") is not None else ELEVENLABS_VOICE_SETTINGS_DEFAULT["stability"],
                 "similarity_boost": d.get("similarity_boost") if d.get("similarity_boost") is not None else ELEVENLABS_VOICE_SETTINGS_DEFAULT["similarity_boost"],
                 "style": d.get("style") if d.get("style") is not None else ELEVENLABS_VOICE_SETTINGS_DEFAULT["style"],
+                # ElevenLabs-API: speed default 1.0. Range praxisüblich 0.7–1.2.
+                # Werte >1.0 sprechen schneller, <1.0 langsamer.
+                "speed": d.get("speed") if d.get("speed") is not None else ELEVENLABS_VOICE_SETTINGS_DEFAULT["speed"],
                 # bool fields: explicit false string is OK, missing key means "leave alone"
                 "use_speaker_boost": bool(d["use_speaker_boost"]) if "use_speaker_boost" in d else ELEVENLABS_VOICE_SETTINGS_DEFAULT["use_speaker_boost"],
                 "output_format": d.get("output_format") or ELEVENLABS_VOICE_SETTINGS_DEFAULT["output_format"],
             })
             return self._send(200, load_voice_settings(cid))
+
+        if p == "/api/voiceover_delete":
+            # User-Aktion "Voiceover löschen" — entfernt MP3 + audio_meta.json.
+            # Der nächste /api/voiceover_generate läuft dann als echter Fresh-Call
+            # (statt Resume-Pfad) weil audio_meta nicht mehr existiert.
+            if not vid:
+                return self._send(400, {"error": "Kein Video ausgewählt"})
+            uploads_dir = v_uploads(cid, vid)
+            for fn in ("voiceover.mp3", "voiceover_trimmed.wav", "audio_meta.json"):
+                p = os.path.join(uploads_dir, fn)
+                if os.path.exists(p):
+                    try: os.remove(p)
+                    except: pass
+            return self._send(200, {"ok": True})
 
         if p == "/api/voiceover_preview":
             text = (d.get("text") or "Hallo Welt, das ist ein Stimm-Sample.").strip()[:500]
