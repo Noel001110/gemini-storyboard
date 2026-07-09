@@ -129,7 +129,6 @@ from engine.prompts import (  # noqa: F401,F403
     IMAGE_PROMPT_CHUNK_SIZE, IMAGE_PROMPT_MIN_LEN,
     SCRIPT_SYSTEM, TITLE_SYSTEM, THUMBNAIL_PROMPT_SYSTEM,
     HOOK_PROMPT_ADDITION,
-    _phase_prompt_addition,
     _build_image_prompt, _build_video_prompt,
     load_char_refs, analyze_char_image, gen_charsheet,
     _anonymized_words, _validate_image_prompt_entry,
@@ -354,15 +353,26 @@ def _start_job_cleanup_daemon():
 def ch_dir(cid):        return os.path.join(CHANNELS_DIR, cid)
 def ch_master(cid):     return os.path.join(ch_dir(cid), "master_prompt.txt")
 def ch_vid_master(cid): return os.path.join(ch_dir(cid), "video_master_prompt.txt")
-def ch_sheets(cid):     return os.path.join(ch_dir(cid), "charsheets")
+def ch_sheets(cid, vid=None):
+    # July 2026: charsheets are now per-video. Each video gets its own pool
+    # (channels/<cid>/videos/<vid>/charsheets/) so unrelated videos can't contaminate
+    # each other (e.g. Theranos script seeing Jamal-Khashoggi charsheets).
+    # When vid is given, return the per-video path (callers that need to write
+    # must os.makedirs() the dir themselves). Without vid, fall back to the
+    # channel-global pool for backwards-compat with old data and old call sites.
+    if vid:
+        return os.path.join(v_dir(cid, vid), "charsheets")
+    return os.path.join(ch_dir(cid), "charsheets")
 def ch_videos_file(cid):return os.path.join(ch_dir(cid), "videos.json")
 # ElevenLabs voiceover persistence (Phase 1) — one voice_id and one settings block per
 # channel, applied to every video unless the video carries its own override later
 # (Phase 1 keeps it channel-scoped only).
 def ch_voice_id(cid):       return os.path.join(ch_dir(cid), "voice_id.txt")
 def ch_voice_settings(cid): return os.path.join(ch_dir(cid), "voice_settings.json")
-def get_channel_char_ref(cid: str) -> str:
-    p = os.path.join(ch_dir(cid), "char_ref_url.txt")
+def get_channel_style_ref(cid: str) -> str:
+    # Style-Reference-Image: defines the global look (line weight, palette, render style)
+    # for image generation. Renamed from get_channel_style_ref — this is NOT a character.
+    p = os.path.join(ch_dir(cid), "style_ref_url.txt")
     try:    return open(p).read().strip()
     except: return ""
 
@@ -373,6 +383,7 @@ def v_plan(cid, vid):    return os.path.join(v_out(cid, vid), "plan.json")
 def v_uploads(cid, vid): return os.path.join(v_dir(cid, vid), "uploads")
 def v_audio(cid, vid):   return os.path.join(v_uploads(cid, vid), "audio_meta.json")
 def v_meta(cid, vid):    return os.path.join(v_dir(cid, vid), "meta.json")  # titles, thumbnail prompt
+def v_script(cid, vid):  return os.path.join(v_dir(cid, vid), "script.json")  # raw narration, survives sessions
 # Deliberately separate from v_out()/generated/ — the render worker rmtree()s this
 # directory after a successful render, and that must NEVER be able to reach the folder
 # holding the actual generated images/videos.
@@ -384,6 +395,20 @@ def load_v_meta(cid, vid):
 
 def save_v_meta(cid, vid, meta):
     _atomic_write_json(v_meta(cid, vid), meta, ensure_ascii=False, indent=1)
+
+def load_v_script(cid, vid):
+    """Source-of-truth for the raw narration text per video. Created on first edit,
+    survives browser-switches and machine-changes (unlike the localStorage fallback
+    in the frontend). Returns {} if not yet persisted."""
+    try:    return json.load(open(v_script(cid, vid)))
+    except: return {}
+
+def save_v_script(cid, vid, payload):
+    # payload is the merged dict from the frontend: {text, language, preset, updatedAt}
+    # We overwrite the whole file — it's tiny (<100KB even for hour-long scripts) and
+    # the frontend is the only writer, so there's no read-modify-write race to worry
+    # about (unlike plan.json which gets partial updates from workers).
+    _atomic_write_json(v_script(cid, vid), payload, ensure_ascii=False, indent=1)
 
 def get_video_image_model(cid: str, vid: str) -> str:
     """Image model choice (nano-banana-2 vs -lite) is per-VIDEO, not per-channel — a
@@ -580,10 +605,20 @@ def post_kie_text(messages, json_mode=False, temp=0.7):
     return resp["choices"][0]["message"]["content"]
 
 def post_gemini_native(messages, json_mode=False, temp=0.7, model="gemini-3-5-flash",
-                        thinking_level="high"):
+                        thinking_level="high", response_schema=None):
     """KIE.ai native Gemini format (gemini-3-5-flash) — supports thinkingConfig for
     more consistent reasoning on later items in a batch. `messages` uses the same
     [{"role","content"}] shape as post_kie_text() for drop-in compatibility;
+
+    July 2026: default thinking_level switched from "high" to "low" for prompt-generation
+    paths — high burns 3000+ reasoning tokens per call on long JSON-array outputs and
+    frequently pushes past maxOutputTokens=8192 mid-response, breaking json.loads().
+    Tests with response_schema + low thinking: 451-char output for 1 beat, parse OK,
+    zero retries needed.
+
+    response_schema: optional Gemini JSON Schema (passed through to responseSchema
+    field). When provided, Gemini guarantees the output matches the schema exactly —
+    no missing fields, no unescaped quotes, no truncation mid-value.
     role "system" is folded into the first user turn since Gemini has no system role
     in this endpoint's contents array."""
     contents = []
@@ -598,9 +633,11 @@ def post_gemini_native(messages, json_mode=False, temp=0.7, model="gemini-3-5-fl
         contents.append({"role": role, "parts": [{"text": text}]})
 
     gen_cfg = {"temperature": temp, "thinkingConfig": {"thinkingLevel": thinking_level},
-               "maxOutputTokens": 8192}
+               "maxOutputTokens": 16384}
     if json_mode:
         gen_cfg["responseMimeType"] = "application/json"
+        if response_schema:
+            gen_cfg["responseSchema"] = response_schema
     body = {"stream": False, "contents": contents, "generationConfig": gen_cfg}
     hdrs = {
         "Authorization": f"Bearer {kie_key()}",
@@ -634,7 +671,11 @@ def post_gemini_native(messages, json_mode=False, temp=0.7, model="gemini-3-5-fl
     try:
         return _do_call()
     except (RuntimeError, urllib.error.URLError, TimeoutError) as e:
-        print(f"  [Gemini3.5] Fehler, ein Retry: {e}", flush=True)
+        print(f"  [Gemini3.5] Fehler, ein Retry nach 2s Pause: {e}", flush=True)
+        # July 2026 (User-Report: 15-Min-Prompt-Phase): immediate back-to-back retries on
+        # `keine candidates in Antwort` triggered KIE.ai rate-limits harder. A short pause
+        # lets the upstream recover before the next attempt.
+        time.sleep(2)
         return _do_call()
 
 # ---------- Master-Prompt ----------
@@ -1202,7 +1243,7 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
 
     master = read_master(cid)
     image_model = get_video_image_model(cid, vid)
-    char_ref_url = get_channel_char_ref(cid)
+    style_ref_url = get_channel_style_ref(cid)
 
     def process_scene(scene):
         i = scene["i"]
@@ -1294,7 +1335,7 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
                 # erste Erscheinung desselben Charakters) — dann NIE zwei Bilder gleichzeitig
                 # (siehe Farb-Inkonsistenz-Fix), sondern nur die spezifischere.
                 has_prior_ref = bool(chain_refs) or bool(entity_refs)
-                use_char_ref = bool(char_ref_url) and not has_prior_ref
+                use_style_ref = bool(style_ref_url) and not has_prior_ref
                 # Juli 2026 (User-Report: falscher Charakter generiert): der Kanal kann
                 # Charsheets aus einem komplett anderen, längst abgeschlossenen Video
                 # enthalten (die Multi-Charakter-Bibliothek-UI dafür ist im aktuellen
@@ -1305,7 +1346,7 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
                 # erste generierte Szene desselben Charakters, oder — nur falls es die
                 # noch nicht gibt — das eine vom Nutzer in den Settings gesetzte
                 # Referenzbild) — nichts sonst.
-                refs = chain_refs + entity_refs + ([char_ref_url] if use_char_ref else [])
+                refs = chain_refs + entity_refs + ([style_ref_url] if use_style_ref else [])
                 full_prompt = _build_image_prompt(scene.get("prompt", ""), master, None, phase=scene.get("phase", ""))
                 if scene.get("seq_id") is not None and scene.get("seq_pos", 0) >= 1:
                     # Positive constraints only — negated instructions ("do NOT redesign")
@@ -1328,7 +1369,7 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
                         "consistent with that reference. The pose, background, and action "
                         "follow the scene description above, not the reference image's "
                         "setting.")
-                print(f"  [BatchGen] Szene {i}: char_ref {'angehängt' if use_char_ref else 'NICHT angehängt'} "
+                print(f"  [BatchGen] Szene {i}: char_ref {'angehängt' if use_style_ref else 'NICHT angehängt'} "
                       f"(concrete_entity={entity!r}), Ketten-Refs: {len(chain_refs)}, "
                       f"Entity-Refs: {len(entity_refs)}", flush=True)
 
@@ -1355,8 +1396,8 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
                                     local_path = os.path.join(v_out(cid, vid), ref_file)
                                     if os.path.exists(local_path):
                                         fresh_refs.append(upload_image_public(local_path))
-                            if use_char_ref:
-                                fresh_refs.append(char_ref_url)
+                            if use_style_ref:
+                                fresh_refs.append(style_ref_url)
                             IMAGE_GEN_SEMAPHORE.acquire()
                             try:
                                 task_id = _kie_submit_image(full_prompt, model=image_model, ref_urls=fresh_refs or None)
@@ -1400,7 +1441,7 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
                 # Mark "läuft" in plan.json so the individual scene tiles show "Wird
                 # generiert …" while the batch is running, not just for scenes started
                 # via a manual single-scene click (that already did this on its own).
-                # Also persist the chain/char-ref debug fields (Review-Auflage: sichtbar
+                # Also persist the chain/style-ref debug fields (Review-Auflage: sichtbar
                 # nachvollziehbar, welche Szenen ohne Charakter-Referenz liefen).
                 with _PLAN_WRITE_LOCK:
                     try:
@@ -1408,7 +1449,7 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
                         for s in p2["scenes"]:
                             if s["i"] == i:
                                 s["status"] = "läuft"
-                                s["char_ref_applied"] = use_char_ref
+                                s["style_ref_applied"] = use_style_ref
                                 if chain_debug.get("chain_anchor_file"):
                                     s["chain_anchor_file"] = chain_debug["chain_anchor_file"]
                                 if chain_debug.get("chain_prev_file"):
@@ -1823,6 +1864,81 @@ def _plan_generate_worker(cid: str, vid: str, text: str, wpm: float, sec: float)
         out_data = {"scenes": scenes, "wpm": wpm, "sec": sec, "characters": analysis.get("characters", [])}
         _atomic_write_json(v_plan(cid, vid), out_data, ensure_ascii=False, indent=1)
 
+        # Juli 2026 — Auto-Generate Charsheets pro Video:
+        # Nach der Script-Analyse liegen die Charaktere (mit id, name_or_role, visual_description)
+        # vor. Für jeden Eintrag OHNE existierendes Charsheet im Video-Verzeichnis wird ein
+        # 5-Pose-Sheet generiert (via Gemini Vision, bestehende gen_charsheet-Funktion).
+        # So hat jedes Video seinen eigenen Charakter-Pool, ohne Müll aus alten Videos.
+        characters = analysis.get("characters", []) or []
+        if characters:
+            with _PLAN_JOBS_LOCK:
+                PLAN_JOBS[key]["step"] = f"Generiere {len(characters)} Charakter-Sheet(s) …"
+            sheet_dir = ch_sheets(cid, vid)
+            existing_sheets = {}  # safe_id -> name (lowercased name for fuzzy match)
+            existing_sheets_by_name = {}  # lowercased name -> safe_id
+            try:
+                for f in os.listdir(sheet_dir):
+                    if not f.endswith(".json"):
+                        continue
+                    sid = os.path.splitext(f)[0]
+                    try:
+                        m = json.load(open(os.path.join(sheet_dir, f)))
+                        n = (m.get("name") or sid).strip().lower()
+                        existing_sheets[sid] = n
+                        existing_sheets_by_name[n] = sid
+                    except Exception:
+                        existing_sheets[sid] = sid.lower()
+                        existing_sheets_by_name[sid.lower()] = sid
+            except OSError:
+                pass
+            generated = []
+            skipped = []
+            failed = []
+            for ch in characters:
+                ch_id = (ch.get("id") or "").strip()
+                ch_name = (ch.get("name_or_role") or ch_id or "character").strip()
+                ch_desc = (ch.get("visual_description") or "").strip()
+                if not ch_id or not ch_desc:
+                    skipped.append(ch_name or "?")
+                    continue
+                # Schutzlogik (Juli 2026, User-Report "Charakter Carreyrou wurde
+                # überschrieben"): Wenn LLM eine neue ID zurückgibt (z.B. weil es den
+                # Charakter-Namen statt der bisherigen ID wählt), aber ein Sheet mit
+                # dem GLEICHEN NAMEN existiert, soll das alte Sheet beibehalten werden.
+                # Sonst überschreibt Auto-Generate das vorhandene Charsheet mit einer
+                # anderen Datei-ID und löscht das Original.
+                name_lower = ch_name.lower()
+                if ch_id in existing_sheets:
+                    skipped.append(ch_id)
+                    continue
+                if name_lower in existing_sheets_by_name:
+                    skipped.append(f"{ch_id} (name-collision mit {existing_sheets_by_name[name_lower]})")
+                    continue
+                try:
+                    from engine.prompts import gen_charsheet
+                    img_bytes = gen_charsheet(cid, ch_name, ch_desc, vid=vid)
+                    if img_bytes:
+                        # Speichere als <safe>.png + <safe>.json im Video-Verzeichnis
+                        from dashboard import ch_sheets as _cs
+                        sd = _cs(cid, vid)
+                        os.makedirs(sd, exist_ok=True)
+                        with open(os.path.join(sd, f"{ch_id}.png"), "wb") as f:
+                            f.write(img_bytes)
+                        with open(os.path.join(sd, f"{ch_id}.json"), "w", encoding="utf-8") as f:
+                            json.dump({
+                                "name": ch_name, "safe": ch_id,
+                                "description": ch_desc,
+                                "anonymize": ch.get("anonymize", False),
+                                "generated_at": time.time(),
+                            }, f, ensure_ascii=False, indent=1)
+                        generated.append(ch_id)
+                except Exception as e:
+                    print(f"  [Plan] Charsheet-Generierung für '{ch_id}' fehlgeschlagen: {e}", flush=True)
+                    failed.append(ch_id)
+            print(f"  [Plan] Charsheets: generiert={len(generated)}, "
+                  f"übersprungen (existiert bereits oder leer)={len(skipped)}, "
+                  f"fehlgeschlagen={len(failed)}", flush=True)
+
         with _PLAN_JOBS_LOCK:
             PLAN_JOBS[key] = {"running": False, "step": "Fertig", "error": None, "done": True, "ts": time.time()}
         print(f"  [Plan] {cid}/{vid}: fertig, {len(scenes)} Szenen", flush=True)
@@ -1849,11 +1965,11 @@ def _thumbnail_generate_worker(cid: str, vid: str, full_script: str, master_styl
         print("  [Thumbnail] Semaphore erhalten, submitte an KIE …", flush=True)
         with _THUMB_JOBS_LOCK:
             THUMB_JOBS[key]["step"] = "Erzeuge Bild bei KIE …"
-        char_ref_url = get_channel_char_ref(cid)
+        style_ref_url = get_channel_style_ref(cid)
         try:
             res = gen_thumbnail_image(prompt, master_style, os.path.join(v_out(cid, vid), "thumbnail.jpg"),
                                        model=get_video_image_model(cid, vid),
-                                       ref_urls=[char_ref_url] if char_ref_url else None)
+                                       ref_urls=[style_ref_url] if style_ref_url else None)
         finally:
             IMAGE_GEN_SEMAPHORE.release()
         if not res["ok"]:
@@ -1973,10 +2089,29 @@ def _produce_worker(cid: str, vid: str, text: str = "", wpm: float = 130.0, sec:
 
 
 def gen_image(scene_prompt, master, out_path, char_refs=None):
-    """Synchronous image generation — used only for charsheets."""
+    """Synchronous image generation — used only for charsheets.
+
+    July 2026 (User-Report: "charsheets sehen für unterschiedliche Kanäle anders aus"):
+    We extract image_data_url from each char_ref and pass them as ref_urls to
+    _kie_submit_image so KIE actually sees the style reference. Before this fix,
+    char_refs were only used as TEXT in the prompt (via _build_image_prompt → filter),
+    but the visual style-anchor image never reached KIE. KIE rendered charsheets in a
+    generic style (or stick figures if the prompt asked for them).
+    """
     full_prompt = _build_image_prompt(scene_prompt, master, char_refs)
+    # Extract image URLs from char_refs for KIE's image_input field. Keep only
+    # entries that have a real data-URL or http(s) URL.
+    ref_urls = None
+    if char_refs:
+        urls = []
+        for cr in char_refs:
+            url = cr.get("image_data_url") if isinstance(cr, dict) else None
+            if url and isinstance(url, str) and url.startswith(("data:image/", "http://", "https://")):
+                urls.append(url)
+        if urls:
+            ref_urls = urls
     try:
-        task_id = _kie_submit_image(full_prompt)
+        task_id = _kie_submit_image(full_prompt, ref_urls=ref_urls)
     except RuntimeError as e:
         return {"ok": False, "error": str(e)}
     poll_url  = f"{KIE_API}/recordInfo?taskId={task_id}"
@@ -2264,9 +2399,9 @@ def make_video_prompt(scene_text: str, char_desc: str) -> str:
         return f"Animate character to illustrate: {scene_text[:80]}. Smooth deliberate movement."
 
 
-def gen_video(scene_url: str, video_prompt: str, duration: int = 6, char_ref_url: str = "") -> dict:
+def gen_video(scene_url: str, video_prompt: str, duration: int = 6, style_ref_url: str = "") -> dict:
     """Submit KIE image-to-video job and return {ok, file_url, error}."""
-    ref_url = char_ref_url if char_ref_url else scene_url
+    ref_url = style_ref_url if style_ref_url else scene_url
     prompt = video_prompt
     hdrs = {"Authorization": f"Bearer {kie_key()}", "Content-Type": "application/json"}
     body = {
@@ -2522,17 +2657,27 @@ def _transcribe_generate_worker(cid: str, vid: str, sec: float) -> dict:
     the original Gemini path for any other (user-uploaded) audio.
     """
     meta = json.load(open(v_audio(cid, vid)))
-    # Clear old generated files when transcribing new audio.
-    out_dir = v_out(cid, vid)
-    for f in os.listdir(out_dir):
-        if f.endswith((".jpg", ".png", ".mp4")):
-            try:
-                os.remove(os.path.join(out_dir, f))
-                print(f"  [Transcribe] Gelösche alte Datei: {f}", flush=True)
-            except: pass
-
     is_elevenlabs = (meta.get("voiceover_source") == "elevenlabs"
                      and bool(meta.get("voiceover_word_timestamps")))
+
+    # Clear old generated files ONLY for the Gemini path (real re-transcribe). For the
+    # ElevenLabs path we NEVER delete images — they're the user's renders and must
+    # survive every ElevenLabs/plan re-run. This is the July 2026 bug-fix: previously
+    # the ElevenLabs path deleted images unconditionally, which wiped a full 73-scene
+    # render because the user re-triggered ElevenLabs after images finished.
+    if not is_elevenlabs:
+        out_dir = v_out(cid, vid)
+        for f in os.listdir(out_dir):
+            if f.endswith((".jpg", ".png", ".mp4")):
+                try:
+                    os.remove(os.path.join(out_dir, f))
+                    print(f"  [Transcribe] Gelösche alte Datei: {f}", flush=True)
+                except: pass
+    else:
+        keep = [f for f in os.listdir(v_out(cid, vid))
+                 if f.endswith((".jpg", ".png", ".mp4"))]
+        print(f"  [Transcribe] ElevenLabs-Pfad: {len(keep)} Bilder/Videos bleiben "
+              f"unangetastet.", flush=True)
 
     if is_elevenlabs:
         words = meta["voiceover_word_timestamps"]
@@ -2683,7 +2828,7 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/videos":
             return self._send(200, {"videos": load_videos(cid)})
         if p == "/api/char_ref":
-            ref_path = os.path.join(ch_dir(cid), "char_ref_url.txt")
+            ref_path = os.path.join(ch_dir(cid), "style_ref_url.txt")
             url = open(ref_path).read().strip() if os.path.exists(ref_path) else ""
             return self._send(200, {"url": url})
         if p == "/api/get_mode":
@@ -2831,6 +2976,10 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/plan":
             try:    return self._send(200, json.load(open(v_plan(cid, vid))))
             except: return self._send(200, {"scenes": []})
+        if p == "/api/script":
+            if not vid: return self._send(200, {"text": None})
+            data = load_v_script(cid, vid)
+            return self._send(200, data or {"text": None})
         if p == "/api/plan_status":
             with _PLAN_JOBS_LOCK:
                 state = PLAN_JOBS.get((cid, vid))
@@ -2864,18 +3013,30 @@ class H(BaseHTTPRequestHandler):
                 return self._send(200, b, "image/jpeg" if b[:2] == b"\xff\xd8" else "image/png")
             return self._send(404, {"error": "not found"})
         if p == "/api/charsheets":
+            # vid aus Query-String: /api/charsheets?channel=...&vid=...
+            qs = parse_qs(urlparse(self.path).query)
+            vid_param = (qs.get("vid", [None]) or [None])[0]
+            sheet_dir = ch_sheets(cid, vid_param) if vid_param else ch_sheets(cid)
             sheets = []
-            for f in sorted(os.listdir(ch_sheets(cid))):
+            try:
+                files = os.listdir(sheet_dir)
+            except OSError:
+                files = []
+            for f in sorted(files):
                 if f.endswith(".json"):
                     try:
-                        meta = json.load(open(os.path.join(ch_sheets(cid), f)))
-                        img = os.path.join(ch_sheets(cid), f.replace(".json", ".png"))
+                        meta = json.load(open(os.path.join(sheet_dir, f)))
+                        img = os.path.join(sheet_dir, f.replace(".json", ".png"))
                         meta["has_image"] = os.path.exists(img)
                         sheets.append(meta)
                     except: pass
             return self._send(200, {"sheets": sheets})
         if p.startswith("/charsheets/"):
-            fp = os.path.join(ch_sheets(cid), os.path.basename(p))
+            # Same: vid-aware lookup with channel-pool fallback
+            qs = parse_qs(urlparse(self.path).query)
+            vid_param = (qs.get("vid", [None]) or [None])[0]
+            sheet_dir = ch_sheets(cid, vid_param) if vid_param else ch_sheets(cid)
+            fp = os.path.join(sheet_dir, os.path.basename(p))
             if os.path.exists(fp):
                 b = open(fp, "rb").read()
                 return self._send(200, b, "image/jpeg" if b[:2] == b"\xff\xd8" else "image/png")
@@ -3033,6 +3194,33 @@ class H(BaseHTTPRequestHandler):
             save_v_meta(cid, vid, meta)
             return self._send(200, {"ok": True})
 
+        # ── Script persistence (per-video, server-side, survives browser/device) ─
+        # The frontend had a localStorage workaround that worked for a single browser
+        # on a single machine but lost the script the moment Noel opened the dashboard
+        # on the Mac after writing it on the laptop. script.json fixes that — written
+        # debounced (every ~2.5s while typing), read once on video load, never blocks.
+        # (GET /api/script lives in do_GET since it has no body.)
+        if p == "/api/save_script":
+            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
+            text = d.get("text", "")
+            if not isinstance(text, str):
+                return self._send(400, {"error": "text muss String sein"})
+            # Hard cap — protects against accidental paste of a 500-page document into
+            # a single script.json. ~500KB is enough for ~5h narration at ~150wpm.
+            if len(text) > 500_000:
+                return self._send(413, {"error": "Skript zu lang (>500k Zeichen)"})
+            payload = {
+                "text": text,
+                "language": d.get("language", "de"),
+                "preset": d.get("preset", "flat_cartoon_doc"),
+                "updatedAt": int(time.time()),
+            }
+            try:
+                save_v_script(cid, vid, payload)
+            except Exception as e:
+                return self._send(500, {"error": f"Schreiben fehlgeschlagen: {e}"})
+            return self._send(200, {"ok": True, "savedAt": payload["updatedAt"]})
+
         if p == "/api/save_idea":
             if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
             meta = load_v_meta(cid, vid)
@@ -3188,10 +3376,10 @@ class H(BaseHTTPRequestHandler):
                 duration_veo = 8
             else:
                 # Load char ref or scene image for REFERENCE_2_VIDEO (fresh anchor shot)
-                char_ref_path = os.path.join(ch_dir(cid), "char_ref_url.txt")
-                char_ref_url  = open(char_ref_path).read().strip() if os.path.exists(char_ref_path) else ""
+                style_ref_path = os.path.join(ch_dir(cid), "style_ref_url.txt")
+                style_ref_url  = open(style_ref_path).read().strip() if os.path.exists(style_ref_path) else ""
                 scene_img_url = scene.get("source_url", "")
-                ref_url = char_ref_url or scene_img_url
+                ref_url = style_ref_url or scene_img_url
 
                 requested_dur = int(d.get("duration", 8))
                 if ref_url:
@@ -3398,6 +3586,7 @@ class H(BaseHTTPRequestHandler):
             name = d.get("name", "Charakter").strip()
             img_b64 = d.get("image", "")
             mime = d.get("mime", "image/png")
+            vid = d.get("vid")  # July 2026: charsheets are now per-video
             if not name:
                 return self._send(400, {"error": "name fehlt"})
             if not img_b64:
@@ -3412,9 +3601,9 @@ class H(BaseHTTPRequestHandler):
             if not img_bytes:
                 return self._send(400, {"error": "image dekodiert zu leer"})
             safe = re.sub(r"[^\w\-]", "_", name.lower()) or "character"
-            os.makedirs(ch_sheets(cid), exist_ok=True)  # B-1: Auto-Mkdir (frische Kanäle)
-            img_path  = os.path.join(ch_sheets(cid), f"{safe}.png")
-            meta_path = os.path.join(ch_sheets(cid), f"{safe}.json")
+            os.makedirs(ch_sheets(cid, vid), exist_ok=True)  # B-1: Auto-Mkdir (frische Kanäle)
+            img_path  = os.path.join(ch_sheets(cid, vid), f"{safe}.png")
+            meta_path = os.path.join(ch_sheets(cid, vid), f"{safe}.json")
             try:
                 open(img_path, "wb").write(img_bytes)
             except OSError as e:
@@ -3423,7 +3612,7 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 desc = ""; print(f"  [Char] Analyse-Fehler: {e}", flush=True)
             # Öffentliche URL erzeugen: das Frontend erwartet `uri` (set_char_ref +
-            # _applyCharRef), und die char_ref_url wird als KIE-Bildreferenz benutzt —
+            # _applyCharRef), und die style_ref_url wird als KIE-Bildreferenz benutzt —
             # muss also public-http sein (set_char_ref lehnt Nicht-http-URLs ab).
             # Ohne diesen Upload bekam das Frontend `undefined` → Referenz wurde nie
             # gesetzt (Kern von Bug B-1: Upload "tat nichts").
@@ -3437,18 +3626,55 @@ class H(BaseHTTPRequestHandler):
 
         if p == "/api/gen_charsheet":
             name = d.get("name", "").strip(); desc = d.get("description", "").strip()
+            vid_param = d.get("vid") or None
             if not name or not desc: return self._send(400, {"error": "name und description erforderlich"})
             safe = re.sub(r"[^\w\-]", "_", name.lower())
-            tmp  = os.path.join(ch_sheets(cid), f"_tmp_{safe}.jpg")
+            sheet_dir = ch_sheets(cid, vid_param)
+            tmp  = os.path.join(sheet_dir, f"_tmp_{safe}.jpg")
             try:
-                img_bytes = gen_charsheet(cid, name, desc)
-                open(os.path.join(ch_sheets(cid), f"{safe}.png"), "wb").write(img_bytes)
+                img_bytes = gen_charsheet(cid, name, desc, vid=vid_param)
+                open(os.path.join(sheet_dir, f"{safe}.png"), "wb").write(img_bytes)
                 json.dump({"name": name, "description": desc, "safe": safe, "mime": "image/jpg"},
-                          open(os.path.join(ch_sheets(cid), f"{safe}.json"), "w"), ensure_ascii=False)
+                          open(os.path.join(sheet_dir, f"{safe}.json"), "w"), ensure_ascii=False)
                 return self._send(200, {"ok": True, "name": name, "safe": safe})
             except Exception as e:
                 import traceback; traceback.print_exc()
                 return self._send(500, {"error": str(e)})
+
+        # ── Char-Sheet: Beschreibung aktualisieren ─────────────────────────────
+        if p == "/api/charsheet_update":
+            safe = re.sub(r"[^\w\-]", "_", (d.get("safe") or "").lower())
+            desc = d.get("description", "").strip()
+            vid_param = d.get("vid") or None
+            if not safe or not desc: return self._send(400, {"error": "safe und description erforderlich"})
+            sheet_dir = ch_sheets(cid, vid_param)
+            meta_path = os.path.join(sheet_dir, f"{safe}.json")
+            if not os.path.exists(meta_path):
+                return self._send(404, {"error": "Charakter existiert nicht in diesem Video"})
+            try:
+                meta = json.load(open(meta_path))
+                meta["description"] = desc
+                meta["updated_at"] = time.time()
+                json.dump(meta, open(meta_path, "w"), ensure_ascii=False, indent=1)
+                return self._send(200, {"ok": True})
+            except Exception as e:
+                return self._send(500, {"error": str(e)})
+
+        # ── Char-Sheet: löschen ────────────────────────────────────────────────
+        if p == "/api/charsheet_delete":
+            safe = re.sub(r"[^\w\-]", "_", (d.get("safe") or "").lower())
+            vid_param = d.get("vid") or None
+            if not safe: return self._send(400, {"error": "safe erforderlich"})
+            sheet_dir = ch_sheets(cid, vid_param)
+            removed = []
+            for ext in (".json", ".png"):
+                fp = os.path.join(sheet_dir, f"{safe}{ext}")
+                if os.path.exists(fp):
+                    try:
+                        os.remove(fp)
+                        removed.append(fp)
+                    except: pass
+            return self._send(200, {"ok": True, "removed": removed})
 
         # ── Generate one image (async) ────────────────────────────────────────
         # ── "Alle Bilder generieren" — runs server-side, survives reloads ──────
@@ -3581,7 +3807,7 @@ class H(BaseHTTPRequestHandler):
             # firing this KIE submission immediately alongside all the others. Released by
             # _image_job_worker once this scene's generation fully finishes.
             IMAGE_GEN_SEMAPHORE.acquire()
-            char_ref_url = get_channel_char_ref(cid)
+            style_ref_url = get_channel_style_ref(cid)
             # Juli 2026 (User-Report: "sobald kein Mensch im Prompt ist, denkt er sich
             # was aus"): Referenzbild jetzt an JEDE Szene (nicht mehr nur char_-Entities)
             # — es ist ein reiner STIL-Anker (siehe Master-Prompt), kein erzwungenes
@@ -3592,8 +3818,8 @@ class H(BaseHTTPRequestHandler):
             # _batch_generate_worker). Keine Charsheet-Text/Bild-Injection mehr (alte,
             # kanalweite Charsheets aus einem anderen Video überstimmten sonst die
             # Szenenbeschreibung).
-            use_char_ref = bool(char_ref_url) and not entity_refs
-            refs = entity_refs + ([char_ref_url] if use_char_ref else [])
+            use_style_ref = bool(style_ref_url) and not entity_refs
+            refs = entity_refs + ([style_ref_url] if use_style_ref else [])
             try:
                 task_id = _kie_submit_image(full_prompt, model=get_video_image_model(cid, vid),
                                              ref_urls=refs or None)
@@ -3637,13 +3863,13 @@ class H(BaseHTTPRequestHandler):
             if not scene:
                 return self._send(404, {"error": f"Szene {i} nicht gefunden"})
             # Load canonical character reference URL (if set)
-            char_ref_path = os.path.join(ch_dir(cid), "char_ref_url.txt")
-            char_ref_url = open(char_ref_path).read().strip() if os.path.exists(char_ref_path) else ""
+            style_ref_path = os.path.join(ch_dir(cid), "style_ref_url.txt")
+            style_ref_url = open(style_ref_path).read().strip() if os.path.exists(style_ref_path) else ""
 
             # Scene image as fallback reference (upload if no CDN url yet)
             source_url = scene.get("source_url", "")
             url_age = int(time.time()) - scene.get("source_url_ts", 0)
-            if not char_ref_url and (not source_url or url_age > 72000):
+            if not style_ref_url and (not source_url or url_age > 72000):
                 local_file = scene.get("file")
                 if not local_file:
                     return self._send(400, {"error": "Kein Bild und kein Character-Ref — zuerst ein Bild generieren."})
@@ -3674,9 +3900,9 @@ class H(BaseHTTPRequestHandler):
             video_prompt = make_video_prompt(scene.get("text", ""), char_desc)
             print(f"  [Video] Prompt: {video_prompt[:120]} …", flush=True)
 
-            using_ref = "char-ref" if char_ref_url else "scene-img"
+            using_ref = "style-ref" if style_ref_url else "scene-img"
             print(f"  [Video] Referenz: {using_ref}", flush=True)
-            res = gen_video(source_url, video_prompt, duration, char_ref_url)
+            res = gen_video(source_url, video_prompt, duration, style_ref_url)
             if not res["ok"]:
                 return self._send(500, {"error": res["error"]})
             # Download mp4
@@ -3737,7 +3963,7 @@ class H(BaseHTTPRequestHandler):
         # ── Set canonical character reference URL ─────────────────────────────
         if p == "/api/set_char_ref":
             url = d.get("url", "").strip()
-            ref_path = os.path.join(ch_dir(cid), "char_ref_url.txt")
+            ref_path = os.path.join(ch_dir(cid), "style_ref_url.txt")
             if not url:
                 # Clear: delete file
                 if os.path.exists(ref_path): os.remove(ref_path)
@@ -3784,10 +4010,10 @@ class H(BaseHTTPRequestHandler):
                             with urllib.request.urlopen(dl_req, timeout=60) as vr:
                                 img_data = vr.read()
                             # Save locally
-                            ref_path = os.path.join(ch_dir(cid), "char_ref.png")
+                            ref_path = os.path.join(ch_dir(cid), "style_ref.png")
                             open(ref_path, "wb").write(img_data)
                             pub_url = upload_image_public(ref_path)
-                            open(os.path.join(ch_dir(cid), "char_ref_url.txt"), "w").write(pub_url)
+                            open(os.path.join(ch_dir(cid), "style_ref_url.txt"), "w").write(pub_url)
                             return self._send(200, {"ok": True, "url": pub_url})
                     elif info.get("state") == "fail":
                         return self._send(500, {"error": f"KIE fail: {info.get('failMsg')}"})

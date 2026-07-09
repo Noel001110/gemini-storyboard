@@ -4,8 +4,7 @@ Enthält (Phase M.5 + M.6, 2026-07-07):
     Konstanten:
         IMAGE_PROMPT_CHUNK_SIZE, IMAGE_PROMPT_MIN_LEN
     Funktionen:
-        _phase_prompt_addition       — Phase-Style-Lookup
-        _build_image_prompt          — Bild-Prompt zusammensetzen (Scene + Char-Refs + Phase + Master)
+        _build_image_prompt          — Bild-Prompt zusammensetzen (Scene + Char-Refs + Master)
         _build_video_prompt          — Video-Prompt zusammensetzen (Veo)
         load_char_refs               — Char-Sheet-Metadaten aus Dateien laden
         analyze_char_image           — LLM-Aufruf: Character-Design-Spec aus Bild
@@ -19,11 +18,10 @@ Enthält (Phase M.5 + M.6, 2026-07-07):
 NICHT hier:
     IMAGE_MASTER_DEFAULT, VIDEO_MASTER_DEFAULT  — bleiben in dashboard.py bis Phase Q
                                                 (dann ersetzt durch PRESET_MASTERS)
-    PHASE_PROMPT_ADDITIONS                      — lebt schon in engine_elevenlabs.py
-                                                (Lazy-Import hier)
-
-Externe Abhängigkeiten (lazy importiert):
-    engine_elevenlabs.PHASE_PROMPT_ADDITIONS  — Phase→Style-Mapping
+    PHASE_PROMPT_ADDITIONS                      — lebt in engine_elevenlabs.py, nur Color-/Vignette-
+                                                  Filter nutzen es (kein Bild-Prompt-Inject mehr)
+    HOOK_PROMPT_ADDITION                        — entfernt aus Bild-Prompt (war Anti-Pattern,
+                                                  siehe _build_image_prompt Docstring)
     dashboard.analyze_script, post_gemini_native — LLM-Bridge
 """
 
@@ -41,7 +39,6 @@ __all__ = [
     "IMAGE_PROMPT_CHUNK_SIZE", "IMAGE_PROMPT_MIN_LEN",
     "SCRIPT_SYSTEM", "TITLE_SYSTEM", "THUMBNAIL_PROMPT_SYSTEM",
     "HOOK_PROMPT_ADDITION",  # Phase L
-    "_phase_prompt_addition",
     "_build_image_prompt", "_build_video_prompt",
     "load_char_refs", "analyze_char_image", "gen_charsheet",
     "_anonymized_words", "_validate_image_prompt_entry",
@@ -54,9 +51,12 @@ __all__ = [
 
 # ── Image-Prompt-Generation (LLM-Pipeline) ──────────────────────────────────
 
-IMAGE_PROMPT_CHUNK_SIZE = 20   # scenes per LLM call. Bigger chunk = fewer calls = the analysis
-# JSON + few-shot examples + style context (repeated in full on EVERY chunk call) get sent
-# far fewer times — that repeated overhead, not raw call count, is the real cost driver.
+IMAGE_PROMPT_CHUNK_SIZE = 12   # scenes per LLM call. July 2026 (Diagnose): 40 Beats/Chunk produced
+# 1229-char truncated output (JSON broken mid-entry, "Unterminated string"), 5 Beats/Chunk
+# produced clean 4907 chars. 12 leaves a 4x safety margin under maxOutputTokens=8192 even
+# for verbose anchors. JSON + few-shot examples + style context (repeated in full on EVERY
+# chunk call) get sent far fewer times — that repeated overhead, not raw call count, is
+# the real cost driver.
 # 20 is a middle ground: cuts repeated-context cost ~55% vs. the earlier value of 9, while
 # thinkingLevel=high keeps later-in-chunk quality from degrading like it did on 2.5-flash.
 IMAGE_PROMPT_MIN_LEN    = 220  # chars — stills need less than video (no camera-move description) but still concrete
@@ -127,10 +127,41 @@ def _image_prompt_chunk(chunk_beats: list, chunk_offset: int, total: int,
         for i, (t, p) in enumerate(zip(chunk_beats, chunk_phases))
     )
 
+    # July 2026 — Gemini responseSchema (passed through KIE.ai). Forces Gemini to
+    # produce output that exactly matches this schema: no missing fields, no
+    # unescaped quotes in user-facing strings, no truncation mid-value. Combined
+    # with thinking_level="low" + maxOutputTokens=16384 in post_gemini_native,
+    # this eliminates the JSON-parse cascade that was eating ~80% of long-script runs.
+    _image_chunk_schema = {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "scene": {"type": "integer"},
+                "core_statement": {"type": "string"},
+                "concrete_entity": {"type": "string"},
+                "callback_check": {"type": "string"},
+                "character_consistency": {"type": "string"},
+                "line_specific_anchor": {"type": "string"},
+                "image_prompt": {"type": "string", "minLength": 50},
+            },
+            "required": ["scene", "core_statement", "concrete_entity",
+                         "callback_check", "character_consistency",
+                         "line_specific_anchor", "image_prompt"],
+        },
+    }
+
     instr = f"""\
 You are a storyboard director turning narration into single still images. You receive a
 structural ANALYSIS of the full script and a CHUNK of consecutive narrator lines. Work
 through each line using the forced fields below — do not skip straight to the final prompt.
+
+LINE-SPECIFIC ILLUSTRATION (July 2026, User-Report: "Bilder wirken fast schon generisch"):
+Every image must visually illustrate what the narrator is saying AT THIS MOMENT — not
+what they said earlier, not what they will say next, and not a generic atmosphere that
+could fit any scene. If you can imagine the image appearing in another scene without
+anyone noticing, your image has failed. The single hardest rule of this work is:
+the image is a visual translation of THIS line and nothing else.
 
 ANALYSIS (entities, locations, symbols, emotional arc, callbacks — extracted from the FULL script):
 {analysis_ctx}
@@ -159,13 +190,25 @@ For EACH line in the chunk below, produce an object with ALL of these fields, in
                              a previous clip, restate exactly how the character(s) must look
                              (from ANALYSIS.characters visual_description) so every frame stays
                              identical — head shape, proportions, distinguishing features.",
+  "line_specific_anchor": "BEFORE you write image_prompt: list the ONE specific visual element
+                            that makes THIS line different from the lines around it. What would
+                            be wrong or missing if you swapped this image with the previous or
+                            next scene's image? Examples: 'the cracked vial that wasn't there
+                            before' (showing the test failed), 'the crowd turning away from the
+                            founder' (showing rejection), 'a single yellow leaf on otherwise green
+                            branches' (showing decline). If you cannot name one such element,
+                            your scene is too generic — re-read the line and find the visual
+                            detail that ONLY this narration introduces. 1-2 sentences.",
   "image_prompt": "The final image text. MUST visibly include concrete_entity AND the
-                    callback_check element (if not 'none'). MUST reflect character_consistency
-                    exactly if a character appears. NO art-style words here (line weight, color
-                    palette etc. — that's applied separately from the master prompt). Must
-                    explicitly name: (1) the concrete main subject, (2) the setting/location,
-                    (3) the composition/framing. A prompt that only describes a vague mood
-                    without these three elements is invalid. Minimum {IMAGE_PROMPT_MIN_LEN} characters."
+                    callback_check element (if not 'none'). MUST visibly include the
+                    line_specific_anchor — without it the image could belong to ANY scene,
+                    and that is exactly what we are forbidding here. MUST reflect
+                    character_consistency exactly if a character appears. NO art-style words
+                    here (line weight, color palette etc. — that's applied separately from
+                    the master prompt). Must explicitly name: (1) the concrete main subject,
+                    (2) the setting/location, (3) the composition/framing, AND (4) the
+                    line_specific_anchor. A prompt that describes only a generic mood
+                    without these four elements is invalid. Minimum {IMAGE_PROMPT_MIN_LEN} characters."
 }}
 
 HARD RULE: if a line names a concrete person, place, or technology, image_prompt MUST show
@@ -178,8 +221,32 @@ NARRATOR LINES IN THIS CHUNK:
 
 Return a JSON array of {len(chunk_beats)} objects, one per line above, in the same order.
 """
-    txt = post_gemini_native([{"role": "user", "content": instr}], json_mode=True, temp=0.6)
-    arr = json.loads(txt)
+    txt = post_gemini_native([{"role": "user", "content": instr}], json_mode=True, temp=0.6,
+                            thinking_level="high", response_schema=_image_chunk_schema)
+    # July 2026 (User-Report): thinking zurück auf "high" — der User hat beobachtet dass
+    # "low" zu schlechterer Bildqualität führt (Reasoning fehlt für kreative
+    # Bild-Prompts). Mit dem responseSchema-Fix + maxOutputTokens=16384 haben wir
+    # genug Puffer, dass "high" nicht mehr truncated wird.
+    # July 2026 — robust JSON parsing: the new `line_specific_anchor` field frequently
+    # contains quoted phrases or dialogue-style snippets that the LLM does not always
+    # escape properly, breaking json.loads(). Without recovery, every parse-fail cascades
+    # into chunk-splitting + single-scene retries, ballooning 5-min generations into 15+
+    # min. Recovery strategy: try strict parse, then strip down to the outermost JSON array
+    # via regex (handles surrounding prose/markdown), then return [] as a last resort.
+    try:
+        arr = json.loads(txt)
+    except json.JSONDecodeError:
+        m = re.search(r"\[\s*\{.*\}\s*\]", txt, re.DOTALL)
+        if not m:
+            print(f"  [Plan] WARNUNG: keine JSON-Array-Struktur in Gemini-Antwort erkennbar "
+                  f"(Antwort-Laenge {len(txt)} chars). Chunk wird als leer zurueckgegeben, "
+                  f"einzelne Szenen gehen in den Retry-Pfad.", flush=True)
+            return []
+        try:
+            arr = json.loads(m.group(0))
+        except json.JSONDecodeError as e:
+            print(f"  [Plan] WARNUNG: JSON-Recovery fehlgeschlagen ({e}). Chunk leer.", flush=True)
+            return []
     if isinstance(arr, dict):
         for v in arr.values():
             if isinstance(v, list) and len(v) == len(chunk_beats):
@@ -304,16 +371,11 @@ def visual_prompts(scenes, analysis=None):
 
 # ── Phase-Style-Lookup ───────────────────────────────────────────────────────
 
-def _phase_prompt_addition(phase: str) -> str:
-    """Inline lookup of phase-specific prompt cues. Kept as thin wrapper for clarity
-    at call sites — actual logic is `PHASE_PROMPT_ADDITIONS.get(phase, "")`.
-
-    Used inside `_build_image_prompt` — a HARD injection of the phase STYLE into the
-    final KIE-bound prompt — making Phase C a real constraint (vs. a soft hint that
-    the LLM might forget).
-    """
-    from engine_elevenlabs import PHASE_PROMPT_ADDITIONS  # lazy: avoid cycle
-    return PHASE_PROMPT_ADDITIONS.get(phase, "")
+# _phase_prompt_addition() removed July 2026: phase cues are no longer injected into the
+# image prompt (image style is owned by master + style_ref image). PHASE_PROMPT_ADDITIONS
+# in engine_elevenlabs.py still feeds PHASE_COLOR_FILTER / PHASE_VOLUME / PHASE_ACCENT
+# for FFmpeg-side dramaturgy. Callers that need the lookup should import
+# `engine_elevenlabs.PHASE_PROMPT_ADDITIONS` directly.
 
 
 # ── Prompt-Komposition ───────────────────────────────────────────────────────
@@ -332,11 +394,11 @@ def _filter_char_refs_for_entity(char_refs, entity=""):
     """Only a charsheet whose name exactly matches this scene's concrete_entity belongs
     in that scene's prompt as a TEXT character-design override.
 
-    Deliberately excludes the generic global 'char_ref' charsheet (the single reference
+    Deliberately excludes the generic global 'style_ref' charsheet (the single reference
     image set in Settings) from this text filter — it is a visual style anchor, attached
-    separately as an *image* reference (see dashboard.py's char_ref_url handling), never
+    separately as an *image* reference (see dashboard.py's style_ref_url handling), never
     as a forced textual "this exact build/outfit wins" directive. An earlier version of
-    this filter treated 'char_ref' as always-included text, which meant its
+    this filter treated 'style_ref' as always-included text, which meant its
     Gemini-Vision-derived description (e.g. "stout build, teal sweater, brown trousers")
     silently overrode the scene's own, correct character description ("blonde hair,
     black turtleneck") in every single scene — producing a wrong-looking character that
@@ -364,9 +426,17 @@ def _filter_char_refs_for_entity(char_refs, entity=""):
 
 
 def _build_image_prompt(scene_prompt, master, char_refs, phase="", is_hook=False, entity=""):
-    """Compose the final image-generation prompt: scene text + character refs (if any)
-    + PHASE_PROMPT_ADDITIONS hard-injection (Phase C, Juli 2026) + HOOK_PROMPT_ADDITION
-    hard-injection (Phase L) + master prompt.
+    """Compose the final image-generation prompt: scene text + (filtered) character refs + master.
+
+    July 2026 (User-Report): Phase cues and Hook cues used to be hard-injected here. That was a
+    layering mistake — image style is owned by master + style_ref image. Phase/hook effects
+    (colorbalance, vignette, snap-zoom) belong in engine/render.py via FFmpeg / motion rules,
+    never in the KIE prompt. Injected cue-words ("high contrast, dynamic angle, emotional
+    saturation") were triggering KIE to switch art direction per phase (anime-leaning CLIMAX,
+    photoreal-leaning RESOLUTION) on top of any real style bug.
+
+    `phase` and `is_hook` are kept in the signature for backward compatibility with the few
+    callers in dashboard.py / tests; they are no longer used inside this function.
 
     Char-Ref-Filter (Phase 1): Müll-Injection-Schutz, plus entity-scoping (Phase 1b) via
     `_filter_char_refs_for_entity` — see that function's docstring for why unscoped
@@ -387,15 +457,7 @@ def _build_image_prompt(scene_prompt, master, char_refs, phase="", is_hook=False
                       "reference image, define this character's true appearance (hair, "
                       "face, outfit, build). If the scene description below conflicts "
                       "with them, the character design / reference image wins.")
-    phase_hint = ""
-    if phase:
-        phase_cue = _phase_prompt_addition(phase)
-        if phase_cue:
-            phase_hint = f"\n\nSTYLE ({phase}): {phase_cue}"
-    hook_hint = ""
-    if is_hook:
-        hook_hint = f"\n\nHOOK STYLE: {HOOK_PROMPT_ADDITION}"
-    return scene_prompt + char_hint + phase_hint + hook_hint + "\n\n" + master
+    return scene_prompt + char_hint + "\n\n" + master
 
 
 def _build_video_prompt(scene_prompt: str, vid_master: str) -> str:
@@ -453,8 +515,12 @@ def _local_png_to_data_url(local_path: str) -> str:
     return f"data:image/png;base64,{b64}"
 
 
-def load_char_refs(cid="default"):
-    """Load character-sheet metadata from JSON files in the channel's charsheets dir.
+def load_char_refs(cid="default", vid=None):
+    """Load character-sheet metadata from JSON files in the channel's (or video's) charsheets dir.
+
+    July 2026: charsheets are now per-video. Pass vid to load from
+    channels/<cid>/videos/<vid>/charsheets/. Without vid, falls back to the channel-global pool.
+    Per-video takes precedence when the directory exists.
 
     Phase 1 (Müll-Injection-Schutz): Jedes Charsheet wird durch _is_valid_char_description
     validiert. Müll-JSONs werden komplett übersprungen — sonst übersteuern die Test-Stil-Specs
@@ -466,21 +532,22 @@ def load_char_refs(cid="default"):
     """
     # Lazy-import to avoid cycle: ch_sheets is in dashboard.py
     from dashboard import ch_sheets
+    sheet_dir = ch_sheets(cid, vid)
     refs = []
     try:
-        files = os.listdir(ch_sheets(cid))
+        files = os.listdir(sheet_dir)
     except OSError:
         return refs
     for f in sorted(files):  # deterministische Reihenfolge
         if not f.endswith(".json"):
             continue
         try:
-            meta = json.load(open(os.path.join(ch_sheets(cid), f)))
+            meta = json.load(open(os.path.join(sheet_dir, f)))
             desc = meta.get("description", "")
             if not _is_valid_char_description(desc):
                 continue
             # Phase 2: PNG als data-URL einlesen, wenn vorhanden
-            png_path = os.path.join(ch_sheets(cid), f.replace(".json", ".png"))
+            png_path = os.path.join(sheet_dir, f.replace(".json", ".png"))
             if os.path.exists(png_path):
                 try:
                     meta["image_data_url"] = _local_png_to_data_url(png_path)
@@ -512,28 +579,84 @@ def analyze_char_image(img_bytes, mime="image/png"):
     return post_kie_text(msgs, temp=0.2).strip()
 
 
-def gen_charsheet(cid, name, description):
-    """Generate a character reference sheet image (5 poses) and return the bytes."""
+def gen_charsheet(cid, name, description, vid=None):
+    """Generate a character reference sheet image (5 poses) and return the bytes.
+
+    July 2026: vid is now accepted. When given, the temp PNG is written into the
+    per-video charsheets directory. Without vid, falls back to the channel-global
+    pool (backwards-compat for old call sites).
+    """
     # Lazy-imports: ch_sheets + gen_image live in dashboard.py
     from dashboard import ch_sheets, gen_image
+    # July 2026 (User-Report: "5 Strichmännchen statt Charakter-Sheet"): Der alte
+    # Prompt war ein Test-Stub (white background, black ink only, medium-weight lines,
+    # no shading). KIE nano-banana-2 hat das brav als Strichmännchen-Skizzen
+    # gerendert. Wir wollen aber einen Character-Reference-Sheet, der im Bild-Generate
+    # als Stil-Anker dient — also: realistische Posen, konsistentes Aussehen,
+    # volle Beleuchtung. Hintergrund bleibt neutral (Studio) für saubere Ref-Verwendung.
     prompt = (
-        f"CHARACTER REFERENCE SHEET — '{name}'.\n"
-        f"Draw this stick figure in 5 different poses, arranged in a single horizontal row on a white background. "
-        f"Label each pose below it with its name.\n\n"
-        f"Poses: 1-Neutral (standing still) · 2-Happy (arms up, curved smile) · "
-        f"3-Sad (shoulders drooping, frown) · 4-Shocked (arms spread wide, circle mouth) · "
-        f"5-Walking (one leg forward)\n\n"
-        f"Character design: {description}\n\n"
-        f"All 5 poses MUST share identical proportions, head size, and identifying features. "
-        f"White background (#FFFFFF), black ink only, medium-weight lines, no shading. "
-        f"Label each pose clearly below in small neat text."
+        f"CHARACTER REFERENCE SHEET for '{name}' — designed for character consistency "
+        f"across multiple scenes.\n\n"
+        f"Show the character in 5 different poses on a single horizontal row, on a clean "
+        f"light-grey studio background. Each pose is clearly separated with subtle "
+        f"white spacing. The character must be drawn in a polished, semi-realistic style "
+        f"with full shading and natural lighting.\n\n"
+        f"Poses (left to right):\n"
+        f"1. NEUTRAL — front-facing, standing relaxed, arms at sides, neutral expression\n"
+        f"2. THREE-QUARTER VIEW — slight angle, hands on hips, confident expression\n"
+        f"3. WALKING — mid-stride, side profile, dynamic pose\n"
+        f"4. CLOSE-UP PORTRAIT — head and shoulders only, looking slightly off-camera, "
+        f"engaged expression\n"
+        f"5. ACTION — gesturing with one hand raised, mid-conversation pose\n\n"
+        f"Character design specifications: {description}\n\n"
+        f"CRITICAL CONSISTENCY REQUIREMENTS:\n"
+        f"- All 5 poses MUST share identical face shape, head size, hair colour and style, "
+        f"skin tone, and clothing design\n"
+        f"- Same age, same body proportions across all poses\n"
+        f"- Each pose uses the same colour palette and rendering technique\n"
+        f"- No text labels, no captions, no annotations on the image — pure visual reference\n"
+        f"- Light grey studio background (#F0F0F0) with soft even lighting on the character"
     )
     # Pre-33.2 cleanup: backslash inside an f-string expression part is illegal on
     # Python 3.11/3.12 (PEP 701, allowed only in 3.13+). Extracting the regex
     # sanitizer value to its own line keeps the server startable on 3.11/3.12.
     tmp_name = re.sub(r"[^\w]", "_", name)
-    tmp = os.path.join(ch_sheets(cid), f"_tmp_{tmp_name}.jpg")
-    res = gen_image(prompt, "", tmp)
+    sheet_dir = ch_sheets(cid, vid)
+    os.makedirs(sheet_dir, exist_ok=True)  # per-video charsheets dir may not exist yet
+    tmp = os.path.join(sheet_dir, f"_tmp_{tmp_name}.jpg")
+
+    # Juli 2026 (User-Report: "charsheets sehen für unterschiedliche Kanäle anders aus"):
+    # Wir laden das Style-Referenz-Bild des Kanals (channels/<cid>/style_ref.png)
+    # und reichen es an KIE als Bild-Referenz mit, damit das Charsheet im kanal-eigenen
+    # Stil gerendert wird (Tusche, Photorealismus, Wasserfarben, etc.). Ohne diese
+    # Referenz rendert KIE die Charsheets in einem generischen Look.
+    char_refs = None
+    try:
+        from dashboard import get_channel_style_ref
+        style_ref_url = get_channel_style_ref(cid)
+        if style_ref_url and style_ref_url.startswith(("http://", "https://")):
+            # Remote URL — direkt durchreichen
+            char_refs = [{
+                "name": "style_ref",
+                "description": "Channel-wide style reference (line weight, palette, render style)",
+                "image_data_url": style_ref_url,
+                "safe": "style_ref",
+            }]
+        else:
+            # Lokales Bild (oder fehlt) — vom Disk laden, in data-URL kodieren
+            sp = os.path.join(ch_dir(cid), "style_ref.png")
+            if os.path.exists(sp):
+                char_refs = [{
+                    "name": "style_ref",
+                    "description": "Channel-wide style reference (line weight, palette, render style)",
+                    "image_data_url": _local_png_to_data_url(sp),
+                    "safe": "style_ref",
+                }]
+    except Exception as e:
+        print(f"  [Charsheet] Style-Ref konnte nicht geladen werden: {e}", flush=True)
+        char_refs = None
+
+    res = gen_image(prompt, "", tmp, char_refs=char_refs)
     if res["ok"]:
         data = open(tmp, "rb").read()
         try: os.unlink(tmp)

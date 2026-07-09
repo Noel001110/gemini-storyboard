@@ -456,25 +456,26 @@ def t_phase_i_abbreviation_handling():
 
 
 def t_phase_c_image_prompt_phase_injection():
-    """Phase C Fix-2: _build_image_prompt hard-injects PHASE_PROMPT_ADDITIONS when
-    phase is set. Without phase → no injection (backward compat)."""
+    """July 2026: Phase cues are NOT injected into the KIE image prompt. Image style is
+    owned by master + char_ref image. Phase effects (colorbalance, vignette) belong in
+    engine/render.py via FFmpeg. Originally this test asserted phase IS injected — that
+    was a layering mistake (CLIMAX cue-words triggered KIE to switch art direction).
+    Now we assert the opposite."""
     mp = "CINEMATIC MASTER PROMPT"
-    # Phase CLIMAX should inject
+    # Phase CLIMAX → no injection
     p = dashboard._build_image_prompt("A child playing in snow", mp, None, phase="CLIMAX")
-    assert "STYLE (CLIMAX)" in p, "Phase CLIMAX not hard-injected into final prompt"
-    assert "maximum visual impact" in p, "Phase content not present"
+    assert "STYLE (CLIMAX)" not in p, "Phase CLIMAX must NOT be injected into image prompt"
+    assert "maximum visual impact" not in p, "Phase cue content must NOT leak into image prompt"
 
-    # Phase OPENING
+    # Phase OPENING → no injection
     p2 = dashboard._build_image_prompt("Some scene", mp, None, phase="OPENING")
-    assert "STYLE (OPENING)" in p2, "Phase OPENING not injected"
+    assert "STYLE (OPENING)" not in p2, "Phase OPENING must NOT be injected"
 
-    # No phase → no injection
+    # No phase → no injection (unchanged)
     p3 = dashboard._build_image_prompt("Some scene", mp, None)
     assert "STYLE (" not in p3, "Empty phase should NOT inject STYLE marker"
-    # Backwards compat: existing callers without phase=... still work the same
     p4 = dashboard._build_image_prompt("Some scene", mp, None, phase="")
     assert "STYLE (" not in p4, "Empty phase string should NOT inject"
-    # Unknown phase → no injection
     p5 = dashboard._build_image_prompt("Some scene", mp, None, phase="UNKNOWN_PHASE")
     assert "STYLE (" not in p5, "Unknown phase should NOT inject"
 
@@ -1772,10 +1773,10 @@ def t_phase_m_dashboard_re_exports_prompts():
     import engine.prompts
     assert dashboard._build_image_prompt is engine.prompts._build_image_prompt
     assert dashboard._build_video_prompt is engine.prompts._build_video_prompt
-    assert dashboard._phase_prompt_addition is engine.prompts._phase_prompt_addition
     assert dashboard.visual_prompts is engine.prompts.visual_prompts
     assert dashboard._image_prompt_chunk is engine.prompts._image_prompt_chunk
     assert dashboard.generate_script is engine.prompts.generate_script
+    # _phase_prompt_addition was removed in July 2026 — phase cues are no longer in the image prompt
     assert dashboard.generate_titles is engine.prompts.generate_titles
     assert dashboard.make_thumbnail_prompt is engine.prompts.make_thumbnail_prompt
     assert dashboard.gen_thumbnail_image is engine.prompts.gen_thumbnail_image
@@ -2237,15 +2238,17 @@ def t_phase_l_is_hook_motion_override():
 
 
 def t_phase_l_no_hook_no_behavior_change():
-    """L.3: ohne is_hook-Feld in plan.json rendert alles identisch zu vorher."""
+    """L.3: ohne is_hook-Feld in plan.json rendert alles identisch zu vorher.
+    July 2026: Phase cues are also no longer in the image prompt (see t_phase_c_image_prompt_phase_injection).
+    """
     from engine.render import _motion_for_scene
     import engine.prompts as ep
     # _build_image_prompt ohne is_hook → keine HOOK STYLE Injection
     p = ep._build_image_prompt("Scene text.", "MASTER.", None, phase="CLIMAX")
     assert "HOOK STYLE:" not in p, \
         "Ohne is_hook=True darf KEINE HOOK STYLE Injection stattfinden"
-    assert "STYLE (CLIMAX):" in p, \
-        "Phase-Cue muss unverändert funktionieren (Rückwärtskompatibilität)"
+    assert "STYLE (CLIMAX):" not in p, \
+        "Phase-Cue darf seit Juli 2026 NICHT mehr im Bild-Prompt sein (Layering-Fix)"
     # _motion_for_scene ohne is_hook → keine Hook-Override
     no_hook = {"i": 0, "dur": 3.0, "pacing": "calm"}
     m = _motion_for_scene(no_hook, None)
@@ -2711,7 +2714,7 @@ def t_char_filter_build_image_prompt():
     Charakter generiert) auch nicht mehr pauschal das globale 'char_ref'-Charsheet. Das
     hatte zuvor seine Gemini-Vision-Beschreibung (z.B. "stout build, teal sweater") über
     die korrekte, szenen-eigene Charakterbeschreibung gestülpt. 'char_ref' wird seither
-    in dashboard.py nur noch als reines Bild (char_ref_url), nie als Text angehängt."""
+    in dashboard.py nur noch als reines Bild (style_ref_url), nie als Text angehängt."""
     from engine.prompts import _build_image_prompt
     char_refs = [
         {"name": "MüllChar", "safe": "mullchar",

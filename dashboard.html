@@ -365,34 +365,11 @@
              unsichtbar. -->
       </div>
 
-      <div class="card" id="charCard">
-        <h2>Charakter-Referenzen <span class="hint" style="text-transform:none;letter-spacing:0">(werden bei jedem Bild mitgeschickt)</span></h2>
-        <div id="charList"></div>
-        <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;margin-top:10px">
-          <div style="font-size:12px;color:var(--mut);margin-bottom:8px">Referenzbild hochladen <span style="color:var(--ok)">(empfohlen)</span> — oder Charakter ohne Bild anlegen</div>
-          <div class="row" style="align-items:flex-end;gap:10px;flex-wrap:wrap">
-            <label style="flex:0 0 auto">Name<input type="text" id="newCharName" placeholder="z.B. Max" style="min-width:130px"></label>
-            <label style="flex:1;min-width:200px">Design-Beschreibung (optional)<input type="text" id="newCharDesc" placeholder="wird automatisch aus Bild extrahiert"></label>
-            <div style="display:flex;gap:8px;align-items:flex-end">
-              <div>
-                <div style="font-size:12px;color:var(--mut);margin-bottom:4px">Bild hochladen</div>
-                <label style="cursor:pointer">
-                  <div id="refUploadBox" style="background:var(--surface);border:1px dashed var(--border);border-radius:6px;padding:8px 12px;font-size:12px;color:var(--mut);white-space:nowrap">
-                    Bild wählen (PNG/JPG)
-                  </div>
-                  <input type="file" id="refImageFile" accept="image/*" style="display:none" onchange="refImageSelected()">
-                </label>
-              </div>
-              <button class="sm" id="uploadRefBtn" onclick="uploadCharRef()" disabled>Hochladen &amp; analysieren</button>
-              <button class="sm ghost" onclick="addChar()">Ohne Bild anlegen</button>
-            </div>
-          </div>
-          <img id="refPreview" style="display:none;margin-top:8px;max-height:120px;border-radius:6px;border:1px solid var(--border)">
-        </div>
-      </div>
+<!-- charCard moved to #view-editor (above #planArea) so it's visible while the user
+           is editing a video, not only in the video-list view. -->
     </div>
 
-    <div class="tab-pane" id="toptab-script">
+      <div class="tab-pane" id="toptab-script">
       <div class="card">
         <h2>Rohmaterial — Transkript, Notizen oder Video-Ideen</h2>
         <textarea id="scriptInput" rows="12" placeholder="Transkript eines anderen Videos einfügen, eigene Notizen, Stichpunkte oder eine grobe Struktur …"></textarea>
@@ -635,6 +612,34 @@
 
       
     </div>
+    <!-- Charakter-Referenzen (war vorher in #view-videolist versteckt, jetzt hier
+         im Editor sichtbar — Bilder-Generate braucht sie als Referenz) -->
+    <div class="card" id="charCard" style="margin-top:14px">
+      <h2>Charakter-Referenzen <span class="hint" style="text-transform:none;letter-spacing:0">(werden bei jedem Bild mitgeschickt)</span></h2>
+      <div id="charList"></div>
+      <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;margin-top:10px">
+        <div style="font-size:12px;color:var(--mut);margin-bottom:8px">Referenzbild hochladen <span style="color:var(--ok)">(empfohlen)</span> — oder Charakter ohne Bild anlegen</div>
+        <div class="row" style="align-items:flex-end;gap:10px;flex-wrap:wrap">
+          <label style="flex:0 0 auto">Name<input type="text" id="newCharName" placeholder="z.B. Max" style="min-width:130px"></label>
+          <label style="flex:1;min-width:200px">Design-Beschreibung (optional)<input type="text" id="newCharDesc" placeholder="wird automatisch aus Bild extrahiert"></label>
+          <div style="display:flex;gap:8px;align-items:flex-end">
+            <div>
+              <div style="font-size:12px;color:var(--mut);margin-bottom:4px">Bild hochladen</div>
+              <label style="cursor:pointer">
+                <div id="refUploadBox" style="background:var(--surface);border:1px dashed var(--border);border-radius:6px;padding:8px 12px;font-size:12px;color:var(--mut);white-space:nowrap">
+                  Bild wählen (PNG/JPG)
+                </div>
+                <input type="file" id="refImageFile" accept="image/*" style="display:none" onchange="refImageSelected()">
+              </label>
+            </div>
+            <button class="sm" id="uploadRefBtn" onclick="uploadStyleRef()" disabled>Hochladen &amp; analysieren</button>
+            <button class="sm ghost" onclick="addChar()">Ohne Bild anlegen</button>
+          </div>
+        </div>
+        <img id="refPreview" style="display:none;margin-top:8px;max-height:120px;border-radius:6px;border:1px solid var(--border)">
+      </div>
+    </div>
+
     <!-- Schritt ④ — Bilder generieren (erscheint erst, sobald ein Szenen-Plan existiert) -->
     <div id="planArea" data-step-section="4" style="display:none">
       <h2 style="font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:0 0 12px;font-weight:700">③ Bilder generieren</h2>
@@ -794,7 +799,7 @@ async function switchChannel(id, name){
   loadMaster();
   loadVidMaster();
   loadCharsheets();
-  loadCharRefStatus();
+  loadStyleRefStatus();
   await loadVideoList();
   showVideoListView();
 }
@@ -991,6 +996,11 @@ async function openVideo(vid, name){
   SCENES = [];
   $('scenes').innerHTML = '';
   $('planArea').style.display = 'none';
+
+  // Reload charsheets for the newly-opened video. Without this, switching from
+  // one video to another leaves the character panel showing the previous video's
+  // sheet list (or empty if no video had been opened before).
+  loadCharsheets();
   // Explicit reset, not just left to renderScenes() — without this, switching from a
   // video that HAS scenes to one that doesn't would leave these cards visible with
   // stale content from the previous video, since renderScenes() (which normally hides
@@ -998,11 +1008,12 @@ async function openVideo(vid, name){
   $('renderCard').style.display = 'none';
   $('produceCard').style.display = 'none';
 
-  // Skript dieses Videos wiederherstellen (localStorage) — überlebt Reload.
-  // Vorheriges Video-Skript nicht stehen lassen; wenn keins gespeichert, füllt
-  // später fillScriptFromScenesIfEmpty() aus dem Plan.
+  // Skript dieses Videos wiederherstellen — Server (script.json) ist Source-of-Truth,
+  // localStorage nur als Offline-Fallback. Promise nicht awaited: das Skript-Feld kann
+  // sich auch nach dem Render der restlichen UI noch füllen — estimate() läuft dann
+  // von selbst und fillScriptFromScenesIfEmpty() korrigiert später falls nötig.
   if($('script')) $('script').value = '';
-  restoreScriptLocal();
+  restoreScriptLocal().catch(()=>{});
 
   const modeR = await ch_get('/api/get_mode');
   applyMode(modeR.mode || 'image');
@@ -1315,7 +1326,7 @@ function switchTopTab(id, btn){
 // ─── Phase 33.3 — Channel-Settings-Modal ─────────────────────────────────────
 // Shared zwischen Library- und Editor-Mode. Inline Editor für Master-Prompt,
 // Image-Model, Brand-Color, Char-Ref-Status. Speichert via bestehende
-// endpoints (`/api/master`, `/api/image_model`, `/api/char_ref`, `/api/channels`).
+// endpoints (`/api/master`, `/api/image_model`, `/api/style_ref`, `/api/channels`).
 async function openChannelSettings(){
   const modal = $('settingsModal');
   modal.style.display = 'flex';
@@ -1332,7 +1343,7 @@ async function openChannelSettings(){
   const master    = await ch_get('/api/master').then(r => r.master).catch(() => '');
   const vidMaster = await ch_get('/api/vid_master').then(r => r.vid_master || '').catch(() => '');
   const imgModel  = await ch_get('/api/image_model').then(r => r.image_model || 'nano-banana-2').catch(() => 'nano-banana-2');
-  const charRefUrl= await ch_get('/api/char_ref').then(r => r.url || '').catch(() => '');
+  const styleRefUrl= await ch_get('/api/style_ref').then(r => r.url || '').catch(() => '');
   document.getElementById('settingsContent').innerHTML =
     `<label class="block text-xs font-semibold text-app-mut uppercase tracking-wide mb-2">Bild-Master-Prompt</label>`
     + `<textarea id="settingsMaster" rows="6" class="w-full px-3 py-2 border border-app-border rounded-md focus:outline-none focus:ring-2 focus:ring-app-acc text-sm mb-1">${escHtml(master)}</textarea>`
@@ -1347,27 +1358,27 @@ async function openChannelSettings(){
     + `</select>`
     + `<div class="flex justify-end mb-4"></div>`
     + `<label class="block text-xs font-semibold text-app-mut uppercase tracking-wide mb-2 mt-4">Charakter-Referenz</label>`
-    // Vorschau/Status des aktuell gesetzten Referenzbilds (wird von _applyCharRef befüllt)
+    // Vorschau/Status des aktuell gesetzten Referenzbilds (wird von _applyStyleRef befüllt)
     + `<div id="charRefBox" style="display:flex;align-items:center;gap:12px;padding:10px;background:var(--surface-2);border:1px solid var(--border);border-radius:6px;margin-bottom:10px">`
     +   `<div id="charRefThumb" style="width:80px;height:45px;background:#000;border-radius:4px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:20px;color:var(--mut)">🎭</div>`
     +   `<div style="flex:1;min-width:0"><div id="charRefLabel" style="font-size:12px;color:var(--mut)">Kein Referenzbild gesetzt</div>`
     +   `<div id="charRefUrl" style="font-size:10px;color:var(--mut);opacity:.6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div></div>`
     + `</div>`
     + `<input id="settingsCharRefUrl" type="url" value="${escHtml(charRefUrl)}" class="w-full px-3 py-2 border border-app-border rounded-md focus:outline-none focus:ring-2 focus:ring-app-acc text-sm mb-1" placeholder="https://… oder Bild hochladen/generieren">`
-    + `<div class="flex justify-end mb-2"><button onclick="saveSettingsCharRef()" class="sm ghost">💾 URL speichern</button></div>`
+    + `<div class="flex justify-end mb-2"><button onclick="saveSettingsStyleRef()" class="sm ghost">💾 URL speichern</button></div>`
     + `<div class="row" style="margin-top:8px;gap:8px;flex-wrap:wrap">`
     + `<button class="sm ghost" onclick="$('charRefUploadFile').click()" style="flex:1">📁 Bild hochladen</button>`
     + `<input type="file" id="charRefUploadFile" accept="image/*" style="display:none" onchange="charRefFileSelected()">`
-    + `<button class="sm ghost" id="btnCharRef" onclick="genCharRef()" style="flex:1">✨ Aus Master generieren</button>`
-    + `<button class="sm ghost" onclick="clearCharRef()" style="color:var(--mut)">✕ Löschen</button>`
+    + `<button class="sm ghost" id="btnCharRef" onclick="genStyleRef()" style="flex:1">✨ Aus Master generieren</button>`
+    + `<button class="sm ghost" onclick="clearStyleRef()" style="color:var(--mut)">✕ Löschen</button>`
     + `</div>`
     + `<div id="charRefUploadPreview" style="display:none;margin-top:10px;padding:12px;background:var(--surface-2);border-radius:var(--radius-sm)">`
     + `<img id="charRefPreviewImg" style="max-height:100px;border-radius:6px;border:1px solid var(--border);display:block;margin-bottom:8px">`
-    + `<div class="row" style="gap:8px"><button class="sm blue" id="charRefUploadBtn" onclick="uploadCharRefImage()">Hochladen &amp; als Referenz setzen</button>`
-    + `<button class="sm ghost" onclick="cancelCharRefUpload()">Abbrechen</button></div>`
+    + `<div class="row" style="gap:8px"><button class="sm blue" id="charRefUploadBtn" onclick="uploadStyleRefImage()">Hochladen &amp; als Referenz setzen</button>`
+    + `<button class="sm ghost" onclick="cancelStyleRefUpload()">Abbrechen</button></div>`
     + `</div>`;
   document.getElementById('settingsImageModel').value = imgModel;
-  loadCharRefStatus();  // aktuelles Referenzbild in charRefBox/Thumb/Label anzeigen
+  loadStyleRefStatus();  // aktuelles Referenzbild in charRefBox/Thumb/Label anzeigen
 
   // Brand-Color pro Channel — wird live aus dem ersten Video / channels-default abgeleitet
   const channels = (await api('/api/channels')).channels || [];
@@ -1389,9 +1400,9 @@ async function saveSettingsImageModel(){
   await ch_api('/api/image_model', {model: $('settingsImageModel').value});
   showToast('gespeichert ✓');
 }
-async function saveSettingsCharRef(){
-  const url = $('settingsCharRefUrl').value;
-  await ch_api('/api/char_ref', { url });
+async function saveSettingsStyleRef(){
+  const url = $('settingsStyleRefUrl').value;
+  await ch_api('/api/style_ref', { url });
   showToast('gespeichert ✓');
 }
 // Phase 33.3.1 Bug-1 — Brand-Color speichern. Der Color-Picker triggert input-Event
@@ -1648,9 +1659,13 @@ async function loadTtsVoices(){
   $('elVoiceSelect').onchange = async () => {
     const v = $('elVoiceSelect').value;
     if(provider === 'elevenlabs'){
+      // July 2026 (User-Report: "denk an v3"): use whatever model_id is currently shown
+      // in the UI select (default eleven_v3), not a hardcoded multilingual_v2.
+      const modelSel = $('elModelSel');
+      const model_id = modelSel ? (modelSel.value || 'eleven_v3') : 'eleven_v3';
       await ch_api('/api/elevenlabs_settings', {
         voice_id: v,
-        model_id: 'eleven_multilingual_v2',
+        model_id,
         stability: +$('elStab').value,
         similarity_boost: +$('elSim').value,
         style: +$('elStyle').value,
@@ -1738,18 +1753,123 @@ function _mmWireSliders(){
 // (z.B. Plan aus Titel/Thema generiert), das Skript aus den Szenen-Texten
 // rekonstruieren — das IST die Narration, und der Voiceover braucht diesen Text.
 // Überschreibt NIE ein vom Nutzer getipptes Skript (nur wenn leer).
-// Skript-Persistenz pro Kanal+Video via localStorage — überlebt Browser-Reload,
-// unabhängig vom Plan-Zustand. (Das #script-Feld wird sonst nirgends gespeichert.)
+// Skript-Persistenz pro Kanal+Video — zwei Schichten:
+//   1. Server (script.json, via /api/script + /api/save_script) — Source-of-Truth,
+//      überlebt Browser-Wechsel, Geräte-Wechsel, Cache-Clear.
+//   2. localStorage — Sofort-Fallback für den Offline-/Netzwerkfehler-Fall, damit
+//      beim Reload wenigstens nichts leer ist wenn der Server nicht erreichbar war.
+// Beim Laden: Server zuerst, localStorage nur wenn Server nichts hat UND der
+// localStorage-Eintrag neuer ist als der Server-Stand (verhindert Überschreiben
+// eines rezenten Server-Stands durch veralteten Browser-Cache).
 function _scriptKey(){ return `script_${ACTIVE_CHANNEL}_${ACTIVE_VIDEO}`; }
+
+let _scriptSaveTimer = null;
+let _scriptSaving = false;
+let _scriptLastSavedAt = 0;
+const _SCRIPT_DEBOUNCE_MS = 2500;
+
 function saveScriptLocal(){
+  // localStorage: synchron, sofort — billig, kein Netzwerk
   try{ if(ACTIVE_VIDEO && $('script')) localStorage.setItem(_scriptKey(), $('script').value); }catch(e){}
+
+  // Server: debounced — jeder Tastendruck würde sonst 100+ Writes/Min auslösen
+  if(!ACTIVE_VIDEO || !$('script')) return;
+  if(_scriptSaveTimer) clearTimeout(_scriptSaveTimer);
+  _showScriptSaveStatus('pending');
+  _scriptSaveTimer = setTimeout(_flushScriptToServer, _SCRIPT_DEBOUNCE_MS);
 }
-function restoreScriptLocal(){
+
+async function _flushScriptToServer(){
+  if(!ACTIVE_VIDEO || !$('script')) return;
+  _scriptSaving = true;
+  _showScriptSaveStatus('saving');
   try{
-    const el=$('script'); if(!el || !ACTIVE_VIDEO) return false;
+    const lang = (typeof _scriptLang !== 'undefined') ? _scriptLang : 'de';
+    const presetEl = $('scriptPreset');
+    const preset = presetEl ? presetEl.value : 'flat_cartoon_doc';
+    const r = await ch_api('/api/save_script', {
+      text: $('script').value,
+      language: lang,
+      preset: preset,
+    });
+    if(r && r.ok){
+      _scriptLastSavedAt = r.savedAt || Date.now()/1000;
+      _showScriptSaveStatus('saved', _scriptLastSavedAt);
+    } else {
+      _showScriptSaveStatus('error', null, r && r.error);
+    }
+  }catch(e){
+    _showScriptSaveStatus('error', null, String(e));
+  }finally{
+    _scriptSaving = false;
+  }
+}
+
+function _showScriptSaveStatus(state, savedAt, errMsg){
+  // Visueller Indikator neben dem Skript-Feld — nutzt das vorhandene #scriptStatus
+  // Element aus dem Skript-Generator-Tab wenn verfügbar, sonst ein eigenes Element.
+  let el = $('scriptPersistStatus');
+  if(!el){
+    el = document.createElement('span');
+    el.id = 'scriptPersistStatus';
+    el.style.cssText = 'margin-left:10px;font-size:12px;color:var(--mut);font-weight:500';
+    const scriptEl = $('script');
+    if(scriptEl && scriptEl.parentNode) scriptEl.parentNode.appendChild(el);
+  }
+  const now = Date.now()/1000;
+  if(state === 'pending'){
+    el.textContent = '· ungespeicherte Änderungen';
+    el.style.color = 'var(--mut)';
+  } else if(state === 'saving'){
+    el.textContent = '· speichert …';
+    el.style.color = 'var(--mut)';
+  } else if(state === 'saved' && savedAt){
+    const age = Math.max(0, Math.floor(now - savedAt));
+    el.textContent = age < 5 ? '· gespeichert' : `· gespeichert vor ${age}s`;
+    el.style.color = 'var(--ok)';
+  } else if(state === 'error'){
+    el.textContent = `· Speichern fehlgeschlagen${errMsg ? ': ' + errMsg : ''}`;
+    el.style.color = 'var(--err, #c0392b)';
+  }
+}
+
+async function restoreScriptLocal(){
+  // Source-of-Truth-Reihenfolge: Server > localStorage > leer
+  const el = $('script'); if(!el || !ACTIVE_VIDEO) return false;
+
+  // 1) Server versuchen (blockiert nicht wenn offline — async/await fängt Fehler)
+  let serverText = null, serverUpdatedAt = 0;
+  try{
+    const r = await ch_get('/api/script');
+    if(r && r.text != null){
+      serverText = r.text;
+      serverUpdatedAt = r.updatedAt || 0;
+      _scriptLastSavedAt = serverUpdatedAt;
+    }
+  }catch(e){ /* Server nicht erreichbar — Fallback auf localStorage */ }
+
+  // 2) localStorage als Fallback / Offline-Stand
+  let localText = null;
+  try{
     const saved = localStorage.getItem(_scriptKey());
-    if(saved != null && saved.trim()){ el.value = saved; if(typeof estimate==='function') estimate(); return true; }
+    if(saved != null) localText = saved;
   }catch(e){}
+
+  // 3) Server gewinnt wenn vorhanden — UND wenn er neuer ist als localStorage
+  //    (verhindert dass ein veralteter Browser-Cache einen frischen Server-Stand überschreibt)
+  let chosen = null;
+  if(serverText != null){
+    chosen = serverText;
+  } else if(localText != null && localText.trim()){
+    chosen = localText;
+  }
+
+  if(chosen != null && chosen.trim()){
+    el.value = chosen;
+    if(typeof estimate==='function') estimate();
+    if(serverText != null) _showScriptSaveStatus('saved', _scriptLastSavedAt);
+    return true;
+  }
   return false;
 }
 
@@ -1970,7 +2090,7 @@ function renderScenes(source){
             <button class="sm" onclick="genOne(${s.i})">🖼 Bild generieren</button>
             <button class="sm" id="dl${s.i}" onclick="dlOne(${s.i})" ${hasImg?'':'disabled'}>⬇</button>
           </div>
-          ${s.char_ref_applied === false ? `<div class="hint" style="margin-top:4px">kein Charakter-Ref</div>` : ''}
+          ${s.style_ref_applied === false ? `<div class="hint" style="margin-top:4px">kein Style-Ref</div>` : ''}
         </div>
         <div>
           <div class="slot" id="vw${s.i}">
@@ -2112,13 +2232,13 @@ function dlVideo(i){
   a.href=`/generated/${s.video_file}?channel=${ACTIVE_CHANNEL}&video=${ACTIVE_VIDEO}`; a.download=`${ts}.mp4`; a.click();
 }
 
-function _applyCharRef(url){
+function _applyStyleRef(url){
   const sidebar = $('charRefStatus'), sidebarBox = $('charRefStatusBox');
   if(url){
     const name = url.split('/').pop().slice(0,28);
     if(sidebar){ sidebar.textContent='✅ '+name; sidebar.title=url; }
     if(sidebarBox) sidebarBox.style.display='block';
-    const lbl=$('charRefLabel'), urlEl=$('charRefUrl'), thumb=$('charRefThumb');
+    const lbl=$('charRefLabel'), urlEl=$('styleRefUrl'), thumb=$('charRefThumb');
     if(lbl) lbl.textContent='Referenz gesetzt';
     if(lbl) lbl.style.color='var(--ok)';
     if(urlEl){ urlEl.textContent=url; urlEl.style.display='block'; }
@@ -2126,65 +2246,65 @@ function _applyCharRef(url){
   } else {
     if(sidebar){ sidebar.textContent=''; sidebar.title=''; }
     if(sidebarBox) sidebarBox.style.display='none';
-    const lbl=$('charRefLabel'), urlEl=$('charRefUrl'), thumb=$('charRefThumb');
+    const lbl=$('charRefLabel'), urlEl=$('styleRefUrl'), thumb=$('charRefThumb');
     if(lbl){ lbl.textContent='Kein Referenzbild gesetzt'; lbl.style.color='var(--mut)'; }
     if(urlEl){ urlEl.textContent=''; urlEl.style.display='none'; }
     if(thumb) thumb.innerHTML='🎭';
   }
 }
 
-async function loadCharRefStatus(){
+async function loadStyleRefStatus(){
   try{
-    const r = await api('/api/char_ref?channel='+ACTIVE_CHANNEL);
-    _applyCharRef(r.url || null);
+    const r = await api('/api/style_ref?channel='+ACTIVE_CHANNEL);
+    _applyStyleRef(r.url || null);
   }catch(e){}
 }
 
-async function genCharRef(){
-  const btn=$('btnCharRef');
+async function genStyleRef(){
+  const btn=$('btnStyleRef');
   if(!btn) return;
   btn.disabled=true; btn.textContent='⏳ Generiere …';
   try{
-    const r=await ch_api('/api/gen_char_ref',{});
-    if(r.ok){ _applyCharRef(r.url); }
+    const r=await ch_api('/api/gen_style_ref',{});
+    if(r.ok){ _applyStyleRef(r.url); }
     else alert('Fehler: '+(r.error||'unbekannt'));
   }catch(e){ alert('Fehler: '+e); }
   btn.disabled=false; btn.textContent='✨ Aus Master generieren';
 }
 
-async function clearCharRef(){
-  await ch_api('/api/set_char_ref',{url:''});
-  _applyCharRef(null);
+async function clearStyleRef(){
+  await ch_api('/api/set_style_ref',{url:''});
+  _applyStyleRef(null);
 }
 
-let _charRefB64=null, _charRefMime=null;
+let _styleRefB64=null, _styleRefMime=null;
 function charRefFileSelected(){
   const f=$('charRefUploadFile').files[0]; if(!f) return;
-  _charRefMime = f.type||'image/png';
+  _styleRefMime = f.type||'image/png';
   const prev=$('charRefPreviewImg');
   if(prev) prev.src=URL.createObjectURL(f);
   $('charRefUploadPreview').style.display='block';
   const reader=new FileReader();
-  reader.onload=e=>{ _charRefB64=e.target.result.split(',')[1]; };
+  reader.onload=e=>{ _styleRefB64=e.target.result.split(',')[1]; };
   reader.readAsDataURL(f);
 }
-function cancelCharRefUpload(){
-  _charRefB64=null; $('charRefUploadPreview').style.display='none';
+function cancelStyleRefUpload(){
+  _styleRefB64=null; $('charRefUploadPreview').style.display='none';
   $('charRefUploadFile').value='';
 }
-async function uploadCharRefImage(){
-  if(!_charRefB64){ alert('Kein Bild ausgewählt'); return; }
+async function uploadStyleRefImage(){
+  if(!_styleRefB64){ alert('Kein Bild ausgewählt'); return; }
   const btn=$('charRefUploadBtn');
   btn.disabled=true; btn.textContent='⏳ Hochladen …';
   const r=await fetch('/api/upload_charref',{
     method:'POST', headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({name:'char_ref', image:_charRefB64, mime:_charRefMime, channel:ACTIVE_CHANNEL})
+    body:JSON.stringify({name:'style_ref', image:_styleRefB64, mime:_styleRefMime, channel:ACTIVE_CHANNEL})
   }).then(r=>r.json());
   btn.disabled=false; btn.textContent='Hochladen & als Referenz setzen';
   if(!r.ok){ alert('Fehler: '+(r.error||'unbekannt')); return; }
-  await ch_api('/api/set_char_ref',{url: r.uri});
-  _applyCharRef(r.uri);
-  cancelCharRefUpload();
+  await ch_api('/api/set_style_ref',{url: r.uri});
+  _applyStyleRef(r.uri);
+  cancelStyleRefUpload();
 }
 
 async function previewPrompt(i){
@@ -2454,11 +2574,14 @@ function startProducePoll(){
   _producePollTimer = setInterval(poll, 2500);
 }
 
-// ---- Character sheets (channel-scoped) ----
+// ---- Character sheets (per-video, channel-pool fallback) ----
 let CHARS = [];
 
 async function loadCharsheets(){
-  const r = await fetch('/api/charsheets?channel='+ACTIVE_CHANNEL).then(r=>r.json());
+  const vid = ACTIVE_VIDEO || '';
+  const url = '/api/charsheets?channel='+encodeURIComponent(ACTIVE_CHANNEL)
+            + (vid ? '&vid='+encodeURIComponent(vid) : '');
+  const r = await fetch(url).then(r=>r.json());
   CHARS = r.sheets || [];
   renderCharList();
 }
@@ -2470,21 +2593,29 @@ function renderCharList(){
     const d = document.createElement('div');
     d.style.cssText='display:grid;grid-template-columns:180px 1fr auto;gap:10px;align-items:start;margin-bottom:10px;padding:10px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px';
     const imgTag = ch.has_image
-      ? `<img src="/charsheets/${ch.safe}.png?t=${Date.now()}&channel=${ACTIVE_CHANNEL}" style="width:100%;border-radius:4px;aspect-ratio:16/9;object-fit:cover">`
+      ? `<img src="/charsheets/${ch.safe}.png?t=${Date.now()}&channel=${encodeURIComponent(ACTIVE_CHANNEL)}${(ACTIVE_VIDEO?'&vid='+encodeURIComponent(ACTIVE_VIDEO):'')}" style="width:100%;border-radius:4px;aspect-ratio:16/9;object-fit:cover">`
       : `<div style="width:100%;aspect-ratio:16/9;background:#000;border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--mut);font-size:11px">kein Bild</div>`;
     const uriTag = ch.uri
       ? `<span class="tag" style="color:var(--ok);border-color:var(--ok)">✓ Referenz aktiv</span>`
       : `<span class="tag">kein Upload</span>`;
+    const safeId = (ch.safe||'').replace(/'/g,"&#39;");
+    const descEsc = escHtml(ch.description||'').replace(/'/g,"&#39;");
     d.innerHTML = `
       <div>${imgTag}</div>
       <div>
 <div style="font-weight:600;margin-bottom:4px">${escHtml(ch.name)} ${escHtml(uriTag)}</div>
-        <div class="hint">${escHtml(ch.description||'')}</div>
+        <div class="hint" id="chDesc-${safeId}">${escHtml(ch.description||'')}</div>
+        <button class="sm ghost" style="margin-top:4px;font-size:11px" onclick="editCharDesc('${safeId}','${descEsc}')">Beschreibung bearbeiten</button>
       </div>
-      <div style="display:flex;gap:6px;margin-top:6px">
-        <button class="sm" onclick="genCharSheet('${escHtml(ch.name).replace(/'/g,"&#39;")}','${escHtml(ch.description||'').replace(/'/g,"&#39;")}')">
+      <div style="display:flex;gap:6px;margin-top:6px;flex-direction:column">
+        <button class="sm" onclick="genCharSheet('${escHtml(ch.name).replace(/'/g,"&#39;")}','${descEsc}')">
           ${ch.has_image?'Neu generieren':'Referenzbild erstellen'}
         </button>
+        <label class="sm ghost" style="text-align:center;cursor:pointer">
+          Bild hochladen
+          <input type="file" accept="image/*" style="display:none" onchange="uploadCharImage('${safeId}', this)">
+        </label>
+        ${ch.has_image ? `<button class="sm ghost" style="color:var(--mut)" onclick="deleteCharSheet('${safeId}')">Löschen</button>` : ''}
       </div>`;
     c.appendChild(d);
   });
@@ -2508,7 +2639,7 @@ function refImageSelected(){
   reader.readAsDataURL(f);
 }
 
-async function uploadCharRef(){
+async function uploadStyleRef(){
   const name = $('newCharName').value.trim() || 'Charakter';
   if(!refImageB64){ alert('Bitte zuerst ein Bild auswählen.'); return; }
   const btn = $('uploadRefBtn');
@@ -2566,7 +2697,7 @@ async function genCharSheet(name, desc){
   if(btn){ btn.disabled=true; btn.textContent='Generiere…'; }
   const r = await fetch('/api/gen_charsheet',{
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({name, description: desc, channel: ACTIVE_CHANNEL})
+    body: JSON.stringify({name, description: desc, channel: ACTIVE_CHANNEL, vid: ACTIVE_VIDEO||''})
   }).then(r=>r.json());
   if(r.ok){
     const ch = CHARS.find(c=>c.name===name);
@@ -2575,6 +2706,54 @@ async function genCharSheet(name, desc){
   } else {
     alert('Fehler: '+(r.error||'unbekannt'));
     if(btn){ btn.disabled=false; btn.textContent='Referenzbild erstellen'; }
+  }
+}
+
+async function editCharDesc(safe, currentDesc){
+  const next = prompt('Beschreibung bearbeiten:', currentDesc);
+  if(next===null || next.trim()===currentDesc.trim()) return;
+  const r = await fetch('/api/charsheet_update',{
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({safe, description: next, channel: ACTIVE_CHANNEL, vid: ACTIVE_VIDEO||''})
+  }).then(r=>r.json());
+  if(r.ok){
+    const ch = CHARS.find(c=>c.safe===safe);
+    if(ch) ch.description = next;
+    renderCharList();
+  } else {
+    alert('Fehler: '+(r.error||'unbekannt'));
+  }
+}
+
+async function uploadCharImage(safe, input){
+  const file = input.files?.[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const b64 = reader.result.split(',')[1];
+    const r = await fetch('/api/upload_charref',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name: safe, image: b64, mime: file.type||'image/png', channel: ACTIVE_CHANNEL, vid: ACTIVE_VIDEO||''})
+    }).then(r=>r.json());
+    if(r.ok){
+      await loadCharsheets();
+    } else {
+      alert('Upload-Fehler: '+(r.error||'unbekannt'));
+    }
+  };
+  reader.readAsDataURL(file);
+}
+
+async function deleteCharSheet(safe){
+  if(!confirm(`Charakter "${safe}" wirklich löschen?`)) return;
+  const r = await fetch('/api/charsheet_delete',{
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({safe, channel: ACTIVE_CHANNEL, vid: ACTIVE_VIDEO||''})
+  }).then(r=>r.json());
+  if(r.ok){
+    await loadCharsheets();
+  } else {
+    alert('Fehler: '+(r.error||'unbekannt'));
   }
 }
 
@@ -2648,7 +2827,7 @@ function copyScript(){
   loadMaster();
   loadVidMaster();
   loadCharsheets();
-  loadCharRefStatus();
+  loadStyleRefStatus();
   await loadVideoList();
   showVideoListView();
 })();

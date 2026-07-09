@@ -52,7 +52,11 @@ __all__ = [
 
 # Konstanten
 ELEVENLABS_API           = "https://api.elevenlabs.io/v1"
-ELEVENLABS_DEFAULT_MODEL = "eleven_multilingual_v2"
+# July 2026 (User-Report): narrator voice switched from v2 to v3 — better prosody and
+# emotion handling for long documentary-style voiceovers. Channel-default voice_id for
+# the narrator is "alex" (17bSMslPF4HPyQrGIXAG). Existing channels with a saved model_id
+# in voice_settings.json keep their value; only freshly-resolved defaults use v3.
+ELEVENLABS_DEFAULT_MODEL = "eleven_v3"
 ELEVENLABS_KEY_FILE      = os.path.expanduser("~/.elevenlabs_key")
 
 # MiniMax Speech — zweiter TTS-Provider (parallel zu ElevenLabs). Provider-Auswahl
@@ -175,9 +179,17 @@ def load_voice_settings(cid: str, override_voice_id: str = "") -> dict:
             saved = json.load(open(sp))
             if isinstance(saved, dict):
                 s.update({k: v for k, v in saved.items() if v != "" or k == "voice_id"})
+                # July 2026 (Bug-Fix): preserve tts_provider from saved settings so the
+                # frontend can match it against the current provider select (see dashboard.html
+                # ~1650 — "settings.tts_provider === provider"). Without this field the condition
+                # is never true and the saved voice_id never gets preselected into elVoiceSelect.
+                if "tts_provider" in saved:
+                    s["tts_provider"] = saved["tts_provider"]
         except Exception as e:
             print(f"  [ElevenLabs] voice_settings.json unlesbar ({e}) — nutze Defaults", flush=True)
     s["voice_id"] = _resolve_voice_id(cid, override_voice_id)
+    if "tts_provider" not in s:
+        s["tts_provider"] = "elevenlabs"
     return s
 
 def save_voice_settings(cid: str, settings: dict) -> None:
