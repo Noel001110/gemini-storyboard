@@ -28,7 +28,10 @@ Lazy-Import-Konvention (siehe routes/__init__.py):
 
 from __future__ import annotations
 
+import base64
 import json
+import os
+import re
 import time
 
 
@@ -331,22 +334,106 @@ def _resolve_entity_ref(plan_path: str, scene: dict) -> tuple:
     """Returns (ref_urls, debug_info): the first already-generated (or in-flight)
     scene showing the same concrete_entity as `scene`, so every repeat appearance of a
     character reuses the very first generated image of them as a visual anchor —
-    independent of visual sequences (see module comment above)."""
+    independent of visual sequences (see module comment above).
+
+    Juli 2026 (User-Report "Charakter-Referenzen werden nicht richtig gezogen"):
+    Fallback-Kette wenn keine Anchor-Szene mit gültiger source_url existiert:
+      1. source_url der ersten Szene mit gleicher concrete_entity (Original-Verhalten)
+      2. data:image/png;base64 des Charsheet-PNGs (channels/<cid>/videos/<vid>/charsheets/<entity>.png)
+      3. data:image/png;base64 aus dem channel-pool (channels/<cid>/charsheets/<entity>.png)
+
+    Schritt 2+3 sind nötig weil:
+      a) Bei einem Plan-Generate werden die Szenen mit char_XX-IDs erzeugt, aber die
+         Charsheet-PNGs liegen unter dem sprechenden Namen (z.B. char_01.png für
+         Elizabeth Holmes).
+      b) Wenn das Plan.json per Recovery neu geschrieben wird (mein Race-Fix), gehen
+         die source_url-Werte verloren — die CDN-URLs von KIE.ai sind zudem TTL-
+         begrenzt. Ohne Fallback gibt es KEINE Charakter-Referenz.
+      c) Der Master-Prompt + der Stage-Anchor-Stil allein reicht NICHT für visuelle
+         Konsistenz — KIE rendert ohne Bild-Referenz jedes Mal anders.
+    """
     entity = str(scene.get("concrete_entity", ""))
     if not entity.startswith("char_"):
         return [], {}
     try:
         plan = json.load(open(plan_path))
     except Exception:
-        return [], {}
+        plan = {}
+
+    # 1) Anchor-Szene mit gültiger source_url (Original-Verhalten)
     earlier = [s for s in plan.get("scenes", [])
                if s.get("concrete_entity") == entity and s.get("i", -1) < scene.get("i", -1)]
-    if not earlier:
-        return [], {}
-    anchor_i = min(s["i"] for s in earlier)
-    anchor = _wait_for_entity_anchor_scene(plan_path, entity, anchor_i)
-    if anchor.get("source_url"):
-        return [anchor["source_url"]], {"entity_anchor_file": anchor.get("file"), "entity_anchor_i": anchor_i}
+    if earlier:
+        anchor_i = min(s["i"] for s in earlier)
+        anchor = _wait_for_entity_anchor_scene(plan_path, entity, anchor_i)
+        if anchor.get("source_url"):
+            return ([anchor["source_url"]],
+                    {"entity_anchor_file": anchor.get("file"), "entity_anchor_i": anchor_i,
+                     "source": "anchor-scene"})
+
+    # 2+3) Fallback: Charsheet-PNG (per-video oder channel-pool) als data-URL.
+    # Sucht zuerst nach <entity>.png (matched wenn safe == concrete_entity id),
+    # sonst nach einem Charsheet-JSON mit gleichem 'name' wie der Plan-Generator
+    # ihn erwarten würde. Das deckt den Fall ab dass der User manuell Charsheets
+    # unter sprechenden Namen (z.B. 'elizabeth_holmes') hochgeladen hat während
+    # der Plan 'char_01' als concrete_entity vergibt.
+    try:
+        from dashboard import ch_sheets
+        # cid/vid aus dem plan_path ableiten: .../channels/<cid>/videos/<vid>/generated/plan.json
+        # Pattern matched sowohl absolute (/Users/.../channels/...) als auch relative Pfade
+        import re as _re
+        m = _re.search(r"(?:^|/)channels/([^/]+)/videos/([^/]+)/generated/plan\.json$", plan_path)
+        if m:
+            cid, vid = m.group(1), m.group(2)
+        else:
+            cid, vid = "default", None
+
+        # Helper: alle Charsheets im Pool sammeln mit PNG-Pfad
+        all_sheets = []  # [(name, json_path, png_path), ...]
+        for sheet_dir in (ch_sheets(cid, vid), ch_sheets(cid)):
+            if not os.path.isdir(sheet_dir):
+                continue
+            for fn in os.listdir(sheet_dir):
+                if not fn.endswith(".json"):
+                    continue
+                json_path = os.path.join(sheet_dir, fn)
+                png_path = os.path.join(sheet_dir, fn.replace(".json", ".png"))
+                try:
+                    meta = json.load(open(json_path))
+                except Exception:
+                    continue
+                all_sheets.append((meta.get("name", ""), meta.get("safe", ""), json_path, png_path))
+
+        # Stufe A: passendes safe == entity (z.B. char_01.png)
+        for _name, safe, _jp, png_path in all_sheets:
+            if safe == entity and os.path.exists(png_path):
+                with open(png_path, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode("ascii")
+                data_url = f"data:image/png;base64,{b64}"
+                return ([data_url],
+                        {"entity_anchor_file": png_path, "source": "charsheet-png"})
+
+        # Stufe B: entity -> name via plan["characters"], dann Name-Match im Pool.
+        # analyze_script liefert [{id: "char_01", name_or_role: "Elizabeth Holmes"}, ...]
+        # Wenn der User manuell Charsheets unter 'elizabeth_holmes' hochlädt aber der
+        # Plan 'char_01' als concrete_entity vergibt, finden wir den Match über den
+        # Klarnamen statt über die ID.
+        char_name = ""
+        for c in plan.get("characters", []) or []:
+            if c.get("id") == entity:
+                char_name = (c.get("name_or_role") or "").strip()
+                break
+        if char_name:
+            for name, safe, jp, png_path in all_sheets:
+                if name and name.lower() == char_name.lower() and os.path.exists(png_path):
+                    with open(png_path, "rb") as f:
+                        b64 = base64.b64encode(f.read()).decode("ascii")
+                    data_url = f"data:image/png;base64,{b64}"
+                    return ([data_url],
+                            {"entity_anchor_file": png_path, "source": "charsheet-name-match",
+                             "matched_charsheet": safe})
+    except Exception:
+        pass
     return [], {}
 
 
