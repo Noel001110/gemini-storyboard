@@ -1996,7 +1996,7 @@ async function elevenLabsGenerate(){
   $('elStatus').textContent = 'Persistiere Voice-Setting …';
   await ch_api('/api/elevenlabs_settings', {
     voice_id: $('elVoiceSelect').value,
-    model_id: 'eleven_multilingual_v2',
+    model_id: (typeof $('elModelSel') !== 'undefined' && $('elModelSel') && $('elModelSel').value) || 'eleven_v3',
     stability: +$('elStab').value,
     similarity_boost: +$('elSim').value,
     style: +$('elStyle').value,
