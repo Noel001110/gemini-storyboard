@@ -1806,12 +1806,51 @@ def _plan_generate_worker(cid: str, vid: str, text: str, wpm: float, sec: float)
     try:
         ensure_video(cid, vid)
         out = v_out(cid, vid)
+        plan_p = v_plan(cid, vid)
+        # Juli 2026 (User-Report: "Race-Bug: Plan-Generate hat 91 fertige Bilder gelöscht"):
+        # Statt blind alle generierten Files zu löschen, mergen wir den existierenden
+        # Plan-State mit dem neuen. Eine Szene behält file/status/source_url wenn der
+        # Text identisch geblieben ist — das ist die Heuristik: gleicher Text → gleiche
+        # Szene, gerendertes Bild ist noch gültig. Bei Skript-Änderungen wandern die
+        # Bilder in _stale/ und werden nicht im Frontend angezeigt, gehen aber nicht
+        # verloren (Recovery möglich).
+        prev_scenes = {}
+        try:
+            prev_plan = json.load(open(plan_p))
+            for ps in prev_plan.get("scenes", []):
+                if ps.get("file") and ps.get("status") == "fertig":
+                    prev_scenes[ps["i"]] = ps
+        except Exception:
+            pass
+
+        # Files zu Szenen die im alten Plan fertig waren UNDER dem alten Namen behalten;
+        # alles andere in _stale/ verschieben statt löschen (Recovery möglich).
+        stale_dir = os.path.join(out, "_stale")
         for f in os.listdir(out):
-            if f.endswith((".jpg", ".png", ".mp4")):
+            if not f.endswith((".jpg", ".png", ".mp4")):
+                continue
+            try:
+                stem = os.path.splitext(f)[0]
+                # Stem kann "000" oder "094_veo_silent" etc. sein
+                scene_i = None
                 try:
-                    os.remove(os.path.join(out, f))
-                    print(f"  [Plan] Gelösche alte Datei: {f}", flush=True)
-                except: pass
+                    scene_i = int(stem.split("_")[0])
+                except ValueError:
+                    pass
+                if scene_i is not None and scene_i in prev_scenes:
+                    # Szene ist im alten Plan fertig → vorerst behalten.
+                    # Wenn der neue Plan sie nicht (mehr) enthält, wandert sie in _stale/.
+                    continue
+                # Nicht-matchende Files nach _stale/ verschieben
+                os.makedirs(stale_dir, exist_ok=True)
+                src = os.path.join(out, f)
+                dst = os.path.join(stale_dir, f)
+                if os.path.exists(dst):
+                    os.remove(dst)
+                os.rename(src, dst)
+                print(f"  [Plan] Verschiebe alte Datei nach _stale/: {f}", flush=True)
+            except Exception as e:
+                print(f"  [Plan] Konnte {f} nicht verschieben: {e}", flush=True)
 
         with _PLAN_JOBS_LOCK:
             PLAN_JOBS[key]["step"] = "Zerlege Skript in Einheiten …"
@@ -1838,6 +1877,14 @@ def _plan_generate_worker(cid: str, vid: str, text: str, wpm: float, sec: float)
         prompts = visual_prompts(scenes, analysis)
 
         prompt_error_scenes = []
+        # Race-Fix: Wenn der alte Plan eine Szene mit gleichem Text+Index schon fertig
+        # gerendert hatte, behalten wir file/status/source_url statt auf "geplant"
+        # zurückzufallen. Verhindert den Bug dass ein versehentlicher Doppelklick
+        # auf "Plan aus Skript erstellen" während eines laufenden Batch-Renders alle
+        # 91 fertigen Bilder als "geplant" markiert.
+        def _norm_text(t):
+            return " ".join((t or "").lower().split())
+        preserved = 0
         for s, pr in zip(scenes, prompts):
             s["prompt"] = pr["prompt"]; s["concrete_entity"] = pr["concrete_entity"]; s["file"] = None
             s["status"] = "geplant"; s["t"] = fmt_t(s["start"])
@@ -1850,6 +1897,29 @@ def _plan_generate_worker(cid: str, vid: str, text: str, wpm: float, sec: float)
             s["prompt_error"] = pr.get("prompt_error", False)
             if s["prompt_error"]:
                 prompt_error_scenes.append(s["i"])
+        # Race-Fix (Fortsetzung): Preserve gerenderte States aus prev_scenes wenn Text
+        # identisch ist. Überschreibt nur file/status/source_url/t/source_url_ts, lässt
+        # den frisch generierten prompt/concrete_entity/video_prompt/phasen unangetastet.
+        if prev_scenes:
+            new_by_text = {}
+            for s in scenes:
+                nt = _norm_text(s.get("text", ""))
+                if nt:
+                    new_by_text.setdefault(nt, []).append(s)
+            for i, prev in prev_scenes.items():
+                nt = _norm_text(prev.get("text", ""))
+                candidates = new_by_text.get(nt, [])
+                if not candidates:
+                    continue
+                ns = candidates.pop(0)
+                ns["file"] = prev.get("file")
+                ns["status"] = prev.get("status", "fertig")
+                ns["source_url"] = prev.get("source_url")
+                ns["source_url_ts"] = prev.get("source_url_ts")
+                preserved += 1
+            if preserved:
+                print(f"  [Plan] {preserved} bereits gerenderte Szene(n) erhalten "
+                      f"(gleicher Text, file+status aus altem Plan übernommen).", flush=True)
         if prompt_error_scenes:
             print(f"  [Plan] WARNUNG: {len(prompt_error_scenes)} Szene(n) mit fehlgeschlagener "
                   f"Prompt-Generierung (prompt_error): {prompt_error_scenes} — Prompt-Text vor "
