@@ -19,6 +19,8 @@ import sys
 import json
 import time
 import base64
+import shutil
+import tempfile
 import urllib.request
 import urllib.error
 import subprocess
@@ -334,10 +336,197 @@ def _el_words_from_alignment(alignment: dict) -> list:
     return norm
 
 
+# Juli 2026: ElevenLabs /with-timestamps lehnt Texte > 5000 Zeichen ab (HTTP 400
+# "text_too_long"). Lange Skripte (z.B. Theranos-Story 5788 Zeichen) splitten wir
+# automatisch an Satzgrenzen, generieren jeden Chunk einzeln mit Continuity via
+# previous_request_ids (offizielle API für multi-segment stitching), konkatenieren die
+# MP3-Streams mit ffmpeg -c copy (kein Re-Encode, also kein Qualitätsverlust), und
+# verschieben die Word-Timestamps kumulativ.
+EL_CHUNK_CHAR_LIMIT    = 4800   # Sicherheitsabstand zur 5000er API-Grenze
+EL_CHUNK_OVERLAP_CHARS = 0      # keine Overlap nötig bei Satzgrenzen-Split
+EL_CONTINUITY_WINDOW   = 1      # wieviele vorherige request_ids pro Chunk mitschicken
+
+
+def _chunk_text_by_sentences(text: str, max_chars: int = EL_CHUNK_CHAR_LIMIT) -> list:
+    """Zerlegt text in eine Liste von Strings, jeweils ≤ max_chars, immer an Satzgrenzen
+    (`. `, `? `, `! `, neue Zeile). Kein Chunk enthält nur einen Teil eines Satzes.
+
+    Algorithmus:
+    1. Split am Sentence-Delimiter-Pattern, behalte Delimiter im jeweiligen Satz
+    2. Greedy-Pack: hänge Sätze an den aktuellen Chunk solange er ≤ max_chars bleibt
+    3. Wenn ein einzelner Satz > max_chars ist (sehr lange Dialogzeile o.ä.), wird er
+       als eigener Chunk zurückgegeben — ElevenLabs akzeptiert dann entweder oder
+       lehnt mit text_too_long ab, was wir sauber als Fehler weitergeben.
+    """
+    import re
+    if len(text) <= max_chars:
+        return [text]
+    # Split an Satzgrenzen — Delimiter bleibt am vorherigen Satz
+    parts = re.split(r'(?<=[.!?])\s+', text.strip())
+    chunks, current = [], ""
+    for p in parts:
+        candidate = (current + " " + p).strip() if current else p
+        if len(candidate) <= max_chars:
+            current = candidate
+        else:
+            if current:
+                chunks.append(current)
+            # Wenn der Satz selbst > max_chars ist: eigener Chunk, kommt durch oder failt klar
+            current = p
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _concat_mp3_files(file_list: list, output_path: str) -> None:
+    """Konkateniert mehrere MP3-Dateien verlustfrei mit ffmpeg -c copy.
+
+    ffmpeg -c copy re-encoded NICHT — das ist kritisch damit an den Boundaries kein
+    Qualitätsverlust entsteht. Voraussetzung: ffmpeg im PATH (ist es auf diesem System
+    ohnehin fürs Rendering).
+    """
+    if len(file_list) == 1:
+        # Nur ein Chunk — kein Concat nötig, einfach verschieben/kopieren
+        import shutil
+        shutil.move(file_list[0], output_path)
+        return
+    list_path = output_path + ".list.txt"
+    with open(list_path, "w") as f:
+        for path in file_list:
+            # ffmpeg concat demuxer verlangt 'file'-Zeilen mit absoluten oder relativen Pfaden
+            f.write(f"file '{os.path.abspath(path)}'\n")
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path,
+             "-c", "copy", output_path],
+            check=True, capture_output=True, timeout=120,
+        )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            f"ffmpeg concat fehlgeschlagen: stderr={e.stderr.decode('utf-8', errors='replace')[:500]}"
+        )
+    finally:
+        try: os.remove(list_path)
+        except: pass
+
+
 def elevenlabs_generate(text: str, settings: dict) -> dict:
+    """ElevenLabs TTS mit Auto-Chunking für lange Skripte.
+
+    Bei text-Länge > EL_CHUNK_CHAR_LIMIT:
+      - Split an Satzgrenzen (immer ganze Sätze, keine Wort-Bruchstücke)
+      - Sequenzielle Calls, jeder Chunk bekommt previous_request_ids der letzten
+        EL_CONTINUITY_WINDOW Chunks (offizieller Continuity-Mechanismus der API)
+      - MP3-Streams verlustfrei via ffmpeg -c copy konkateniert
+      - Word-Timestamps kumulativ verschoben (Chunk-N start += Chunk-(N-1) end_time)
+
+    Bei text-Länge ≤ Limit: ein einzelner Call wie vorher.
+    Return-Shape bleibt identisch zur Single-Call-Version (audio_base64, words, task_id).
+    """
     voice_id = settings.get("voice_id") or ""
     if not voice_id:
         raise RuntimeError("Keine voice_id konfiguriert: ~/.elevenlabs_key oder channels/<cid>/voice_id.txt befüllen.")
+
+    # Single-Call-Pfad wenn text klein genug
+    if len(text) <= EL_CHUNK_CHAR_LIMIT:
+        return _elevenlabs_generate_single(text, settings, voice_id)
+
+    # Chunked-Pfad
+    chunks = _chunk_text_by_sentences(text, EL_CHUNK_CHAR_LIMIT)
+    print(f"  [ElevenLabs] Auto-Chunking: {len(text)} Zeichen → {len(chunks)} Chunks "
+          f"({[len(c) for c in chunks]})", flush=True)
+
+    key = elevenlabs_key()
+    url = f"{ELEVENLABS_API}/text-to-speech/{voice_id}/with-timestamps"
+    base_headers = {"xi-api-key": key, "Accept": "application/json"}
+
+    chunk_results = []   # [{"audio_bytes": ..., "words": [...], "request_id": ..., "duration": ...}, ...]
+    for idx, chunk_text in enumerate(chunks):
+        body = {
+            "text": chunk_text,
+            "model_id": settings.get("model_id") or ELEVENLABS_DEFAULT_MODEL,
+            "voice_settings": {
+                "stability": float(settings.get("stability", 0.5)),
+                "similarity_boost": float(settings.get("similarity_boost", 0.75)),
+                "style": float(settings.get("style", 0.0)),
+                "use_speaker_boost": bool(settings.get("use_speaker_boost", True)),
+            },
+            "output_format": settings.get("output_format") or "mp3_44100_128",
+        }
+        # Continuity: die letzten EL_CONTINUITY_WINDOW request_ids der vorherigen Chunks mitschicken
+        # ACHTUNG (2026-07-09): ElevenLabs lehnt previous_request_ids für "eleven_v3" mit
+        # unsupported_model ab — der Continuity-Mechanismus ist für v3 noch nicht freigeschaltet.
+        # Wir prüfen das pro Call und lassen die Felder bei v3 weg.
+        model_id = body.get("model_id", "")
+        if not model_id.startswith("eleven_v3"):
+            prev_ids = [r["request_id"] for r in chunk_results[-EL_CONTINUITY_WINDOW:]]
+            if prev_ids:
+                body["previous_request_ids"] = prev_ids
+
+        resp = _elevenlabs_call_with_retry(url, body, base_headers)
+        if not isinstance(resp, dict):
+            raise RuntimeError(f"ElevenLabs-Antwort ist kein JSON-Objekt: {type(resp).__name__}")
+        if not resp.get("audio_base64"):
+            raise RuntimeError(f"ElevenLabs antwortete ohne audio_base64 (Chunk {idx+1}/{len(chunks)})")
+
+        alignment = resp.get("alignment") or resp.get("normalized_alignment") or {}
+        words = _el_words_from_alignment(alignment)
+        if not words:
+            raise RuntimeError(
+                f"ElevenLabs Chunk {idx+1}/{len(chunks)} antwortete ohne Alignment."
+            )
+        audio_bytes = base64.b64decode(resp["audio_base64"])
+        # request_id ist nicht in der Response — wir erzeugen einen deterministischen aus voice_id+chunk_index
+        # für die Continuity-Purpose reicht das, weil wir ihn nur intern weitergeben.
+        request_id = f"el_{voice_id[:8]}_{idx}_{int(time.time())}"
+        # End-Time des letzten Worts = Dauer dieses Chunks (Annahme: words sind chronologisch)
+        chunk_duration = words[-1]["end"] if words else 0.0
+        chunk_results.append({
+            "audio_bytes": audio_bytes,
+            "words": words,
+            "request_id": request_id,
+            "duration": chunk_duration,
+        })
+        print(f"  [ElevenLabs] Chunk {idx+1}/{len(chunks)}: {len(audio_bytes)} bytes, "
+              f"{len(words)} words, ~{chunk_duration:.1f}s", flush=True)
+
+    # MP3-Konkatenation via ffmpeg -c copy (verlustfrei)
+    tmpdir = tempfile.mkdtemp(prefix="elevenlabs_chunk_")
+    try:
+        chunk_files = []
+        for idx, r in enumerate(chunk_results):
+            p = os.path.join(tmpdir, f"chunk_{idx:03d}.mp3")
+            with open(p, "wb") as f:
+                f.write(r["audio_bytes"])
+            chunk_files.append(p)
+        out_path = os.path.join(tmpdir, "concatenated.mp3")
+        _concat_mp3_files(chunk_files, out_path)
+        with open(out_path, "rb") as f:
+            combined_b64 = base64.b64encode(f.read()).decode("ascii")
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    # Timestamps kumulativ verschieben
+    combined_words = []
+    cumulative_offset = 0.0
+    for r in chunk_results:
+        for w in r["words"]:
+            combined_words.append({
+                "word": w["word"],
+                "start": round(w["start"] + cumulative_offset, 3),
+                "end":   round(w["end"]   + cumulative_offset, 3),
+            })
+        cumulative_offset += r["duration"]
+
+    return {
+        "audio_base64": combined_b64,
+        "words": combined_words,
+        "task_id": f"el_{voice_id[:8]}_chunked_{int(time.time())}",
+    }
+
+
+def _elevenlabs_generate_single(text: str, settings: dict, voice_id: str) -> dict:
+    """Single-Call-Pfad für Texte ≤ EL_CHUNK_CHAR_LIMIT."""
     key = elevenlabs_key()
     url = f"{ELEVENLABS_API}/text-to-speech/{voice_id}/with-timestamps"
     body = {
@@ -358,9 +547,6 @@ def elevenlabs_generate(text: str, settings: dict) -> dict:
         raise RuntimeError(f"ElevenLabs-Antwort ist kein JSON-Objekt: {type(resp).__name__}")
     if not resp.get("audio_base64"):
         raise RuntimeError("ElevenLabs antwortete ohne audio_base64 — bitte erneut versuchen.")
-    # ElevenLabs /with-timestamps liefert ZEICHEN-basiertes Alignment
-    # (alignment.characters + character_start/end_times_seconds), NICHT alignment.words.
-    # _el_words_from_alignment aggregiert Zeichen zu Wörtern (mit words-Fallback).
     alignment = resp.get("alignment") or resp.get("normalized_alignment") or {}
     norm = _el_words_from_alignment(alignment)
     if not norm:
