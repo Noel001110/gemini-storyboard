@@ -9,14 +9,16 @@ in Logic/DaVinci auf dem fertigen `final.mp4`. ARCHITECTURE.md §"Audio-Realitä
 erklärt warum.
 
 Details zu Architektur, Datenmodell und Phasen stehen in
-[ARCHITECTURE.md](ARCHITECTURE.md). Was dort steht, wird hier nicht dupliziert.
+[ARCHITECTURE.md](ARCHITECTURE.md). Pipeline-spezifische Notizen in
+[docs/PROMPT_PIPELINE.md](docs/PROMPT_PIPELINE.md). **Praktische Anleitung
+mit Troubleshooting** in [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
 ## Tech-Stack
 
 - **Backend**: `dashboard.py` (Python-Stdlib `http.server`) + `engine/`-Module
 - **Frontend**: `dashboard.html` (Vanilla JS, Alpine + Tailwind via CDN, kein Build)
-- **Rendering**: ffmpeg (`zoompan` für Ken-Burns, `xfade` für Übergänge)
-- **KI**: [KIE.ai](https://kie.ai) für Bilder/LLM, optional [ElevenLabs](https://elevenlabs.io) für Voiceover
+- **Rendering**: ffmpeg (`zoompan` für Ken-Burns, `xfade` für Übergänge, `concat` für MP3-Stitching)
+- **KI**: [KIE.ai](https://kie.ai) für Bilder/LLM, [ElevenLabs](https://elevenlabs.io) für Voiceover
 - **Datenhaltung**: keine DB — JSON-Dateien unter `channels/` (gitignored)
 
 ## Voraussetzungen
@@ -37,7 +39,7 @@ python3 dashboard.py --port 8765 # direkter Start ohne Browser-Auto-Open
 Frontend (`dashboard.html`) wirkt sofort — wird pro Request frisch geladen.
 Backend (`dashboard.py`) braucht Neustart. Vorher prüfen dass kein Job läuft
 (`/api/generate_all_status`, `/api/plan_status`, `/api/render_status`,
-`/api/produce_status`).
+`/api/produce_status`). Bei Problemen siehe RUNBOOK §6.
 
 ## Was du im UI steuerst
 
@@ -46,10 +48,18 @@ Die Pipeline pro Video:
 
 1. **Skript** — Text eintippen oder aus Titel/Thema generieren. Wird debounced
    in `script.json` persistiert (überlebt Browser-/Geräte-Wechsel).
-2. **Plan** — LLM zerlegt das Skript in Szenen mit Whisper-getimetem Voiceover.
-3. **Bilder** — pro Szene KIE.ai-Generierung, mit Style-Ankern + Char-Referenzen
-   für visuelle Konsistenz.
-4. **Render** — ffmpeg assembliert `final.mp4` (Voice + Bilder, ohne Sound).
+2. **Voice-Setup** — Voice + 5 Slider wählen (Stability, Similarity, Style,
+   **Speed** 0.7-1.3, Speaker-Boost). "Voice testen" für 2-Sek-Stimmprobe.
+3. **Voiceover generieren** — bei Texten > 4800 Zeichen Auto-Chunking
+   (Satzgrenzen + ffmpeg-concat). Ergebnis: 7-Min-MP3 + Word-Timestamps
+   + Inline-Audio-Player im UI.
+4. **Plan** — LLM zerlegt das Skript in Szenen mit getimetem Voiceover.
+   Race-safe: bestehende gerenderte Bilder werden per Text-Match preserviert.
+5. **Char-Sheets** — manuell hochgeladen oder pipeline-generiert. Bei Duplikaten
+   die manuelle Variante behalten (Pipeline-Version in `_pipeline_duplicates/`).
+6. **Bilder** — pro Szene KIE.ai-Generierung, mit Style-Ankern + Character-
+   Referenzen (3-Stufen-Fallback: Anchor-Szene → Datei-Match → Name-Match).
+7. **Render** — ffmpeg assembliert `final.mp4` (Voice + Bilder, ohne Sound).
 
 Optional pro Video: Tonauswahl (ElevenLabs / minimax), Bild-Modell
 (`nano-banana-2` / `-lite`), Video-Modus (statische Bilder vs. Veo-Videos),
@@ -70,19 +80,21 @@ Eine schrittweise Anleitung pro Tab steht im Frontend selbst
 dashboard.py             HTTP-Handler + Routing + persistente Helper
 dashboard.html           Frontend (komplette UI in einer Datei)
 engine/
-  scenes.py              Text→Szenen-Segmentierung
+  scenes.py              Text→Szenen-Segmentierung + Entity-Resolve mit Fallback
   render.py              Szenen→Video (ffmpeg-Orchestrierung)
   audio.py               Voice→Sync (Pause-Trim, Timing-Invariant)
   prompts.py             Prompt-Bau (Style-Anker, Phase-Cues, Charsheets)
   presets.py             5 Stil-Presets (flat_cartoon_doc, editorial_minimal, …)
-engine_elevenlabs.py     ElevenLabs-TTS-Integration + Voice-Settings
+engine_elevenlabs.py     ElevenLabs-TTS-Integration + Auto-Chunking + Voice-Settings
 render_overlay.py        Overlay-Renderer (Captions/Callouts/Counters)
 whisper_transcribe.py    Whisper-Worker (im .venv_whisper, nur Subprozess)
 start.sh                 Convenience-Starter (kill+restart+open-browser)
 tests/
   test_cinematic_e2e.py  E2E-Tests für die Render-Pipeline
 channels/                Laufzeitdaten (gitignored)
-docs/                    Pläne, Schwachstellen-Tracker, Style-Guide
+docs/
+  PROMPT_PIPELINE.md     Pipeline-Details: Prompt-Bau, Char-Refs, Retry-Logik
+  RUNBOOK.md             Schritt-für-Schritt-Anleitung + Troubleshooting-Guide
 ```
 
 ## Tests
@@ -94,9 +106,7 @@ python3 -m pytest tests/ -v                    # sonst mit System-Python
 
 ## Bekannte Grenzen
 
-- **Visual-Continuity ~70% zuverlässig** — KIE variiert trotz Char-Refs.
-  Manuell nachkorrigieren wenn nötig.
-- **`dashboard.py` ist ~4000 Z.** — der HTTP-Handler sollte langfristig in
+- **`dashboard.py` ist ~4100 Z.** — der HTTP-Handler sollte langfristig in
   `routes/` extrahiert werden. Riskanter Refactor, deshalb bisher nicht
   angefasst (siehe ARCHITECTURE.md §"Offene Wunden").
 - **Kein Production-Deployment** — kein Dockerfile, keine HTTPS, kein Auth.
@@ -107,3 +117,4 @@ python3 -m pytest tests/ -v                    # sonst mit System-Python
 - Was noch offen ist → `docs/80-schwachstellen-tracker.md`
 - Großer Detail-Plan mit Hebel/Aufwand → `CINEMATIC_UPGRADE_PLAN.md`
 - Wie das System intern funktioniert → `ARCHITECTURE.md`
+- Praktische Anleitung + Troubleshooting → `docs/RUNBOOK.md`

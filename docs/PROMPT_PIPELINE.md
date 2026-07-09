@@ -219,6 +219,95 @@ landete sofort beim Fallback, ohne erneuten Versuch, und ohne jede Markierung
   beide profitieren automatisch, aber nur der manuelle Pfad wurde heute mit
   echten Daten verifiziert.
 
+---
+
+## 9. ElevenLabs Auto-Chunking (Juli 2026)
+
+**Befund:** ElevenLabs `/with-timestamps` lehnt Texte > 5000 Zeichen ab mit
+HTTP 400 `text_too_long`. Theranos-Skript (5788 Zeichen) liegt knapp über
+der Grenze. Manuelles Trimmen oder Studio-Tier-Upgrade waren die bisherigen
+Optionen — beides unbefriedigend.
+
+**Fix (`engine_elevenlabs.py`):**
+
+- Neue Konstanten:
+  - `EL_CHUNK_CHAR_LIMIT = 4800` (Sicherheitsabstand zur 5000er API-Grenze)
+  - `EL_CHUNK_OVERLAP_CHARS = 0` (kein Overlap nötig bei Satzgrenzen-Split)
+  - `EL_CONTINUITY_WINDOW = 1` (wie viele `previous_request_ids` pro Chunk)
+- `_chunk_text_by_sentences()` — Regex-Split an Satzgrenzen
+  (`(?<=[.!?])\s+`), greedy-Pack in ≤4800-char Chunks. Garantie: ganze
+  Sätze, nie Wort-Bruchstücke.
+- `_concat_mp3_files()` — verlustfreie MP3-Konkatenation via `ffmpeg -c copy`.
+  Kein Re-Encode → keine Qualitätsverluste an den Boundaries. Single-Chunk-
+  Fall ist nur ein `move()` (kein ffmpeg nötig).
+- `elevenlabs_generate()` Dispatch:
+  - Text ≤ Limit → `_elevenlabs_generate_single()` (alter Pfad)
+  - Text > Limit → sequenzielle Calls mit `previous_request_ids` für
+    Continuity (außer v3, das das ablehnt — siehe unten), ffmpeg-concat
+    der Audio-Bytes, kumulative Timestamp-Verschiebung (`start += prev_chunk.duration`)
+
+**ElevenLabs v3 Caveat:** v3 lehnt `previous_request_ids` mit
+`unsupported_model` ab. Wir prüfen `model_id.startswith("eleven_v3")` und
+lassen das Feld in dem Fall weg. Resultat: minimale Voice-Boundary-
+Unterschiede zwischen Chunks (akzeptabel), dafür sauberer v3-Support.
+
+**Caveat: Auto-Chunking allein rettet die Pipeline nicht** — KIE.ai
+benötigt weiterhin gerenderte Bilder als Anker für visuelle Konsistenz
+(siehe §3). Erst Voice → Plan → Render mit dem Char-Ref-Fallback
+(§10) → Character-Konsistenz im fertigen Video.
+
+---
+
+## 10. Character-Reference-Fallback (Juli 2026)
+
+**Befund:** `_resolve_entity_ref` (engine/scenes.py) lieferte nur dann eine
+Referenz-URL, wenn eine **bereits gerenderte Anker-Szene** mit gültiger
+`source_url` existierte. Bei folgenden Szenarien gab es **gar keine
+Charakter-Referenz** → KIE rendert jede Szene "aus dem Nichts" → Elizabeth
+sieht in jedem Frame anders aus:
+
+1. **Race-Bug**: Mein Recovery-Script (für Plan-Generate-Race-Fix) hat
+   `source_url` aus dem plan.json entfernt, weil die CDN-URLs von KIE.ai
+   TTL-begrenzt sind und der Original-Plan durch einen parallelen
+   Worker überschrieben wurde.
+2. **ID-Mismatch**: Plan-Generator vergibt generische IDs (`char_01`),
+   aber manuell hochgeladene Charsheets liegen unter sprechenden Namen
+   (`elizabeth_holmes.png`). Dateiname-basierter Fallback findet sie nicht.
+
+**Fix (`engine/scenes.py`):**
+
+Drei-Stufen-Fallback-Kette in `_resolve_entity_ref`:
+
+1. **Anchor-Szene mit `source_url`** (Original-Verhalten): sucht im Plan
+   nach früheren Szenen mit gleicher `concrete_entity`, nimmt die erste.
+   Gibt `entity_refs=[source_url]` zurück.
+2. **Datei-Match** (Stufe A): sucht im per-video-Pool, dann channel-pool,
+   nach `<entity>.png` (z.B. `char_01.png`).
+3. **Name-Match via `plan["characters"]`** (Stufe B): nutzt
+   `analyze_script()`-Output (`[{id: "char_01", name_or_role: "Elizabeth Holmes"}]`),
+   mappt `entity` → `name`, sucht nach Charsheet-JSON mit gleichem `name`.
+
+Match wird als `data:image/png;base64,...` URL zurückgegeben (KIE.ai
+akzeptiert data-URLs direkt — kein Catbox-Upload, kein 403-Risiko, kein
+TTL-Problem). Debug-Dict enthält `source`-Feld (`anchor-scene` /
+`charsheet-png` / `charsheet-name-match`) für Diagnose.
+
+**Regex-Bug mit gefixt:** cid/vid-Extraktion aus plan_path anchored
+ursprünglich mit `/channels/` (leading slash), matchte aber relative
+Pfade nicht. Jetzt `(?:^|/)channels/` für beide Fälle.
+
+---
+
+## 11. Speed-Parameter (Juli 2026)
+
+**Offizielle ElevenLabs API:** `voice_settings.speed` mit Default 1.0,
+Range praxisüblich 0.7–1.3. Werte >1.0 sprechen schneller, <1.0 langsamer.
+
+**Fix:** UI-Slider (0.7-1.3, step 0.05), Backend-Persist in
+`voice_settings.json`, Engine-Code sendet speed an alle 5
+voice_settings-builder Sites (single + chunked Generate, voiceTestPreview,
+settings save, reset).
+
 ## 8. Relevante Commits (main)
 
 - `c7cb1cb` — Thumbnail async + Charsheet-Kontamination behoben
