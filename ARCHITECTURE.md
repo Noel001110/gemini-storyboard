@@ -4,13 +4,7 @@
 
 **Du gibst ein Script ein → das System generiert für jede Szene ein Bild mit cinematischen Effekten → die Bilder werden mit Ken-Burns-Effekten zu einem Video zusammengeschnitten, bei dem der Schnitt EXAKT auf dem Sprach-Timing (ElevenLabs TTS) liegt → du machst Sound im Nachgang in Logic/DaVinci.**
 
-## Was es NICHT tut (bewusst weggelassen)
 
-- ❌ **Automatische Musik-Generierung / -Stems** — du machst Sound extern
-- ❌ **Automatische Sound-Effekte-Library** (whoosh, impact, riser, swell) — du machst das in Logic
-- ❌ **Automatische SFX-Trigger** an Szenen-Grenzen
-- ❌ **Auto-Fix-Schleife** für "kaputte" Bilder — du klickst "Neu generieren" wenn was nicht passt
-- ❌ **Master-Orchestrator** der alles entscheidet
 
 ## Audio-Realität (genau das was du willst)
 

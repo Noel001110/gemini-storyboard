@@ -307,18 +307,41 @@ def _resolve_chain_refs(plan_path: str, scene: dict) -> tuple:
 # never the most recent one — chaining off "whatever came last" would let the design
 # drift a little further with every repeat appearance.
 
-def _wait_for_entity_anchor_scene(plan_path: str, entity: str, anchor_i: int, timeout: float = 170.0) -> dict:
+def _wait_for_entity_anchor_scene(plan_path: str, entity: str, anchor_i: int,
+                                   timeout: float = 170.0, wait: bool = True) -> dict:
     """Block until the scene at index `anchor_i` (the first scene showing `entity`) has
     source_url, has failed, or the timeout elapses. Same reasoning as
     _wait_for_chain_scene: the batch worker can dispatch the anchor and a later repeat
-    of the same character in the same concurrent wave."""
+    of the same character in the same concurrent wave.
+
+    Juli 2026 Fix (A3, Audit "Charakter-Referenzen"): a scene with status "fertig" and
+    a `file` but NO source_url (the Recovery-Race scenario _resolve_entity_ref's stage
+    1b handles) is a FINAL state — no future poll will ever add a source_url to it. The
+    old version only treated "fehler" as final and blocked the full 170s timeout for
+    every such scene before falling through to the charsheet fallback. Now any scene
+    with a `file` (rendered, regardless of source_url) is also treated as final.
+
+    `wait=False` (used by the single-scene manual click, which isn't racing a sibling
+    batch dispatch) skips the poll loop entirely and returns after one read.
+    """
+    def _is_final(s):
+        return bool(s.get("source_url")) or s.get("status") == "fehler" or bool(s.get("file"))
+
+    if not wait:
+        try:
+            plan = json.load(open(plan_path))
+            return next((s for s in plan["scenes"]
+                         if s.get("i") == anchor_i and s.get("concrete_entity") == entity), {})
+        except Exception:
+            return {}
+
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
             plan = json.load(open(plan_path))
             match = next((s for s in plan["scenes"]
                           if s.get("i") == anchor_i and s.get("concrete_entity") == entity), None)
-            if match and (match.get("source_url") or match.get("status") == "fehler"):
+            if match and _is_final(match):
                 return match
         except Exception:
             pass
@@ -330,7 +353,7 @@ def _wait_for_entity_anchor_scene(plan_path: str, entity: str, anchor_i: int, ti
         return {}
 
 
-def _resolve_entity_ref(plan_path: str, scene: dict) -> tuple:
+def _resolve_entity_ref(plan_path: str, scene: dict, wait: bool = True) -> tuple:
     """Returns (ref_urls, debug_info): the first already-generated (or in-flight)
     scene showing the same concrete_entity as `scene`, so every repeat appearance of a
     character reuses the very first generated image of them as a visual anchor —
@@ -339,18 +362,27 @@ def _resolve_entity_ref(plan_path: str, scene: dict) -> tuple:
     Juli 2026 (User-Report "Charakter-Referenzen werden nicht richtig gezogen"):
     Fallback-Kette wenn keine Anchor-Szene mit gültiger source_url existiert:
       1. source_url der ersten Szene mit gleicher concrete_entity (Original-Verhalten)
-      2. data:image/png;base64 des Charsheet-PNGs (channels/<cid>/videos/<vid>/charsheets/<entity>.png)
-      3. data:image/png;base64 aus dem channel-pool (channels/<cid>/charsheets/<entity>.png)
+      1b. lokale Bilddatei der Anchor-Szene (generated/<file>) als lokaler Pfad,
+          wenn die Szene fertig gerendert ist aber KEINE source_url (mehr) hat
+      2. Lokaler Pfad des Charsheet-PNGs (channels/<cid>/videos/<vid>/charsheets/<entity>.png)
+      3. Lokaler Pfad aus dem channel-pool (channels/<cid>/charsheets/<entity>.png)
 
-    Schritt 2+3 sind nötig weil:
+    Schritt 1b-3 sind nötig weil:
       a) Bei einem Plan-Generate werden die Szenen mit char_XX-IDs erzeugt, aber die
          Charsheet-PNGs liegen unter dem sprechenden Namen (z.B. char_01.png für
          Elizabeth Holmes).
       b) Wenn das Plan.json per Recovery neu geschrieben wird (mein Race-Fix), gehen
          die source_url-Werte verloren — die CDN-URLs von KIE.ai sind zudem TTL-
-         begrenzt. Ohne Fallback gibt es KEINE Charakter-Referenz.
+         begrenzt. Ohne Fallback gibt es KEINE Charakter-Referenz. Die lokale Bilddatei
+         (generated/<file>) liegt aber immer noch auf der Platte — Stufe 1b nutzt genau
+         die, statt 170s auf eine source_url zu warten die nie wiederkommt.
       c) Der Master-Prompt + der Stage-Anchor-Stil allein reicht NICHT für visuelle
          Konsistenz — KIE rendert ohne Bild-Referenz jedes Mal anders.
+
+    `wait` steuert ob auf eine parallel laufende Anchor-Szene gewartet wird (Batch-
+    Worker, mehrere Szenen können gleichzeitig dispatcht werden) oder sofort mit dem
+    aktuellen plan.json-Stand geantwortet wird (manueller Einzel-Szenen-Klick, siehe
+    /api/generate_one — dort läuft nichts parallel auf das gewartet werden müsste).
     """
     entity = str(scene.get("concrete_entity", ""))
     if not entity.startswith("char_"):
@@ -360,12 +392,39 @@ def _resolve_entity_ref(plan_path: str, scene: dict) -> tuple:
     except Exception:
         plan = {}
 
+    # cid/vid aus dem plan_path ableiten: .../channels/<cid>/videos/<vid>/generated/plan.json
+    # Pattern matched sowohl absolute (/Users/.../channels/...) als auch relative Pfade.
+    # Wird von Stufe 1b UND 2/3 gebraucht, deshalb einmal vorne berechnet.
+    import re as _re
+    m = _re.search(r"(?:^|/)channels/([^/]+)/videos/([^/]+)/generated/plan\.json$", plan_path)
+    if m:
+        cid, vid = m.group(1), m.group(2)
+    else:
+        cid, vid = "default", None
+
     # 1) Anchor-Szene mit gültiger source_url (Original-Verhalten)
     earlier = [s for s in plan.get("scenes", [])
                if s.get("concrete_entity") == entity and s.get("i", -1) < scene.get("i", -1)]
     if earlier:
         anchor_i = min(s["i"] for s in earlier)
-        anchor = _wait_for_entity_anchor_scene(plan_path, entity, anchor_i)
+        anchor = _wait_for_entity_anchor_scene(plan_path, entity, anchor_i, wait=wait)
+        
+        # 1b) Anchor ist fertig gerendert (hat eine lokale Bilddatei). Wir bevorzugen
+        # JEDERZEIT die lokale Datei, damit das Dashboard sie via catbox.moe hochlädt!
+        # KIE.ai blockt oft seine eigenen tempfile.aiquickdraw.com URLs als Referenz,
+        # was dazu führt, dass Charakter-Referenzen kommentarlos ignoriert werden.
+        if anchor.get("file") and vid:
+            try:
+                from dashboard import v_out
+                local_path = os.path.join(v_out(cid, vid), anchor["file"])
+                if os.path.exists(local_path):
+                    return ([local_path],
+                            {"entity_anchor_file": local_path, "entity_anchor_i": anchor_i,
+                             "source": "anchor-scene-local-file", "is_local": True})
+            except Exception:
+                pass
+                
+        # 1) Fallback auf source_url, falls die lokale Datei fehlt
         if anchor.get("source_url"):
             return ([anchor["source_url"]],
                     {"entity_anchor_file": anchor.get("file"), "entity_anchor_i": anchor_i,
@@ -379,14 +438,6 @@ def _resolve_entity_ref(plan_path: str, scene: dict) -> tuple:
     # der Plan 'char_01' als concrete_entity vergibt.
     try:
         from dashboard import ch_sheets
-        # cid/vid aus dem plan_path ableiten: .../channels/<cid>/videos/<vid>/generated/plan.json
-        # Pattern matched sowohl absolute (/Users/.../channels/...) als auch relative Pfade
-        import re as _re
-        m = _re.search(r"(?:^|/)channels/([^/]+)/videos/([^/]+)/generated/plan\.json$", plan_path)
-        if m:
-            cid, vid = m.group(1), m.group(2)
-        else:
-            cid, vid = "default", None
 
         # Helper: alle Charsheets im Pool sammeln mit PNG-Pfad
         all_sheets = []  # [(name, json_path, png_path), ...]
@@ -407,11 +458,8 @@ def _resolve_entity_ref(plan_path: str, scene: dict) -> tuple:
         # Stufe A: passendes safe == entity (z.B. char_01.png)
         for _name, safe, _jp, png_path in all_sheets:
             if safe == entity and os.path.exists(png_path):
-                with open(png_path, "rb") as f:
-                    b64 = base64.b64encode(f.read()).decode("ascii")
-                data_url = f"data:image/png;base64,{b64}"
-                return ([data_url],
-                        {"entity_anchor_file": png_path, "source": "charsheet-png"})
+                return ([png_path],
+                        {"entity_anchor_file": png_path, "source": "charsheet-png", "is_local": True})
 
         # Stufe B: entity -> name via plan["characters"], dann Name-Match im Pool.
         # analyze_script liefert [{id: "char_01", name_or_role: "Elizabeth Holmes"}, ...]
@@ -426,12 +474,9 @@ def _resolve_entity_ref(plan_path: str, scene: dict) -> tuple:
         if char_name:
             for name, safe, jp, png_path in all_sheets:
                 if name and name.lower() == char_name.lower() and os.path.exists(png_path):
-                    with open(png_path, "rb") as f:
-                        b64 = base64.b64encode(f.read()).decode("ascii")
-                    data_url = f"data:image/png;base64,{b64}"
-                    return ([data_url],
+                    return ([png_path],
                             {"entity_anchor_file": png_path, "source": "charsheet-name-match",
-                             "matched_charsheet": safe})
+                             "matched_charsheet": safe, "is_local": True})
     except Exception:
         pass
     return [], {}

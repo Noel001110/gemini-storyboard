@@ -130,9 +130,9 @@ def t_phase_b_motion_selector_uses_phase():
     """Phase B5: _motion_for_scene picks from _PHASE_MOTION_CANDIDATES when phase + LLM."""
     motion_picks = {
         "OPENING":       {"pan_right", "pan_left", "tilt_down"},
-        "RISING_ACTION": {"dolly_in", "zoom_in"},
-        "CLIMAX":        {"snap_zoom_in", "diagonal_glide", "static"},
-        "RESOLUTION":    {"dolly_out", "tilt_up", "pan_left"},
+        "RISING_ACTION": {"zoom_in", "tilt_down"},
+        "CLIMAX":        {"snap_zoom_in", "static"},
+        "RESOLUTION":    {"zoom_out", "tilt_up", "pan_left"},
     }
     for phase, expected in motion_picks.items():
         # Phase B5 only couples phase→motion when phase_source == "llm"
@@ -148,19 +148,19 @@ def t_phase_b_motion_fallback_to_pacing():
     s = {"i": 0, "phase": "CLIMAX", "phase_source": "position-fallback",
           "pacing": "punchy", "dur": 4.0}
     m = dashboard._motion_for_scene(s, None)
-    # Phases-CLIMAX candidates are {snap_zoom_in, diagonal_glide, static}; pacing-punchy
-    # candidates are {snap_zoom_in, diagonal_glide, static} — same set, but the
-    # implementation should now use the pacing-coupling (test data happens to overlap).
-    assert m["name"] in {"snap_zoom_in", "diagonal_glide", "static"}, \
+    # Phases-CLIMAX candidates are {snap_zoom_in, static}; pacing-punchy candidates are
+    # {snap_zoom_in, static} — same set, but the implementation should now use the
+    # pacing-coupling (test data happens to overlap).
+    assert m["name"] in {"snap_zoom_in", "static"}, \
         f"unexpected motion: {m['name']}"
 
-    # Phase RISING_ACTION with pacing normal (which gives {zoom_in/out, dolly_in, pan_left/right})
+    # Phase RISING_ACTION with pacing normal (which gives {zoom_in/out, tilt_up, pan_left/right})
     # — phase fallback should NOT be used when pacing says 'normal'.
     s2 = {"i": 0, "phase": "RISING_ACTION", "phase_source": "position-fallback",
            "pacing": "normal", "dur": 4.0}
     m2 = dashboard._motion_for_scene(s2, None)
-    # Phase RISING_ACTION candidates are {dolly_in, zoom_in} (subset of pacing-normal set).
-    assert m2["name"] in {"zoom_in", "zoom_out", "dolly_in", "pan_left", "pan_right"}, \
+    # Phase RISING_ACTION candidates are {zoom_in, tilt_down} (subset of pacing-normal set).
+    assert m2["name"] in {"zoom_in", "zoom_out", "tilt_up", "pan_left", "pan_right"}, \
         f"expected pacing-normal-set motion, got {m2['name']}"
 
 
@@ -846,7 +846,7 @@ def main():
         summary_section("Phase L: Hook + Leitfrage + Render-Kopplung")
         run(t_phase_l_hook_fields_in_analyze_prompt, "L.1: analyze_script-Prompt hat hook+throughline+Regel")
         run(t_phase_l_hook_throughline_in_prompt, "L.1: Schema hat hook mit beat/strength/type-Enum")
-        run(t_phase_l_is_hook_motion_override, "L.3: Hook → snap_zoom_in@1.2, aber NICHT bei Seq-Continuation")
+        run(t_phase_l_is_hook_motion_override, "L.3: Hook → snap_zoom_in@1.0 (z1=1.16), aber NICHT bei Seq-Continuation")
         run(t_phase_l_transition_after_hook, "L.3: Übergang nach Hook = hard cut (duration=0)")
         run(t_phase_l_no_hook_no_behavior_change, "L.3: ohne is_hook rendert identisch zu vorher")
 
@@ -1345,8 +1345,12 @@ def t_phase34_resume_supports_both_providers():
     # Anti-Regression: alter Check "voiceover_source == elevenlabs" (Singular) im Resume-Pfad
     # darf nicht mehr exklusiv ElevenLabs-only filtern.
     import re as _re
-    # Suche das Resume-Resume-Block-Kontext
-    resume_idx = py.find('if (meta.get("voiceover_source")')
+    # Suche den Resume-Block-Kontext. Juli 2026 (Precedence-Bug-Fix): der Anker wurde
+    # von 'if (meta.get("voiceover_source")' auf 'and meta.get("voiceover_source")'
+    # umgestellt, weil ein vorangestelltes 'bool(meta) and' jetzt zwischen 'if (' und
+    # dem eigentlichen Provider-Check steht (siehe dashboard.py — die alte
+    # "A and B if meta else False and C and D"-Ternary-Falle ist behoben).
+    resume_idx = py.find('and meta.get("voiceover_source") in ("elevenlabs", "minimax")')
     assert resume_idx > 0, "Phase 34: Resume-Check nicht gefunden"
     block = py[resume_idx:resume_idx + 300]
     assert '"minimax"' in block, \
@@ -2209,26 +2213,39 @@ def t_phase_l_hook_fields_in_analyze_prompt():
 
 
 def t_phase_l_is_hook_motion_override():
-    """L.3: Hook-Szene → snap_zoom_in mit intensity 1.2. Schutzregel 2: NICHT wenn
-    Fortsetzung einer Sequenz."""
-    from engine.render import _motion_for_scene
+    """L.3: Hook-Szene → snap_zoom_in. Schutzregel 2: NICHT wenn Fortsetzung einer
+    Sequenz.
+
+    Cinematic-Mix Juli 2026 (Schritt 4.3): Hook-Intensität 1.2 -> HOOK_MOTION_INTENSITY
+    (1.0) UND snap_zoom_in's Basis-z1 1.25 -> 1.16 (25%-Zoom war der "billig"-Ausreißer
+    gegenüber professionellen Referenz-Dokus). Bei intensity_scale=1.0 reproduziert
+    _build_motion die Basis-Werte exakt (siehe dessen Docstring) -> z1 == 1.16."""
+    from engine.render import _motion_for_scene, MOTION_LIBRARY, HOOK_MOTION_INTENSITY
 
     # Hook, nicht Sequenz-Fortsetzung → snap_zoom_in
     hook_scene = {"i": 0, "dur": 3.0, "pacing": "normal", "is_hook": True}
     m = _motion_for_scene(hook_scene, None)
     assert m["name"] == "snap_zoom_in", \
         f"Hook-Szene muss snap_zoom_in geben, gab: {m}"
-    assert m["z1"] >= 1.2, f"Hook-Intensität sollte >=1.2 sein, war: {m}"
+    assert HOOK_MOTION_INTENSITY == 1.0, f"HOOK_MOTION_INTENSITY sollte 1.0 sein, war: {HOOK_MOTION_INTENSITY}"
+    expected_z1 = MOTION_LIBRARY["snap_zoom_in"]["z1"]
+    assert abs(m["z1"] - expected_z1) < 0.001, \
+        f"Hook-z1 sollte der Basis-snap_zoom_in-z1 ({expected_z1}) entsprechen, war: {m}"
 
     # Hook, ABER Sequenz-Fortsetzung → Sequenz-Vererbung schlägt Hook (Schutzregel 2)
     seq_continuation = {
         "i": 1, "dur": 3.0, "pacing": "normal", "pacing": "calm",
         "seq_id": "s1", "seq_pos": 1, "is_hook": True,  # widersprüchlich — Hook auf Continuation
     }
-    prev_scene = {"motion": {"name": "diagonal_glide", "z0": 1.04, "z1": 1.1,
-                              "focus0": [0.4, 0.4], "focus1": [0.6, 0.55]}}
+    # pan_left als Fixture (diagonal_glide existiert seit der Juli-2026-Motion-
+    # Bereinigung nicht mehr -- Kombi-Zoom+Pan-Rezepte wurden entfernt, siehe
+    # MOTION_LIBRARY-Docstring). Die Vererbung selbst schaut nicht in die Bibliothek
+    # nach, sondern übernimmt den gespeicherten Dict 1:1 -- jeder gültige Name eignet
+    # sich als Fixture.
+    prev_scene = {"motion": {"name": "pan_left", "z0": 1.3, "z1": 1.3,
+                              "focus0": [0.64, 0.48], "focus1": [0.36, 0.48]}}
     m = _motion_for_scene(seq_continuation, prev_scene)
-    assert m["name"] == "diagonal_glide", \
+    assert m["name"] == "pan_left", \
         f"Hook auf Seq-Continuation muss Sequenz-Motion erben, gab: {m}"
 
     # Kein Hook, normale Szene → reguläre Auswahl

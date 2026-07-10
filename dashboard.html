@@ -566,12 +566,21 @@
       </div>
       <div id="elSlidersBlock" class="space-y-1">
         <div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:6px">
+          <label style="flex:0 0 200px">Modell
+            <select id="elModelSel" style="width:100%">
+              <option value="eleven_v3">eleven_v3 (beste Prosodie)</option>
+              <option value="eleven_multilingual_v2">eleven_multilingual_v2 (Request-Stitching)</option>
+              <option value="eleven_flash_v2_5">eleven_flash_v2_5 (schnell/günstig)</option>
+            </select>
+          </label>
+        </div>
+        <div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:6px">
           <label style="flex:1;min-width:160px">Stability <span id="elStabVal" class="hint">0.50</span><input type="range" id="elStab" min="0" max="1" step="0.05" value="0.5" style="width:100%"></label>
           <label style="flex:1;min-width:160px">Similarity <span id="elSimVal" class="hint">0.75</span><input type="range" id="elSim" min="0" max="1" step="0.05" value="0.75" style="width:100%"></label>
         </div>
         <div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:6px">
           <label style="flex:1;min-width:160px">Style <span id="elStyleVal" class="hint">0.00</span><input type="range" id="elStyle" min="0" max="1" step="0.05" value="0" style="width:100%"></label>
-          <label style="flex:1;min-width:160px">Speed <span id="elSpeedVal" class="hint">1.00×</span><input type="range" id="elSpeed" min="0.7" max="1.3" step="0.05" value="1.0" style="width:100%" title="ElevenLabs-API: 1.0 = normal. Range praxisüblich 0.7–1.3."></label>
+          <label style="flex:1;min-width:160px">Speed <span id="elSpeedVal" class="hint">1.00×</span><input type="range" id="elSpeed" min="0.7" max="1.2" step="0.05" value="1.0" style="width:100%" title="ElevenLabs-API: 1.0 = normal. Offizieller Bereich 0.7–1.2 (elevenlabs.io/docs) — Werte außerhalb riskieren HTTP 400."></label>
         </div>
         <div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:6px">
           <label style="flex:1;min-width:160px">Speaker Boost <span id="elBoostVal" class="hint">on</span>
@@ -1666,11 +1675,26 @@ async function loadTtsVoices(){
   }
   sel.innerHTML = '<option value="">– Voice wählen –</option>' + _elVoices.map(v =>
     `<option value="${escHtml(v.voice_id)}">${escHtml(v.name || v.voice_id)}${escHtml(v.category?' ('+v.category+')':'')}</option>`).join('');
-  // Current voice_id vom aktuellen Provider aus den settings holen
+  // Current voice_id + Slider-Werte vom aktuellen Provider aus den settings holen.
+  // Vorher (Bug): nur voice_id wurde vorbelegt, alle Slider (Stability/Similarity/
+  // Style/Speed/Boost/Modell) blieben immer bei den HTML-Hardcoded-Defaults, egal was
+  // in voice_settings.json gespeichert war — ein Server-Neustart oder Browser-Reload
+  // zeigte dann falsche Werte, obwohl der Voiceover-Call selbst die richtigen (server-
+  // seitig geladenen) Settings benutzt hätte. Jetzt: einmal laden, alle UI-Controls
+  // synchron dazu setzen.
   const cur = $('elVoiceSelect');
   const settings = await ch_get('/api/elevenlabs_settings').catch(() => null);
   if(settings && settings.tts_provider === provider && settings.voice_id){
     cur.value = settings.voice_id;
+  }
+  if(settings && provider === 'elevenlabs'){
+    if(settings.model_id && $('elModelSel')) $('elModelSel').value = settings.model_id;
+    if(settings.stability != null) $('elStab').value = settings.stability;
+    if(settings.similarity_boost != null) $('elSim').value = settings.similarity_boost;
+    if(settings.style != null) $('elStyle').value = settings.style;
+    if(settings.speed != null) $('elSpeed').value = settings.speed;
+    $('elBoost').value = settings.use_speaker_boost === false ? 'false' : 'true';
+    _elWireSliders();
   }
   $('elVoiceSelect').onchange = async () => {
     const v = $('elVoiceSelect').value;
@@ -1701,6 +1725,25 @@ async function loadTtsVoices(){
       });
     }
   };
+  // elModelSel hat keine eigene voice_id-Änderung, braucht also einen eigenen
+  // Persist-Handler (vorher: Modell-Wahl ging beim nächsten Server-Neustart/Reload
+  // verloren, weil nur elVoiceSelect.onchange speicherte).
+  if($('elModelSel')){
+    $('elModelSel').onchange = async () => {
+      if(provider !== 'elevenlabs') return;
+      await ch_api('/api/elevenlabs_settings', {
+        voice_id: $('elVoiceSelect').value,
+        model_id: $('elModelSel').value,
+        stability: +$('elStab').value,
+        similarity_boost: +$('elSim').value,
+        style: +$('elStyle').value,
+        use_speaker_boost: $('elBoost').value === 'true',
+        speed: +$('elSpeed').value,
+        output_format: 'mp3_44100_128',
+        tts_provider: 'elevenlabs',
+      });
+    };
+  }
   _ttsSlidersVisibility(provider);
   _elWireSliders();
   _mmWireSliders();
@@ -1967,6 +2010,7 @@ async function voiceTestPreview(){
       body: JSON.stringify({
         text: 'Hallo, das ist ein Stimm-Sample.',
         voice_id: $('elVoiceSelect').value,
+        model_id: ($('elModelSel') && $('elModelSel').value) || 'eleven_v3',
         stability: +$('elStab').value,
         similarity_boost: +$('elSim').value,
         style: +$('elStyle').value,
@@ -2504,8 +2548,19 @@ function _setRenderStageUI(stage){
   });
 }
 
-async function renderVideo(){
-  const r = await ch_api('/api/render_start', {});
+async function renderVideo(force){
+  const r = await ch_api('/api/render_start', {force: !!force});
+  if(r.partial){
+    // Juli 2026 Fix: bisher lief ein Render mit nur teilweise generierten Bildern
+    // stillschweigend durch — _apply_sync_invariant streckt die vorhandenen Bilder
+    // über die GESAMTE Audiolänge, das Ergebnis ist ein voll langes Video in dem jedes
+    // Bild deutlich zu lange steht. Jetzt erst nachfragen, mit force weiterlaufen.
+    const ok = confirm(`Nur ${r.rendered} von ${r.total} Szenen haben ein generiertes `
+      + `Bild. Trotzdem rendern? Die vorhandenen Bilder werden über die volle `
+      + `Audiolänge gestreckt.`);
+    if(!ok) return;
+    return renderVideo(true);
+  }
   if(!r.ok){ alert('Fehler: '+(r.error||'unbekannt')); return; }
   startRenderPoll();
 }
@@ -2514,6 +2569,24 @@ async function stopRender(){
   const btn = $('stopRenderBtn');
   btn.disabled = true; btn.textContent = '⏳ Stoppt nach aktuellem Clip …';
   await ch_api('/api/render_stop', {});
+}
+
+// ETA-Anzeige (Fortschrittsbalken): Tempo aus bisher vergangener Zeit / bisher fertigen
+// Clips ableiten, auf die verbleibenden Clips hochrechnen. Kein Server-seitiger
+// Zusatz-Call nötig -- started_ts kommt einfach mit im render_status-Payload.
+function _fmtEta(sec){
+  if(sec == null || !isFinite(sec) || sec < 0) return '';
+  const m = Math.floor(sec / 60), s = Math.round(sec % 60);
+  return m > 0 ? `${m} min ${s}s` : `${s}s`;
+}
+function _etaLabel(st){
+  if(!st.started_ts || !st.done) return '';
+  const elapsed = (Date.now() / 1000) - st.started_ts;
+  const rate = elapsed / st.done;
+  const remaining = Math.max(0, (st.total || 0) - st.done);
+  const etaSec = rate * remaining;
+  const etaStr = _fmtEta(etaSec);
+  return etaStr ? ` — noch ~${etaStr}` : '';
 }
 
 let _renderPollTimer = null;
@@ -2533,7 +2606,8 @@ function startRenderPoll(){
         $('renderBarWrap').style.display = '';
         $('renderBarFill').style.width = (st.total ? st.done/st.total*100 : 0) + '%';
         const label = st.stage === 'clips' ? 'Clips' : 'Übergänge';
-        $('renderHint').textContent = `${label}: ${st.done} / ${st.total}`;
+        const pct = st.total ? Math.round(st.done/st.total*100) : 0;
+        $('renderHint').textContent = `${label}: ${st.done} / ${st.total} (${pct}%)${_etaLabel(st)}`;
       } else {
         $('renderBarWrap').style.display = 'none';
         $('renderHint').textContent = RENDER_STAGE_LABELS[st.stage] || 'Rendert …';

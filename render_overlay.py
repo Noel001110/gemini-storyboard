@@ -19,13 +19,34 @@ Usage (title-card mode):
   python3 render_overlay.py <out_path.png> <width> <height> title_card <text_b64> [phase]
     phase: optional, one of "OPENING" | "RISING_ACTION" | "CLIMAX" | "RESOLUTION"
            (selects the underline accent color; "unknown"/missing = black)
+
+Usage (word-caption batch mode, Cinematic-Mix Juli 2026, Schritt 3):
+  python3 render_overlay.py <out_dir> <width> <height> word_caption_batch <words_json_b64>
+    words_json_b64: base64-encoded JSON list of plain-text words (one PNG per list
+                     entry, ONE subprocess call for the whole scene instead of one per
+                     word -- same batching rationale as counter_anim below).
+    Writes <out_dir>/word_0000.png ... word_{N-1:04d}.png.
 """
 import sys
 import os
+import re
+import json
 import base64
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
-FONT_BOLD_CANDIDATES = [
+HERE = os.path.dirname(os.path.abspath(__file__))
+_CUSTOM_FONT_DIR = os.path.join(HERE, "assets", "fonts")
+
+FONT_BOLD_CANDIDATES = []
+if os.path.isdir(_CUSTOM_FONT_DIR):
+    # Projekt-eigene Fonts (falls hinterlegt) haben Vorrang vor der System-Arial --
+    # gilt für ALLE Overlay-Stile hier (caption/callout/chapter/counter/word_caption),
+    # nicht nur die neuen Wort-Captions. Ein Font-Drop-in hebt die Optik überall.
+    FONT_BOLD_CANDIDATES += sorted(
+        os.path.join(_CUSTOM_FONT_DIR, fn) for fn in os.listdir(_CUSTOM_FONT_DIR)
+        if fn.lower().endswith((".ttf", ".otf"))
+    )
+FONT_BOLD_CANDIDATES += [
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
     "/System/Library/Fonts/Supplemental/Arial.ttf",
 ]
@@ -121,6 +142,76 @@ def render_counter(width, height, text):
     return img
 
 
+# ── Cinematic-Mix Juli 2026: CapCut-Stil 1-Wort-Captions (Schritt 3) ──────────
+
+_ACCENT_WORD_RE = re.compile(r"[\d$%]")  # Zahlen/$/% -> Akzentfarbe statt Weiß
+WORD_CAPTION_ACCENT = (255, 214, 64, 255)  # #FFD640, gleiche Akzentfarbe wie render_callout
+WORD_CAPTION_WHITE = (255, 255, 255, 255)
+
+
+def render_word_caption(width, height, text):
+    """Ein einzelnes Wort, groß, fett, ohne Box -- der CapCut/Hormozi-Stil. Zahlen/$/%
+    bekommen die Akzentfarbe (Gelb), sonst Weiß. Kräftiger schwarzer Stroke + weicher
+    (gaußscher) Schlagschatten für Lesbarkeit auf jedem Hintergrund, INSTANT (kein
+    Fade -- das Timing/Pop-Gefühl entsteht rein aus dem harten Wort-Wechsel, siehe
+    _render_word_caption_sequence in engine/render.py)."""
+    font_size = round(height * 0.075)
+    font = _font(font_size)
+    tmp_draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    max_w = width * 0.85
+    bbox = tmp_draw.textbbox((0, 0), text, font=font)
+    tw = bbox[2] - bbox[0]
+    if tw > max_w:
+        font_size = max(round(font_size * max_w / tw), round(height * 0.03))
+        font = _font(font_size)
+        bbox = tmp_draw.textbbox((0, 0), text, font=font)
+        tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    cx = (width - tw) / 2 - bbox[0]
+    cy = height * 0.72 - th / 2 - bbox[1]  # unteres Drittel, zentriert
+
+    fill = WORD_CAPTION_ACCENT if _ACCENT_WORD_RE.search(text) else WORD_CAPTION_WHITE
+
+    # Weicher Schlagschatten: eigene Ebene, geblurrt, dann unter den Haupttext gelegt --
+    # ein reiner stroke_fill (wie bei den anderen Stilen) ist ein HARTER Rand, hier
+    # zusätzlich ein weicher Tiefenschatten für bessere Lesbarkeit auf hellen Fotos.
+    shadow_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    shadow_draw = ImageDraw.Draw(shadow_layer)
+    shadow_offset = max(2, font_size // 16)
+    shadow_draw.text((cx + shadow_offset, cy + shadow_offset * 1.4), text, font=font,
+                      fill=(0, 0, 0, 190))
+    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=max(2, font_size // 14)))
+
+    img = Image.alpha_composite(Image.new("RGBA", (width, height), (0, 0, 0, 0)), shadow_layer)
+    draw = ImageDraw.Draw(img)
+    draw.text((cx, cy), text, font=font, fill=fill,
+               stroke_width=max(3, font_size // 10), stroke_fill=(0, 0, 0, 255))
+    return img
+
+
+def render_blank(width, height, text=""):
+    """Rein transparentes PNG -- für die Lücke vor dem ersten Wort einer Wort-Caption-
+    Sequenz (engine/render.py::_render_word_caption_sequence). Bewusst NICHT über
+    render_caption("") wiederverwendet: render_caption zeichnet seine halbtransparente
+    Bauchbinden-Box UNABHÄNGIG davon ob der Text leer ist -- das wäre hier ein
+    sichtbarer schwarzer Balken ohne Text, nicht "nichts"."""
+    return Image.new("RGBA", (width, height), (0, 0, 0, 0))
+
+
+def render_word_caption_batch(out_dir, width, height, words):
+    """Rendert EINE PNG pro Wort in `words` (word_0000.png, word_0001.png, ...) über
+    EINEN Subprocess-Aufruf -- die eigentliche Kosten-Optimierung (Python-Start +
+    Pillow-Import passiert einmal pro SZENE, nicht einmal pro WORT). Gleiches Batching-
+    Prinzip wie render_counter_anim_sequence weiter unten."""
+    os.makedirs(out_dir, exist_ok=True)
+    paths = []
+    for i, w in enumerate(words):
+        path = os.path.join(out_dir, f"word_{i:04d}.png")
+        render_word_caption(width, height, w).save(path)
+        paths.append(path)
+    return paths
+
+
 def render_chapter(width, height, text):
     """Chapter-title card: centered, smaller than a callout, no box -- a brief scene-
     setting label rather than a shouted number. Shown at a sequence's first scene."""
@@ -206,7 +297,8 @@ def render_counter_anim_sequence(width, height, from_val, to_val, n_frames, fmt,
 
 
 RENDERERS = {"caption": render_caption, "callout": render_callout,
-              "chapter": render_chapter, "counter": render_counter}
+              "chapter": render_chapter, "counter": render_counter,
+              "word_caption": render_word_caption, "blank": render_blank}
 
 # Phase E title-card accent colors — same key fingerprint as PHASE_COLOR_FILTER in
 # dashboard.py so a "CLIMAX" scene's title-card underline matches the warm red the
@@ -280,6 +372,11 @@ def main():
         label_b64 = sys.argv[10]
         label = base64.b64decode(label_b64).decode("utf-8") if label_b64 else ""
         render_counter_anim_sequence(width, height, from_val, to_val, n_frames, fmt, label, out_path)
+        return
+    if style == "word_caption_batch":
+        # Schritt 3: argv = out_dir, width, height, "word_caption_batch", words_json_b64
+        words = json.loads(base64.b64decode(text_b64).decode("utf-8"))
+        render_word_caption_batch(out_path, width, height, words)
         return
     fn = RENDERERS.get(style)
     if not fn:

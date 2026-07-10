@@ -1334,6 +1334,10 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
                 # spezifischere eigene Referenz (chain_refs = gleicher Shot, entity_refs =
                 # erste Erscheinung desselben Charakters) — dann NIE zwei Bilder gleichzeitig
                 # (siehe Farb-Inkonsistenz-Fix), sondern nur die spezifischere.
+                # Lokale Pfade (aus Charsheets) in öffentliche URLs wandeln
+                if entity_debug.get("is_local"):
+                    entity_refs = [get_public_charsheet_url(ref) for ref in entity_refs]
+
                 has_prior_ref = bool(chain_refs) or bool(entity_refs)
                 use_style_ref = bool(style_ref_url) and not has_prior_ref
                 # Juli 2026 (User-Report: falscher Charakter generiert): der Kanal kann
@@ -1396,6 +1400,26 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
                                     local_path = os.path.join(v_out(cid, vid), ref_file)
                                     if os.path.exists(local_path):
                                         fresh_refs.append(upload_image_public(local_path))
+                            # Juli 2026 Fix (Audit A4): der Retry ließ den Entity-Anker
+                            # (Charakter-Referenz) bisher komplett weg — ein Submit-Fehler
+                            # wegen abgelaufener chain_refs führte dazu, dass der Retry ganz
+                            # OHNE Charakter-Referenz lief, selbst wenn die entity_refs-URL
+                            # noch gültig gewesen wäre. Zwei Fälle: "anchor-scene" ist eine
+                            # KIE-CDN-URL mit TTL — die lokale Bilddatei frisch neu hochladen,
+                            # genau wie bei den chain_refs oben. Lokale Charsheets ebenfalls 
+                            # frisch hochladen (Cache löschen).
+                            if entity_debug.get("source") == "anchor-scene" and entity_debug.get("entity_anchor_file"):
+                                local_path = os.path.join(v_out(cid, vid), entity_debug["entity_anchor_file"])
+                                if os.path.exists(local_path):
+                                    fresh_refs.append(upload_image_public(local_path))
+                            elif entity_debug.get("is_local") and entity_debug.get("entity_anchor_file"):
+                                local_path = entity_debug["entity_anchor_file"]
+                                if os.path.exists(local_path):
+                                    with _CHARSHEET_UPLOAD_LOCK:
+                                        _CHARSHEET_UPLOAD_CACHE.pop(local_path, None)
+                                    fresh_refs.append(get_public_charsheet_url(local_path))
+                            elif entity_refs:
+                                fresh_refs.extend(entity_refs)
                             if use_style_ref:
                                 fresh_refs.append(style_ref_url)
                             IMAGE_GEN_SEMAPHORE.acquire()
@@ -1614,7 +1638,12 @@ def _render_worker(cid: str, vid: str):
         # selbst der Resume-Marker: schon getrimmt + Szenen schon ausgerichtet heißt
         # kein erneuter Whisper-Lauf bei einem Wiederholungs-Render.
         trimmed_audio_path = os.path.join(v_uploads(cid, vid), "voiceover_trimmed.wav")
-        needs_alignment = any(s.get("start_aligned") is None for s in scenes)
+        # Cinematic-Mix Juli 2026 (Schritt 3): auch neu alignen, wenn start_aligned
+        # zwar schon gesetzt ist, aber `words` (Wort-Slices für die 1-Wort-Captions)
+        # fehlt -- z.B. bei einem VOR diesem Feature bereits erfolgreich gerenderten
+        # Video. Ohne diesen Zusatz-Check würde die Resume-Optimierung unten stillschweigend
+        # überspringen und die alten Bauchbinden-Captions blieben für immer aktiv.
+        needs_alignment = any(s.get("start_aligned") is None or not s.get("words") for s in scenes)
         # ElevenLabs fast-path: when audio_meta.json carries word timestamps (Phase 1),
         # we still need pause-trim, but the SLOW step (Whisper transcription) is replaced
         # by the provider-side timestamps we already captured at generate-time. The same
@@ -1634,6 +1663,17 @@ def _render_worker(cid: str, vid: str):
                     whisper_words = whisper_result["words"]
                     whisper_lang  = whisper_result.get("language", "unknown")
                     whisper_prob  = whisper_result.get("language_probability", 0.0)
+                # Juli 2026 Fix: "..."-Enrichment-Marker aus der ElevenLabs-Wortliste
+                # entfernen, BEVOR Pausen-Trim und Alignment darauf laufen — siehe
+                # _strip_pause_tokens() Docstring. No-Op für Whisper (kennt solche
+                # Tokens nicht), also gefahrlos für beide Pfade.
+                n_before_strip = len(whisper_words)
+                whisper_words = _strip_pause_tokens(whisper_words)
+                if len(whisper_words) != n_before_strip:
+                    print(f"  [{'ElevenLabs' if whisper_lang == 'elevenlabs' else 'Whisper'}] "
+                          f"{n_before_strip - len(whisper_words)} Pausen-Marker-Token(s) vor "
+                          f"Alignment entfernt ({n_before_strip} → {len(whisper_words)} Wörter).",
+                          flush=True)
                 trims = _compute_pause_trims(whisper_words)
                 _trim_audio_pauses(audio_path, trims, trimmed_audio_path)
                 adjusted_words = _adjust_words_for_trims(whisper_words, trims)
@@ -1685,9 +1725,14 @@ def _render_worker(cid: str, vid: str):
             s["_frames"] = f
 
         stage("motion")
+        # Immer frisch berechnen, nicht cachen: _motion_for_scene ist reine, günstige
+        # Regellogik (kein LLM-Call) -- ein "if not s.get('motion')"-Guard würde nach
+        # einer Motion-Bibliotheks-Änderung (wie der Juli-2026-Bereinigung) die ALTE,
+        # in plan.json gespeicherte Motion für immer weiter benutzen, obwohl der Code
+        # längst korrigiert ist. transition_type wird aus demselben Grund ebenfalls
+        # jedes Mal neu berechnet, kein Cache-Guard.
         for idx, s in enumerate(scenes):
-            if not s.get("motion"):
-                s["motion"] = _motion_for_scene(s, scenes[idx - 1] if idx > 0 else None)
+            s["motion"] = _motion_for_scene(s, scenes[idx - 1] if idx > 0 else None)
 
         # Transition points (same rule as the whoosh SFX event) get their PRECEDING
         # scene's clip rendered with extra frames — exactly THIS transition's own
@@ -1697,9 +1742,15 @@ def _render_worker(cid: str, vid: str):
         # uncompensated sum of both scenes' planned durations, keeping the frame-exact
         # sync invariant intact regardless of which duration was used.
         transition_at = [idx for idx in range(len(scenes)) if _has_transition_before(scenes, idx)]
+        # transition_seq_idx (Position INNERHALB transition_at, nicht der rohe
+        # Szenenindex) treibt die Sub-Typ-Rotation in _transition_for_scene --
+        # Feinschliff Runde 2, siehe dessen Docstring. Einmal als Lookup gebaut, damit
+        # der zweite Loop unten (Crossfade-Merge) dieselbe Position ohne O(n)-.index()
+        # nachschlagen kann.
+        transition_seq_idx_by_scene_idx = {idx: pos for pos, idx in enumerate(transition_at)}
         for idx in transition_at:
             prev = scenes[idx - 1]
-            _ttype, _sfx, t_duration = _transition_for_scene(scenes[idx], idx)
+            _ttype, _sfx, t_duration = _transition_for_scene(scenes[idx], transition_seq_idx_by_scene_idx[idx])
             transition_frames = round(t_duration * RENDER_FPS)
             prev["_frames"] = (prev.get("_frames") or round(prev["dur"] * RENDER_FPS)) + transition_frames
 
@@ -1727,7 +1778,7 @@ def _render_worker(cid: str, vid: str):
         for idx, s in enumerate(scenes):
             path = clip_paths[idx]
             if idx in transition_at and merged_paths:
-                transition_type, _sfx, t_duration = _transition_for_scene(s, idx)
+                transition_type, _sfx, t_duration = _transition_for_scene(s, transition_seq_idx_by_scene_idx[idx])
                 s["transition_type"] = transition_type  # sichtbar in plan.json, zum Nachvollziehen
                 merged_path = os.path.join(render_dir, f"xfade_{s['i']:03d}.mp4")
                 _crossfade_clips(merged_paths[-1], path, merged_path, t_duration, transition_type)
@@ -1744,10 +1795,14 @@ def _render_worker(cid: str, vid: str):
 
         stage("audio")
         final_path = os.path.join(v_out(cid, vid), "final.mp4")
-        # Sound-design layer (Phase 2.5) — ducked music bed + rule-based SFX, or just the
-        # raw voiceover unchanged if no music asset is present (see _build_final_audio).
-        mixed_audio_path = _build_final_audio(audio_path, scenes, render_dir)
-        _mux_audio(silent_path, mixed_audio_path, final_path)
+        # User-Entscheidung Juli 2026: keine Musik/SFX mehr im Render -- der User legt
+        # Soundeffekte künftig selbst extern über die fertige Sprecherspur. Nur noch die
+        # bereits pausen-gekürzte Sprecherspur (audio_path) wird gemuxt, unverändert.
+        # engine/audio.py (_build_final_audio + Sound-Design-Kette aus Schritt 1+2)
+        # bleibt im Repo erhalten (getestet, reaktivierbar), wird hier nur nicht mehr
+        # aufgerufen. Die frame-genaue Sync-Invariante ist davon unberührt -- die
+        # arbeitet ausschließlich auf den Video-Clip-Längen, nicht auf der Audiospur.
+        _mux_audio(silent_path, audio_path, final_path)
 
         stage("review")
         checks = _render_selfcheck(final_path, audio_duration)
@@ -1766,6 +1821,13 @@ def _render_worker(cid: str, vid: str):
                     if s.get("start_aligned") is not None:
                         by_i[s["i"]]["start_aligned"] = s["start_aligned"]
                         by_i[s["i"]]["end_aligned"] = s["end_aligned"]
+                    # Cinematic-Mix Juli 2026 (Schritt 3): `words` (Wort-Slices für die
+                    # 1-Wort-Captions) mitpersistieren -- sonst würde needs_alignment
+                    # (oben) bei JEDEM künftigen Resume-Render erneut True liefern und
+                    # die Whisper/ElevenLabs-Ausrichtung unnötig wiederholen, obwohl
+                    # start_aligned längst korrekt vorliegt.
+                    if s.get("words") is not None:
+                        by_i[s["i"]]["words"] = s["words"]
             fresh_plan["audio_duration"] = audio_duration
             fresh_plan["render"] = {"file": "final.mp4", "ts": int(time.time()), "checks": checks}
             _atomic_write_json(plan_path, fresh_plan, ensure_ascii=False, indent=1)
@@ -1795,6 +1857,48 @@ def _render_worker(cid: str, vid: str):
         if not cleanup_done:
             shutil.rmtree(render_dir, ignore_errors=True)
             _log("INFO", "render_tmp_cleanup_on_error", cid=cid, vid=vid)
+
+
+def _preserve_rendered_scenes(prev_scenes: dict, scenes: list) -> int:
+    """Carries file/status/source_url/source_url_ts over from a previous plan's scenes
+    into a freshly-built `scenes` list, matched by normalized scene TEXT (not index —
+    indices shift whenever the scene count changes between the old and new plan, but
+    the text of an unchanged scene doesn't).
+
+    Juli 2026 Fix (Audit A5, "Voiceover-Neugenerierung verwaist gerenderte Bilder"):
+    this logic originally only existed inline in _plan_generate_worker (the manual-
+    script path). _transcribe_generate_worker (the ElevenLabs-voiceover path) rebuilds
+    plan.json from scratch on every voiceover regenerate/resume and had NO equivalent —
+    every scene's `file`/`source_url` got reset to None even though the actual images on
+    disk were correctly left untouched (see the `is_elevenlabs` branch above that skips
+    deleting files). The plan.json → disk link was the only thing that broke; extracting
+    this into a shared helper lets both workers use the identical, already-proven
+    text-matching heuristic instead of drifting into two slightly different behaviors.
+
+    Mutates `scenes` in place. Returns how many scenes were preserved.
+    """
+    def _norm_text(t):
+        return " ".join((t or "").lower().split())
+    preserved = 0
+    if not prev_scenes:
+        return preserved
+    new_by_text = {}
+    for s in scenes:
+        nt = _norm_text(s.get("text", ""))
+        if nt:
+            new_by_text.setdefault(nt, []).append(s)
+    for _i, prev in prev_scenes.items():
+        nt = _norm_text(prev.get("text", ""))
+        candidates = new_by_text.get(nt, [])
+        if not candidates:
+            continue
+        ns = candidates.pop(0)
+        ns["file"] = prev.get("file")
+        ns["status"] = prev.get("status", "fertig")
+        ns["source_url"] = prev.get("source_url")
+        ns["source_url_ts"] = prev.get("source_url_ts")
+        preserved += 1
+    return preserved
 
 
 def _plan_generate_worker(cid: str, vid: str, text: str, wpm: float, sec: float):
@@ -1882,9 +1986,6 @@ def _plan_generate_worker(cid: str, vid: str, text: str, wpm: float, sec: float)
         # zurückzufallen. Verhindert den Bug dass ein versehentlicher Doppelklick
         # auf "Plan aus Skript erstellen" während eines laufenden Batch-Renders alle
         # 91 fertigen Bilder als "geplant" markiert.
-        def _norm_text(t):
-            return " ".join((t or "").lower().split())
-        preserved = 0
         for s, pr in zip(scenes, prompts):
             s["prompt"] = pr["prompt"]; s["concrete_entity"] = pr["concrete_entity"]; s["file"] = None
             s["status"] = "geplant"; s["t"] = fmt_t(s["start"])
@@ -1900,26 +2001,10 @@ def _plan_generate_worker(cid: str, vid: str, text: str, wpm: float, sec: float)
         # Race-Fix (Fortsetzung): Preserve gerenderte States aus prev_scenes wenn Text
         # identisch ist. Überschreibt nur file/status/source_url/t/source_url_ts, lässt
         # den frisch generierten prompt/concrete_entity/video_prompt/phasen unangetastet.
-        if prev_scenes:
-            new_by_text = {}
-            for s in scenes:
-                nt = _norm_text(s.get("text", ""))
-                if nt:
-                    new_by_text.setdefault(nt, []).append(s)
-            for i, prev in prev_scenes.items():
-                nt = _norm_text(prev.get("text", ""))
-                candidates = new_by_text.get(nt, [])
-                if not candidates:
-                    continue
-                ns = candidates.pop(0)
-                ns["file"] = prev.get("file")
-                ns["status"] = prev.get("status", "fertig")
-                ns["source_url"] = prev.get("source_url")
-                ns["source_url_ts"] = prev.get("source_url_ts")
-                preserved += 1
-            if preserved:
-                print(f"  [Plan] {preserved} bereits gerenderte Szene(n) erhalten "
-                      f"(gleicher Text, file+status aus altem Plan übernommen).", flush=True)
+        preserved = _preserve_rendered_scenes(prev_scenes, scenes)
+        if preserved:
+            print(f"  [Plan] {preserved} bereits gerenderte Szene(n) erhalten "
+                  f"(gleicher Text, file+status aus altem Plan übernommen).", flush=True)
         if prompt_error_scenes:
             print(f"  [Plan] WARNUNG: {len(prompt_error_scenes)} Szene(n) mit fehlgeschlagener "
                   f"Prompt-Generierung (prompt_error): {prompt_error_scenes} — Prompt-Text vor "
@@ -2140,7 +2225,8 @@ def _produce_worker(cid: str, vid: str, text: str = "", wpm: float = 130.0, sec:
         set_stage("render")
         with _RENDER_JOBS_LOCK:
             RENDER_JOBS[key] = {"running": True, "stop_requested": False, "stage": "startet",
-                                 "done": 0, "total": 0, "error": None, "file": None}
+                                 "done": 0, "total": 0, "error": None, "file": None,
+                                 "started_ts": time.time()}
         _render_worker(cid, vid)
         with _RENDER_JOBS_LOCK:
             render_state = dict(RENDER_JOBS.get(key, {}))
@@ -2225,20 +2311,52 @@ def _multipart_upload(url: str, field: str, filename: str, data: bytes, mime: st
              + f"Content-Type: {mime}\r\n\r\n".encode()
              + data + b"\r\n--" + boundary + b"--\r\n")
     req = urllib.request.Request(url, data=body,
-                                 headers={"Content-Type": f"multipart/form-data; boundary={boundary.decode()}"})
+                                 headers={
+                                     "Content-Type": f"multipart/form-data; boundary={boundary.decode()}",
+                                     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+                                 })
     with urllib.request.urlopen(req, timeout=60) as r:
         return r.read().decode().strip()
 
 
+_CHARSHEET_UPLOAD_CACHE = {}
+_CHARSHEET_UPLOAD_LOCK = threading.Lock()
+
+def get_public_charsheet_url(local_path: str) -> str:
+    """Gets or uploads a local charsheet image. Ensures each file is only uploaded once per server session."""
+    with _CHARSHEET_UPLOAD_LOCK:
+        if local_path in _CHARSHEET_UPLOAD_CACHE:
+            return _CHARSHEET_UPLOAD_CACHE[local_path]
+    
+    url = upload_image_public(local_path)
+    
+    with _CHARSHEET_UPLOAD_LOCK:
+        _CHARSHEET_UPLOAD_CACHE[local_path] = url
+    return url
+
+
 def upload_image_public(local_path: str) -> str:
-    """Upload local image to a public host, return URL. Tries litterbox → tmpfiles."""
+    """Upload local image to a public host, return URL. Uses catbox.moe."""
     with open(local_path, "rb") as f:
         data = f.read()
     ext   = os.path.splitext(local_path)[1].lower() or ".png"
     mime  = "image/png" if ext == ".png" else "image/jpeg"
     fname = "image" + ext
 
-    # Try litterbox.catbox.moe (72h temp, reliable)
+    # Try catbox.moe (permanent, reliable, returns raw image)
+    try:
+        url = _multipart_upload(
+            "https://catbox.moe/user/api.php",
+            "fileToUpload", fname, data, mime,
+            extra_fields={"reqtype": "fileupload"}
+        )
+        if url.startswith("http"):
+            print(f"  [Upload] catbox → {url}", flush=True)
+            return url
+    except Exception as e:
+        print(f"  [Upload] catbox fehlgeschlagen: {e} — versuche litterbox …", flush=True)
+
+    # Fallback: litterbox.catbox.moe (72h temp)
     try:
         url = _multipart_upload(
             "https://litterbox.catbox.moe/resources/internals/api.php",
@@ -2249,17 +2367,8 @@ def upload_image_public(local_path: str) -> str:
             print(f"  [Upload] litterbox → {url}", flush=True)
             return url
     except Exception as e:
-        print(f"  [Upload] litterbox fehlgeschlagen: {e} — versuche tmpfiles …", flush=True)
-
-    # Fallback: tmpfiles.org
-    resp = _multipart_upload("https://tmpfiles.org/api/v1/upload", "file", fname, data, mime)
-    try:
-        j = json.loads(resp)
-        url = j["data"]["url"].replace("tmpfiles.org/", "tmpfiles.org/dl/")
-        print(f"  [Upload] tmpfiles → {url}", flush=True)
-        return url
-    except Exception:
-        raise ValueError(f"Upload fehlgeschlagen: {resp}")
+        print(f"  [Upload] litterbox fehlgeschlagen: {e}", flush=True)
+        raise ValueError(f"Upload fehlgeschlagen: {e}")
 
 
 # T2V-Mindest-Promptlänge. HINWEIS: Der gesamte T2V-Pfad (make_t2v_prompt +
@@ -2593,6 +2702,17 @@ def align_scenes_to_whisper(scenes: list, whisper_words: list) -> None:
         end_idx = min(wi + words_in_scene, n) - 1
         s["start_aligned"] = whisper_words[start_idx]["start"]
         s["end_aligned"] = whisper_words[end_idx]["end"]
+        # Cinematic-Mix Juli 2026 (Schritt 3, 1-Wort-Captions): Wort-Slices scene-
+        # relativ ablegen (Offset zu start_aligned, NICHT zu dur/frames -- gleiche
+        # Konvention wie Phase O's accent_t, das ebenfalls direkt gegen start_aligned/
+        # end_aligned rechnet ohne Neuskalierung auf den gerundeten Frame-Takt). Der
+        # Renderer clippt/rundet beim Overlay-Fenster ohnehin defensiv auf clip_dur.
+        s["words"] = [
+            {"word": whisper_words[k]["word"],
+             "start": whisper_words[k]["start"] - s["start_aligned"],
+             "end": whisper_words[k]["end"] - s["start_aligned"]}
+            for k in range(start_idx, end_idx + 1)
+        ]
         wi = end_idx + 1
 
 
@@ -2603,6 +2723,41 @@ def align_scenes_to_whisper(scenes: list, whisper_words: list) -> None:
 # natürlicher Atem-Abstand bleibt erhalten, nur die toten, langen Stellen (z.B. 2-3s
 # zwischen Sätzen in einem 8-Minuten-Voiceover) verschwinden.
 MAX_PAUSE_SEC = 0.3
+
+
+def _strip_pause_tokens(words: list) -> list:
+    """Entfernt Wort-Timestamp-Einträge, deren Text NUR aus Punkten besteht (".", "..",
+    "...", "…") — genau die Marker, die `_enrich_for_tts` einfügt.
+
+    Juli 2026 Fix (verifiziert an echten Daten): `_enrich_for_tts` (engine_elevenlabs.py)
+    fügt vor dem ElevenLabs-Call "..."-Pausen-Marker in den Text ein, um der TTS eine
+    natürlichere Betonung/Atempause zu geben — an einem echten Theranos-Skript maß ich
+    919 Roh-Wörter → 1000 "Wörter" nach Enrichment (81 zusätzliche "..."-Tokens).
+    ElevenLabs liefert für jeden dieser Marker einen eigenen Zeitstempel zurück, der
+    Server persistiert die komplette Wortliste inkl. dieser Tokens in
+    voiceover_word_timestamps.
+
+    `align_scenes_to_whisper` zählt aber `len(scene["text"].split())` Wörter aus dem
+    ROH-Skript (ohne "...") und konsumiert die Wort-Timestamp-Liste sequenziell in
+    dieser Zählung — jedes ungezählte "..."-Token verschiebt den Lesekopf um eins,
+    OHNE dass eine Szene dafür "verantwortlich" ist. Bei 81 Tokens über ein 8-Minuten-
+    Voiceover verteilt lief der Zähler am Ende leer (`wi >= n`), bevor die letzten
+    Szenen ihr `start_aligned` bekamen → geschätztes Timing statt echtem → Schnitt
+    driftet. Diese Funktion entfernt die Phantom-Tokens VOR dem Alignment, sodass die
+    Wortzahl wieder mit dem Roh-Skript übereinstimmt.
+
+    Bewusst NUR reine Punkt-Tokens, nicht "jedes Token ohne alphanumerisches Zeichen" —
+    ein breiterer Filter würde auch eigenständige Satzzeichen-Wörter treffen, die schon
+    im ROH-Skript als eigenes `.split()`-Token stehen (z.B. ein freistehendes "—" oder
+    "/", an echten Skripten beobachtet: "Silicon Valley — and..." zählt "—" als eigenes
+    Wort). Die würden dann auf BEIDEN Seiten (Wortliste UND Szenentext) mitgezählt und
+    blieben im Gleichgewicht — sie rauszufiltern hätte genau das Off-by-one-Problem
+    reproduziert, das dieser Fix beheben soll, nur seltener. "..." dagegen kommt NIE aus
+    dem Original-Skript, sondern ausschließlich aus dem Enrichment — daher der enge,
+    literale Filter statt eines allgemeinen "keine Buchstaben"-Musters. Whisper-
+    Transkripte enthalten "..."-Tokens nie → dort ein No-Op.
+    """
+    return [w for w in words if not re.fullmatch(r"\.+|…+", w.get("word", "").strip())]
 
 
 def _compute_pause_trims(words: list, max_pause: float = MAX_PAUSE_SEC) -> list:
@@ -2735,6 +2890,26 @@ def _transcribe_generate_worker(cid: str, vid: str, sec: float) -> dict:
     # survive every ElevenLabs/plan re-run. This is the July 2026 bug-fix: previously
     # the ElevenLabs path deleted images unconditionally, which wiped a full 73-scene
     # render because the user re-triggered ElevenLabs after images finished.
+    #
+    # Juli 2026 Fix (Audit A5): the file-deletion fix above only solved half the
+    # problem. This function ALWAYS rebuilds plan.json from scratch below (every scene
+    # gets file=None/status="geplant") — even though the files on disk correctly
+    # survive, the JSON's *pointer* to them was destroyed every time a voiceover got
+    # regenerated. `19_year_old_fooled_the_world` (from the user's report) is exactly
+    # this: images physically present, plan.json showing none of them. Same
+    # text-matching heuristic + helper as _plan_generate_worker (_preserve_rendered_scenes),
+    # so both plan-rebuilding paths now behave identically. Only applies on the
+    # ElevenLabs path — the Gemini path just deleted the files above, so there's
+    # nothing valid left to preserve a pointer to.
+    prev_scenes = {}
+    if is_elevenlabs:
+        try:
+            prev_plan = json.load(open(v_plan(cid, vid)))
+            for ps in prev_plan.get("scenes", []):
+                if ps.get("file") and ps.get("status") == "fertig":
+                    prev_scenes[ps["i"]] = ps
+        except Exception:
+            pass
     if not is_elevenlabs:
         out_dir = v_out(cid, vid)
         for f in os.listdir(out_dir):
@@ -2747,7 +2922,7 @@ def _transcribe_generate_worker(cid: str, vid: str, sec: float) -> dict:
         keep = [f for f in os.listdir(v_out(cid, vid))
                  if f.endswith((".jpg", ".png", ".mp4"))]
         print(f"  [Transcribe] ElevenLabs-Pfad: {len(keep)} Bilder/Videos bleiben "
-              f"unangetastet.", flush=True)
+              f"unangetastet ({len(prev_scenes)} Szene(n) im alten Plan als 'fertig' markiert).", flush=True)
 
     if is_elevenlabs:
         words = meta["voiceover_word_timestamps"]
@@ -2767,6 +2942,11 @@ def _transcribe_generate_worker(cid: str, vid: str, sec: float) -> dict:
         scenes.append({"i": i, "start": round(float(b["start"]), 1), "dur": round(float(dur), 1),
                        "text": b["text"], "t": fmt_t(float(b["start"])),
                        "file": None, "status": "geplant", "prompt": ""})
+
+    preserved = _preserve_rendered_scenes(prev_scenes, scenes)
+    if preserved:
+        print(f"  [Transcribe] {preserved} bereits gerenderte Szene(n) erhalten "
+              f"(gleicher Text, file+status aus altem Plan übernommen).", flush=True)
 
     # Whisper-Alignment passiert bewusst NICHT hier, sondern erst in _render_worker
     # (Stage "timing") -- dort liegt so oder so schon das hochgeladene Voice-over vor,
@@ -3608,10 +3788,20 @@ class H(BaseHTTPRequestHandler):
             text = (d.get("text") or "Hallo Welt, das ist ein Stimm-Sample.").strip()[:500]
             settings = {k: d.get(k) for k in (
                 "voice_id", "model_id", "stability", "similarity_boost",
-                "style", "use_speaker_boost", "output_format") if d.get(k) is not None}
+                "style", "speed", "use_speaker_boost", "output_format") if d.get(k) is not None}
+            # Juli 2026 Fix: `settings` wurde bisher gebaut und dann bis auf voice_id
+            # komplett verworfen — "Voice testen" spielte immer die zuletzt GESPEICHERTEN
+            # Slider-Werte vor, nie die, die der Nutzer im Moment gerade zieht (Preview
+            # sollte genau das Gegenteil sein: ein Vorhören VOR dem Speichern). Jetzt: wie
+            # in _tts_persist_and_schedule werden die persistierten Settings geladen und
+            # dann mit den mitgeschickten Werten überschrieben.
+            final_settings = load_voice_settings(cid, override_voice_id=(
+                settings.get("voice_id") if settings.get("voice_id") else ""))
+            for k, v in settings.items():
+                if k in final_settings:
+                    final_settings[k] = v
             try:
-                raw = elevenlabs_generate(text, load_voice_settings(cid, override_voice_id=(
-                    settings.get("voice_id") if settings.get("voice_id") else "")))
+                raw = elevenlabs_generate(text, final_settings)
                 audio_b64 = raw["audio_base64"]
             except Exception as e:
                 return self._send(500, {"error": f"ElevenLabs Preview fehlgeschlagen: {e}"})
@@ -3635,7 +3825,7 @@ class H(BaseHTTPRequestHandler):
             sec = d.get("sec")
             settings = {k: d.get(k) for k in (
                 "voice_id", "model_id", "stability", "similarity_boost",
-                "style", "use_speaker_boost", "output_format", "sec") if d.get(k) is not None}
+                "style", "speed", "use_speaker_boost", "output_format", "sec") if d.get(k) is not None}
             # Resume-Marker: if audio_meta.json + plan.json beide schon vorhanden und
             # voiceover_source == "elevenlabs", KEIN API-Call. Idempotent wie User-Feedback
             # Punkt 3 verlangt.
@@ -3645,8 +3835,17 @@ class H(BaseHTTPRequestHandler):
                 meta = json.load(open(meta_path)) if os.path.exists(meta_path) else {}
             except Exception:
                 meta = {}
-            if (meta.get("voiceover_source") in ("elevenlabs", "minimax")
-                and os.path.exists(meta.get("path", "")) if meta else False
+            # Juli 2026 Fix: die vorherige Fassung dieser Bedingung war
+            # "A and B if meta else False and C and D" — Pythons Operator-Vorrang liest
+            # das als "(A and B) if meta else (False and C and D)", NICHT als
+            # "meta and A and B and C and D" wie die Intention nahelegt. Solange meta
+            # nicht-leer war, wurden C (word_timestamps vorhanden) und D (plan.json
+            # existiert) dadurch NIE geprüft — ein Resume wurde schon gemeldet wenn nur
+            # audio_meta.json + der Audio-Pfad existierten, auch ohne brauchbare
+            # Timestamps oder überhaupt einen Plan.
+            if (bool(meta)
+                and meta.get("voiceover_source") in ("elevenlabs", "minimax")
+                and os.path.exists(meta.get("path", ""))
                 and meta.get("voiceover_word_timestamps")
                 and os.path.exists(plan_p)):
                 src = meta.get("voiceover_source")
@@ -3840,15 +4039,39 @@ class H(BaseHTTPRequestHandler):
         # ── Auto-rendering (Ken Burns clips -> concat -> audio mux) ─────────────
         if p == "/api/render_start":
             if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
+            force = bool(d.get("force", False))
             key = (cid, vid)
             with _RENDER_JOBS_LOCK:
                 if RENDER_JOBS.get(key, {}).get("running"):
                     return self._send(200, {"ok": True, "already_running": True})
+                # Juli 2026 Fix (Audit 4.2): _apply_sync_invariant stretches whatever
+                # scenes DO have a generated file across the FULL audio duration — a
+                # render with e.g. 20/96 rendered scenes silently produces a full-length
+                # video where each of those 20 images is shown ~5x longer than intended,
+                # no warning anywhere. Surface the partial-render fact BEFORE starting so
+                # the frontend can confirm() with the user; `force: true` skips this once
+                # confirmed (same pattern as /api/generate_all_start's `force`).
+                if not force:
+                    try:
+                        plan_for_check = json.load(open(v_plan(cid, vid)))
+                        total_scenes = len(plan_for_check.get("scenes", []))
+                        rendered_scenes = sum(1 for s in plan_for_check.get("scenes", []) if s.get("file"))
+                    except Exception:
+                        total_scenes = rendered_scenes = 0
+                    if total_scenes and rendered_scenes < total_scenes:
+                        return self._send(200, {
+                            "ok": False, "partial": True,
+                            "rendered": rendered_scenes, "total": total_scenes,
+                        })
                 # Same atomic "set running=True before the thread exists" fix as
                 # generate_all_start above — avoids two rapid start calls each
                 # spinning up their own render worker on the same video.
+                # started_ts: für die ETA-Berechnung im Frontend (Fortschrittsbalken).
+                # stage() unten aktualisiert den Job-Dict nur per .update(), started_ts
+                # bleibt also über die gesamte Render-Laufzeit erhalten.
                 RENDER_JOBS[key] = {"running": True, "stop_requested": False, "stage": "startet",
-                                     "done": 0, "total": 0, "error": None, "file": None}
+                                     "done": 0, "total": 0, "error": None, "file": None,
+                                     "started_ts": time.time()}
             threading.Thread(target=_render_worker, args=(cid, vid), daemon=True).start()
             return self._send(200, {"ok": True, "already_running": False})
 
@@ -3907,27 +4130,41 @@ class H(BaseHTTPRequestHandler):
             # Phase C: read phase from plan.json so the image prompt gets the
             # PHASE_PROMPT_ADDITIONS hard-injection when available. plan.json is the
             # single source of truth for scene state.
+            # Juli 2026 Fix (NameError-Edge): scene_for_phase MUSS vor dem try existieren —
+            # vorher warf ein fehlschlagender json.load() eine NameError auf der
+            # anschließenden scene_for_phase.get()-Zeile, weil die except-Klausel nur
+            # scene_phase zurücksetzte, nie scene_for_phase selbst.
+            scene_for_phase = {}
             try:
                 plan = json.load(open(v_plan(cid, vid)))
                 scene_for_phase = (plan.get("scenes") or [{}])[i] if i < len(plan.get("scenes", [])) else {}
                 scene_phase = scene_for_phase.get("phase", "")
             except Exception:
+                plan = {}
                 scene_phase = ""
             entity = str(scene_for_phase.get("concrete_entity", ""))
             full_prompt = _build_image_prompt(prompt, read_master(cid), None, phase=scene_phase)
-            # Cross-scene character continuity (Juli 2026, User-Report: "Elizabeth sieht
-            # in jeder Szene anders aus") — same reasoning as _resolve_entity_ref in the
-            # batch worker, just without the wait-for-concurrent-sibling logic: a manual
-            # single-scene click is on-demand, so we simply use whatever's already in
-            # plan.json instead of blocking. Always the FIRST generated scene of this
-            # character (fixed anchor, avoids drift), never the most recent one.
-            entity_refs = []
-            if entity.startswith("char_"):
-                earlier = [s for s in plan.get("scenes", [])
-                           if s.get("concrete_entity") == entity and s.get("i", -1) < i and s.get("source_url")]
-                if earlier:
-                    anchor = min(earlier, key=lambda s: s["i"])
-                    entity_refs = [anchor["source_url"]]
+            # Juli 2026 Fix (Audit A2 "generate_one hat den Fallback-Fix nicht"): dieser
+            # Pfad hatte bisher eine eigene, abgespeckte Inline-Logik, die NUR source_url
+            # kannte — ausgerechnet der manuelle "Neu generieren"-Klick (mit dem man
+            # schlechte Bilder korrigiert) hatte dadurch NIE den 3-Stufen-Fallback
+            # (Charsheet-PNG, Name-Match, lokale Bilddatei) aus _resolve_entity_ref, den
+            # der Batch-Worker seit Juli 2026 hat. Jetzt identische Logik, nur mit
+            # wait=False (kein paralleler Sibling-Dispatch bei einem Einzelklick, also
+            # kein Grund auf eine Anchor-Szene zu warten).
+            entity_refs, entity_debug = _resolve_entity_ref(v_plan(cid, vid), scene_for_phase, wait=False)
+            if entity_debug.get("is_local"):
+                entity_refs = [get_public_charsheet_url(ref) for ref in entity_refs]
+            
+            if entity_refs:
+                if scene_for_phase.get("seq_id") is not None and scene_for_phase.get("seq_pos", 0) >= 1:
+                    full_prompt += (
+                        "\n\nCONTINUITY (STRICT): This is a continuation of the exact same "
+                        "shot as the reference image(s). You MUST perfectly match the "
+                        "identity, outfit, and background environment shown in the "
+                        "references. Change ONLY the camera angle/framing or the specific "
+                        "action described above.")
+                else:
                     full_prompt += (
                         "\n\nCHARACTER CONTINUITY: One reference image shows this same "
                         "character from an earlier scene in this video. You MUST keep "
@@ -3951,8 +4188,9 @@ class H(BaseHTTPRequestHandler):
             # _batch_generate_worker). Keine Charsheet-Text/Bild-Injection mehr (alte,
             # kanalweite Charsheets aus einem anderen Video überstimmten sonst die
             # Szenenbeschreibung).
-            use_style_ref = bool(style_ref_url) and not entity_refs
-            refs = entity_refs + ([style_ref_url] if use_style_ref else [])
+            chain_refs, chain_debug = _resolve_chain_refs(v_plan(cid, vid), scene_for_phase)
+            use_style_ref = bool(style_ref_url) and not (entity_refs or chain_refs)
+            refs = chain_refs + entity_refs + ([style_ref_url] if use_style_ref else [])
             try:
                 task_id = _kie_submit_image(full_prompt, model=get_video_image_model(cid, vid),
                                              ref_urls=refs or None)
@@ -3970,7 +4208,8 @@ class H(BaseHTTPRequestHandler):
                     plan = json.load(open(v_plan(cid, vid)))
                     for s in plan["scenes"]:
                         if s["i"] == i:
-                            s["prompt"] = prompt; s["status"] = "läuft"
+                            if prompt: s["prompt"] = prompt
+                            s["status"] = "läuft"
                     _atomic_write_json(v_plan(cid, vid), plan, ensure_ascii=False, indent=1)
                 except: pass
             threading.Thread(
@@ -4094,7 +4333,13 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True, "file": fn, "video_prompt": video_prompt, "ts": int(time.time())})
 
         # ── Set canonical character reference URL ─────────────────────────────
-        if p == "/api/set_char_ref":
+        # Juli 2026 Fix: dashboard.html ruft '/api/set_style_ref' auf (der Endpoint
+        # wurde intern längst zu einem reinen Stil-Anker umgebaut, siehe
+        # get_channel_style_ref()/style_ref_url.txt), aber die Route hieß noch
+        # '/api/set_char_ref' — der Button im Stil-Tab lief seit dem Umbau ins Leere
+        # (404). Beide Namen akzeptieren statt umzubenennen, damit nichts anderes
+        # bricht, das noch den alten Namen aufruft.
+        if p in ("/api/set_char_ref", "/api/set_style_ref"):
             url = d.get("url", "").strip()
             ref_path = os.path.join(ch_dir(cid), "style_ref_url.txt")
             if not url:
@@ -4107,7 +4352,8 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True, "url": url})
 
         # ── Generate + upload canonical character reference image ──────────────
-        if p == "/api/gen_char_ref":
+        # Gleicher Alias-Grund wie bei set_char_ref/set_style_ref oben.
+        if p in ("/api/gen_char_ref", "/api/gen_style_ref"):
             master = ""
             try: master = open(ch_master(cid)).read().strip()
             except: pass

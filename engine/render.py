@@ -43,6 +43,7 @@ Externe Abhängigkeiten (lazy importiert, um Zyklen zu vermeiden):
 from __future__ import annotations
 
 import base64
+import json
 import os
 import subprocess
 
@@ -76,7 +77,7 @@ __all__ = [
     "_overlay_specs_for_scene",
     "_render_clip", "_assemble_clips", "_mux_audio", "_render_selfcheck",
     "_transition_for_scene", "_transition_after_hook", "_has_transition_before",
-    "_clip_duration_sec", "_crossfade_clips",
+    "_clip_duration_sec", "_crossfade_clips", "_render_word_caption_sequence",
     "render_text_overlay_png", "render_title_card_png_via_venv",
 ]
 
@@ -91,49 +92,96 @@ __all__ = [
 # Crop-Ausschnitt beim Wandern des Fokuspunkts über den Bildrand hinauslaufen.
 
 MOTION_LIBRARY = {
-    "zoom_in":        {"z0": 1.0,  "z1": 1.12, "focus0": (0.5, 0.45),  "focus1": (0.5, 0.45)},
-    "zoom_out":       {"z0": 1.12, "z1": 1.0,  "focus0": (0.5, 0.45),  "focus1": (0.5, 0.45)},
-    "pan_left":       {"z0": 1.08, "z1": 1.08, "focus0": (0.64, 0.48), "focus1": (0.36, 0.48)},
-    "pan_right":      {"z0": 1.08, "z1": 1.08, "focus0": (0.36, 0.48), "focus1": (0.64, 0.48)},
-    "tilt_up":        {"z0": 1.08, "z1": 1.08, "focus0": (0.5, 0.64),  "focus1": (0.5, 0.36)},
-    "tilt_down":      {"z0": 1.08, "z1": 1.08, "focus0": (0.5, 0.36),  "focus1": (0.5, 0.64)},
-    "dolly_in":       {"z0": 1.0,  "z1": 1.08, "focus0": (0.42, 0.46), "focus1": (0.58, 0.46)},
-    "dolly_out":      {"z0": 1.08, "z1": 1.0,  "focus0": (0.58, 0.46), "focus1": (0.42, 0.46)},
-    "diagonal_glide": {"z0": 1.04, "z1": 1.1,  "focus0": (0.4, 0.4),   "focus1": (0.6, 0.55)},
-    "snap_zoom_in":   {"z0": 1.0,  "z1": 1.25, "focus0": (0.5, 0.45),  "focus1": (0.5, 0.45)},
+    # Reiner Zoom: Fokuspunkt FEST, nur die Zoomstufe ändert sich. Feinschliff Runde 2
+    # (Juli 2026): 1.12 -> 1.3 -- User-Vorgabe 120-140% GENAUSO für Zoom wie für Pan/Tilt.
+    "zoom_in":        {"z0": 1.0,  "z1": 1.3,  "focus0": (0.5, 0.45),  "focus1": (0.5, 0.45)},
+    "zoom_out":       {"z0": 1.3,  "z1": 1.0,  "focus0": (0.5, 0.45),  "focus1": (0.5, 0.45)},
+    # Reiner Slide/Pan: Zoomstufe FEST bei 1.3 (Runde 1). Feinschliff Runde 2: die
+    # Fokus-Wanderung war mit ±14% um die Mitte (0.64<->0.36) bei DIESEM Zoom-Level zu
+    # groß -- derselbe absolute Weg wirkt im kleineren, gezoomten Ausschnitt schneller
+    # als vorher bei 1.08. User-Feedback: "ganz langsam übers Bild wandeln", "nur leicht
+    # zentriert aus der Mitte raus/rein". Wanderung auf ±8% (0.58<->0.42) reduziert --
+    # spürbar langsamer UND bleibt immer nah der Mitte (nie nah am Bildrand).
+    "pan_left":       {"z0": 1.3,  "z1": 1.3,  "focus0": (0.58, 0.48), "focus1": (0.42, 0.48)},
+    "pan_right":      {"z0": 1.3,  "z1": 1.3,  "focus0": (0.42, 0.48), "focus1": (0.58, 0.48)},
+    "tilt_up":        {"z0": 1.3,  "z1": 1.3,  "focus0": (0.5, 0.58),  "focus1": (0.5, 0.42)},
+    "tilt_down":      {"z0": 1.3,  "z1": 1.3,  "focus0": (0.5, 0.42),  "focus1": (0.5, 0.58)},
+    # Hook/Punchy-Spezialeffekt (Runde 1) -- bewusst kurz + energisch, NICHT Ziel dieses
+    # Feedbacks, bleibt bei 1.16. Fokus fest -- reiner Zoom.
+    "snap_zoom_in":   {"z0": 1.0,  "z1": 1.16, "focus0": (0.5, 0.45),  "focus1": (0.5, 0.45)},
+    # Feinschliff Runde 2: "static" ist ab jetzt NUR noch der technische Fallback für
+    # Szenen mit dur<1.2s (zu kurz für sichtbare Bewegung ohne Ruckeln) -- taucht in
+    # KEINER stilistischen Auswahlliste mehr auf ("jede Szene braucht einen Effekt").
     "static":         {"z0": 1.02, "z1": 1.02, "focus0": (0.5, 0.5),   "focus1": (0.5, 0.5)},
 }
+
+# Schritt 4.3: Hook-Intensität 1.2 -> 1.0 (kein zusätzlicher Verstärkungsfaktor mehr --
+# snap_zoom_in ist mit dem gesenkten z1=1.16 schon energisch genug für den Hook-Beat).
+HOOK_MOTION_INTENSITY = 1.0
+
+# Schritt 4.2: Gegenrichtung der jeweils VORHERIGEN Szene -- wird in
+# _pick_motion_avoiding_reversal gemieden, damit zwei aufeinanderfolgende Szenen nicht
+# als Ping-Pong wirken (pan_left direkt nach pan_right etc.). Bewegungen ohne
+# Richtungs-Gegenstück (static/snap_zoom_in) haben keinen Eintrag.
+_OPPOSITE_MOTION = {
+    "pan_left": "pan_right", "pan_right": "pan_left",
+    "tilt_up": "tilt_down", "tilt_down": "tilt_up",
+    "zoom_in": "zoom_out", "zoom_out": "zoom_in",
+}
+
+# Schritt 4.1: regelbasierte Motion-Kandidaten aus dem Bild-Prompt-Text -- kein LLM-
+# Call, reines Keyword-Matching auf dem Shot-Vokabular, das analyze_script bereits in
+# jeden Prompt schreibt ("close-up", "wide shot", "top-down", ...). Reihenfolge ist
+# Priorität: Dokument/Screen zuerst (Lesbarkeit schlägt Intimitäts-Zoom -- ein
+# schwenkender Zoom über Bildschirmtext macht ihn unlesbar), dann Close-up, Wide,
+# zuletzt der generische Portrait-Fallback.
+_SHOT_HINT_RULES = [
+    (("top-down", "document", "screen", "monitor", "touchscreen", "report", "paper"),
+     ["tilt_down"]),
+    (("close-up", "close up", "tight shot", "extreme close-up"),
+     ["zoom_in"]),
+    (("wide shot", "wide-angle", "wide angle", "establishing shot", "aerial", "bird's-eye"),
+     ["pan_left", "pan_right"]),
+    (("medium shot", "stands", "standing", "portrait"),
+     ["zoom_in"]),
+]
 
 # Auswahl-Kandidaten nach `pacing` — vorbereitet für `phase` (Story-Phase-Engine):
 # wenn scene.get("phase") künftig gesetzt ist, wird das bevorzugt, sonst fällt die
 # Auswahl auf pacing zurück. Kein Zufall (Resume-Determinismus, ARCHITECTURE §13/§15.1)
 # — Auswahl über scene["i"] % len(candidates).
 _PACING_MOTION_CANDIDATES = {
-    "calm":   ["pan_left", "pan_right", "tilt_up", "tilt_down", "dolly_out"],
-    "normal": ["zoom_in", "zoom_out", "dolly_in", "pan_left", "pan_right"],
-    "punchy": ["snap_zoom_in", "diagonal_glide", "static"],
+    "calm":   ["pan_left", "pan_right", "tilt_up", "tilt_down", "zoom_out"],
+    "normal": ["zoom_in", "zoom_out", "tilt_up", "pan_left", "pan_right"],
+    "punchy": ["snap_zoom_in", "zoom_in"],
 }
 
 _PHASE_MOTION_CANDIDATES = {
     "OPENING":       ["pan_right", "pan_left", "tilt_down"],
-    "RISING_ACTION": ["dolly_in", "zoom_in"],
-    "CLIMAX":        ["snap_zoom_in", "diagonal_glide", "static"],
-    "RESOLUTION":    ["dolly_out", "tilt_up", "pan_left"],
+    "RISING_ACTION": ["zoom_in", "tilt_down"],
+    "CLIMAX":        ["snap_zoom_in", "zoom_in"],
+    "RESOLUTION":    ["zoom_out", "tilt_up", "pan_left"],
 }
 
 
 # ── Übergangs-Bibliothek ──────────────────────────────────────────────────────
 # Kuratierte Übergangs-Bibliothek: ffmpegs xfade-Filter bringt bereits 58 fertige
 # Übergangstypen mit (kein neues Paket, keine eigene Easing-Formel nötig für diesen
-# Teil). Pro Familie zwei Richtungsvarianten (damit ein längeres Video nicht monoton
+# Teil). Mehrere Richtungsvarianten pro Familie (damit ein längeres Video nicht monoton
 # wirkt); welche Familie greift, ist regelbasiert aus pacing/phase abgeleitet.
 #   - "calm"   -> sanftes Dissolve/Fade, kein SFX, LANGSAMER (0.8s "linger")
 #   - "punchy" -> energischer Wipe, mit Whoosh, SCHNELLER (0.3s "snappy")
 #   - sonst    -> neutraler Smooth-Übergang, unveränderte 0.5s
+# Feinschliff Runde 2: wipe/smooth von 2 auf 4 Typen erweitert (zusätzlich up/down) --
+# mehr Varietät ohne den Charakter der Familie zu ändern. fade bleibt bei 2 (fade/
+# dissolve sind die einzigen sanften, zur "calm"-Familie passenden xfade-Varianten).
 TRANSITION_LIBRARY = {
-    "fade":   {"types": ["fade", "dissolve"],           "sfx": None,      "duration": 0.8},
-    "wipe":   {"types": ["wipeleft", "wiperight"],      "sfx": "whoosh",  "duration": 0.3},
-    "smooth": {"types": ["smoothleft", "smoothright"],  "sfx": "whoosh",  "duration": 0.5},
+    "fade":   {"types": ["fade", "dissolve"],
+               "sfx": None,     "duration": 0.8},
+    "wipe":   {"types": ["wipeleft", "wiperight", "wipeup", "wipedown"],
+               "sfx": "whoosh", "duration": 0.3},
+    "smooth": {"types": ["smoothleft", "smoothright", "smoothup", "smoothdown"],
+               "sfx": "whoosh", "duration": 0.5},
 }
 
 
@@ -174,16 +222,49 @@ def _apply_sync_invariant(scenes: list, audio_duration: float, fps: int) -> list
        prevents the tail-clipping/drift bug class (MoneyPrinterTurbo issue #985).
 
     Returns a list of per-scene frame counts, same order/length as `scenes`.
+
+    Juli 2026 Fix (Präzisions-Boost, nur wenn ALLE Szenen `start_aligned` haben): die
+    alte `scene_dur` nahm nur `end_aligned - start_aligned` (reine Sprechzeit OHNE die
+    Pause danach). `total_dur` war dadurch systematisch kleiner als `audio_duration`
+    (Summe aller Zwischenpausen fehlte), also `factor > 1.0` — JEDE Szene wurde um
+    diesen Faktor gestreckt, auch wenn ihre eigene Pause winzig war. Der Schnittpunkt
+    vor Szene N verschob sich damit von der tatsächlichen Startzeit des N-ten Worts weg,
+    akkumuliert über die ganze Szenenliste (der eigentliche Sync-Drift, den der User
+    beobachtet hat — nicht der bereits gefixte Chunk-Offset).
+
+    Fix: wenn ALLE Szenen aligned sind, ist die Dauer einer Szene die Zeit bis zum
+    NÄCHSTEN `start_aligned` (schließt die Pause danach ein), letzte Szene bis zum
+    Audio-Ende. Die Summe telescopiert dann zu `audio_duration - scenes[0].start_aligned`
+    — bei einer typischen, sehr kurzen Anfangs-Stille also `factor ≈ 1.0`. Die
+    kumulierte Position vor Szene N entspricht dann fast exakt `scenes[N].start_aligned`
+    — der Schnitt sitzt auf dem Wort, nicht proportional verschoben.
+
+    Fällt zurück auf die alte (sprechzeit-basierte) Berechnung, wenn auch nur eine Szene
+    kein `start_aligned` hat (z.B. Whisper-Teilabdeckung) — dort ist "welche Pause gehört
+    zu welcher Szene" nicht zuverlässig bekannt, das Risiko einer Fehl-Zuordnung wäre
+    größer als der Gewinn.
     """
-    def scene_dur(s):
+    def scene_dur_speech_only(s):
         sa, ea = s.get("start_aligned"), s.get("end_aligned")
         if sa is not None and ea is not None and ea > sa:
             return ea - sa
         return s.get("dur", 0)
 
-    total_dur = sum(scene_dur(s) for s in scenes) or 1.0
+    all_aligned = bool(scenes) and all(s.get("start_aligned") is not None for s in scenes)
+    if all_aligned:
+        starts = [s["start_aligned"] for s in scenes]
+        durations = []
+        for i in range(len(scenes)):
+            if i + 1 < len(scenes):
+                durations.append(max(0.1, starts[i + 1] - starts[i]))
+            else:
+                durations.append(max(0.1, audio_duration - starts[i]))
+    else:
+        durations = [scene_dur_speech_only(s) for s in scenes]
+
+    total_dur = sum(durations) or 1.0
     factor = audio_duration / total_dur
-    normalized = [max(0.1, scene_dur(s) * factor) for s in scenes]
+    normalized = [max(0.1, d * factor) for d in durations]
 
     audio_frames = round(audio_duration * fps)
     frames = [round(d * fps) for d in normalized]
@@ -229,17 +310,52 @@ def _normalize_motion(motion: dict) -> dict:
     return {"name": mtype, "z0": z0, "z1": z1, "focus0": focus, "focus1": focus}
 
 
+def _shot_hint_from_prompt(prompt: str) -> list | None:
+    """Schritt 4.1: regelbasierte Motion-Kandidaten aus dem Bild-Prompt-Text (Keyword-
+    Matching gegen _SHOT_HINT_RULES, kein LLM-Call). Motiviert die Kamerabewegung am
+    tatsächlichen INHALT der Szene statt am reinen Szenenindex. None, wenn kein
+    Keyword trifft — Aufrufer fällt dann auf Phase/Pacing zurück."""
+    if not prompt:
+        return None
+    p = prompt.lower()
+    for keywords, candidates in _SHOT_HINT_RULES:
+        if any(kw in p for kw in keywords):
+            return candidates
+    return None
+
+
+def _pick_motion_avoiding_reversal(candidates: list, seed: int, prev_scene: dict | None) -> str:
+    """Schritt 4.2: wählt `candidates[seed % len(candidates)]`, überspringt diesen
+    Kandidaten aber, wenn er die exakte Gegenrichtung der VORHERIGEN Szene ist
+    (_OPPOSITE_MOTION) — verhindert den sichtbarsten "wirkt randomisiert"-Fall:
+    pan_left direkt nach pan_right, etc. Bleibt deterministisch (gleiche Eingaben ->
+    gleiche Ausgabe, ARCHITECTURE §13/§15.1) — probiert einfach die nächsten
+    Kandidaten in der bereits deterministischen Rotation durch."""
+    prev_motion = prev_scene.get("motion") if prev_scene else None
+    prev_name = _normalize_motion(prev_motion).get("name") if prev_motion else None
+    forbidden = _OPPOSITE_MOTION.get(prev_name) if prev_name else None
+    n = len(candidates)
+    for offset in range(n):
+        name = candidates[(seed + offset) % n]
+        if name != forbidden:
+            return name
+    return candidates[seed % n]  # alle Kandidaten sind die Gegenrichtung -- gibt es bei den aktuellen Listen nicht (>=2 Einträge, nicht alle dieselbe Achse), Sicherheitsnetz
+
+
 def _motion_for_scene(scene: dict, prev_scene: dict) -> dict:
     """Rule-based motion recipe — no LLM call. Sequence continuations (seq_pos >= 1)
     inherit the previous scene's motion (continuity = one camera move per sequence).
-    Otherwise picks from _PHASE_MOTION_CANDIDATES (LLM-driven phase) or falls back to
-    _PACING_MOTION_CANDIDATES (position-fallback / legacy).
+    Otherwise, priority order (Schritt 4.1): Prompt-Shot-Hint > Phase-Kandidaten
+    (LLM-driven) > Pacing-Fallback (position-based / legacy). Feinschliff Runde 2
+    (User-Feedback): JEDE Szene bekommt einen echten Ken-Burns-Effekt -- die frühere
+    "jede 3.-4. Szene bleibt static"-Regel ist entfernt, "static" ist nur noch der
+    technische dur<1.2s-Fallback unten. Die finale Auswahl vermeidet zusätzlich die
+    Gegenrichtung der Vorszene (Schritt 4.2, _pick_motion_avoiding_reversal).
 
-    Phase L: Hook-Szenen (scene['is_hook'] = True) erzwingen snap_zoom_in mit höherer
-    Intensität (1.2) — AUSSER die Szene ist Fortsetzung einer Sequenz (CINEMATIC_UPGRADE_PLAN.md
-    §11.3 Schutzregel 2: Motion-Vererbung schlägt jede neue Motion-Regel). Hook
-    gewinnt nur, wenn die Szene einen eigenen Look hat (= Anker einer Sequenz oder
-    eigenständige Szene).
+    Phase L: Hook-Szenen (scene['is_hook'] = True) erzwingen snap_zoom_in — AUSSER die
+    Szene ist Fortsetzung einer Sequenz (CINEMATIC_UPGRADE_PLAN.md §11.3 Schutzregel 2:
+    Motion-Vererbung schlägt jede neue Motion-Regel). Hook gewinnt nur, wenn die Szene
+    einen eigenen Look hat (= Anker einer Sequenz oder eigenständige Szene).
     """
     dur = scene.get("dur", 3.0)
     if dur < 1.2:
@@ -254,18 +370,23 @@ def _motion_for_scene(scene: dict, prev_scene: dict) -> dict:
 
     # Phase L Hook-Override (Schutzregel 2: Sequenz-Vererbung schlägt Hook)
     if scene.get("is_hook") and not is_seq_continuation:
-        return _build_motion("snap_zoom_in", 1.2)
+        return _build_motion("snap_zoom_in", HOOK_MOTION_INTENSITY)
 
     if is_seq_continuation:
         name = _normalize_motion(prev_scene["motion"]).get("name", "zoom_in")
     else:
-        phase = scene.get("phase")
-        pacing = scene.get("pacing") if scene.get("pacing") in _PACING_MOTION_CANDIDATES else "normal"
-        if phase and scene.get("phase_source") == "llm" and phase in _PHASE_MOTION_CANDIDATES:
-            candidates = _PHASE_MOTION_CANDIDATES[phase]
+        i = scene.get("i", 0)
+        prompt_hint = _shot_hint_from_prompt(scene.get("prompt", ""))
+        if prompt_hint:
+            candidates = prompt_hint
         else:
-            candidates = _PACING_MOTION_CANDIDATES[pacing]
-        name = candidates[scene.get("i", 0) % len(candidates)]
+            phase = scene.get("phase")
+            pacing = scene.get("pacing") if scene.get("pacing") in _PACING_MOTION_CANDIDATES else "normal"
+            if phase and scene.get("phase_source") == "llm" and phase in _PHASE_MOTION_CANDIDATES:
+                candidates = _PHASE_MOTION_CANDIDATES[phase]
+            else:
+                candidates = _PACING_MOTION_CANDIDATES[pacing]
+        name = _pick_motion_avoiding_reversal(candidates, i, prev_scene)
 
     intensity_scale = min(0.5 + dur * 0.12, 1.4)
     return _build_motion(name, intensity_scale)
@@ -307,8 +428,15 @@ def _overlay_specs_for_scene(scene: dict, clip_dur: float, overlay_opts: dict | 
             t1 = min(1.6, clip_dur - 0.05) if clip_dur > 0.3 else clip_dur
             if t1 > t0:
                 specs.append(("callout", scene["callout"], t0, t1))
-    if overlay_opts.get("captions") and scene.get("text"):
-        specs.append(("caption", scene["text"], 0.0, clip_dur))
+    if overlay_opts.get("captions"):
+        # Cinematic-Mix Juli 2026 (Schritt 3): CapCut-Stil 1-Wort-Captions, wenn die
+        # Szene Wort-Slices hat (align_scenes_to_whisper, ElevenLabs/Whisper-Pfad nach
+        # erfolgtem Alignment). Fallback auf die alte Voll-Text-Bauchbinde, wenn
+        # `words` fehlt (geschätztes Timing, alte resumte Pläne ohne Re-Alignment).
+        if scene.get("words"):
+            specs.append(("word_caption_seq", scene["words"], 0.0, clip_dur))
+        elif scene.get("text"):
+            specs.append(("caption", scene["text"], 0.0, clip_dur))
     return specs
 
 
@@ -318,21 +446,17 @@ def _render_clip(img_path: str, scene: dict, out_path: str, fps: int = RENDER_FP
                   overlay_opts: dict | None = None) -> None:
     """Renders one scene's still image into a short Ken-Burns clip, optionally with text
     overlays composited on top. Resume-safe: skips if out_path exists and non-empty.
-    Phase E: for kind=='title_card', generates the title-card PNG on the fly.
+
+    Feinschliff Runde 2 (User-Feedback "Akt-Einspieler müssen raus"): `kind=="title_card"`
+    wird hier NICHT mehr als Sonderfall behandelt -- solche Szenen rendern wie jede
+    andere, mit ihrem bereits vorhandenen echten Bild (`scene["file"]`) statt einer live
+    erzeugten weißen PIL-Titelkarte. `render_title_card_png_via_venv` bleibt im Modul
+    erhalten (dormant, reaktivierbar), wird von hier aus nur nicht mehr aufgerufen.
     """
     if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
         return
     # Lazy-import to avoid cycles (engine_elevenlabs is a higher-level module)
     from engine_elevenlabs import PHASE_COLOR_FILTER
-
-    # Phase E: title-card shortcut
-    title_card_temp = None
-    if scene.get("kind") == "title_card":
-        title_card_temp = out_path + ".title.png"
-        render_title_card_png_via_venv(title_card_temp, RENDER_WIDTH, RENDER_HEIGHT,
-                                       scene.get("card_title") or "Neuer Akt",
-                                       phase=scene.get("phase", ""))
-        img_path = title_card_temp
 
     motion = _normalize_motion(scene.get("motion") or {"type": "static", "z_end": 1.02, "focus": [0.5, 0.5]})
     frames = max(1, scene.get("_frames") or round(scene.get("dur", 3.0) * fps))
@@ -417,6 +541,20 @@ def _render_clip(img_path: str, scene: dict, out_path: str, fps: int = RENDER_FP
                     f"fade=t=in:st={t0}:d={fade_dur}:alpha=1"
                     f"[{faded_label}]"
                 )
+            elif style == "word_caption_seq":
+                # Schritt 3: text ist hier scene["words"] (siehe _overlay_specs_for_scene).
+                # EIN Sequenz-Input für die ganze Szene, unabhängig von der Wortzahl --
+                # gleiches Input-Muster wie counter_anim, aber OHNE Fade: der CapCut-Pop
+                # lebt vom harten, instant Wort-Wechsel (Plan-Vorgabe).
+                words = text
+                seq_dir = f"{out_path}.ovseq{idx}"
+                _render_word_caption_sequence(seq_dir, RENDER_WIDTH, RENDER_HEIGHT,
+                                               words, t1 - t0, fps)
+                overlay_seq_dirs.append(seq_dir)
+                inputs += ["-framerate", str(fps), "-i", f"{seq_dir}/seq_%04d.png"]
+                in_idx = idx + 1
+                faded_label = f"ov{idx}f"
+                filter_parts.append(f"[{in_idx}:v]format=rgba[{faded_label}]")
             else:
                 render_text_overlay_png(png_path, RENDER_WIDTH, RENDER_HEIGHT, style, text)
                 overlay_pngs.append(png_path)
@@ -462,10 +600,6 @@ def _render_clip(img_path: str, scene: dict, out_path: str, fps: int = RENDER_FP
             import shutil
             try: shutil.rmtree(d, ignore_errors=True)
             except: pass
-        if title_card_temp and os.path.exists(title_card_temp):
-            try:    os.remove(title_card_temp)
-            except: pass
-
 
 def _assemble_clips(clip_paths: list, out_path: str) -> None:
     """concat-demuxer, hard cuts only (V1 decision — crossfades are later polish, need
@@ -526,10 +660,19 @@ def _render_selfcheck(final_path: str, expected_audio_duration: float) -> dict:
 
 # ── Transition ────────────────────────────────────────────────────────────────
 
-def _transition_for_scene(scene: dict, idx: int) -> tuple:
+def _transition_for_scene(scene: dict, transition_seq_idx: int) -> tuple:
     """Wählt Übergangstyp + passendes SFX (oder None) + Übergangsdauer für den Schnitt
-    VOR `scene`. Richtung (links/rechts) alterniert über den Szenenindex — dasselbe
-    deterministische Muster wie die Zoom-Richtung in _motion_for_scene.
+    VOR `scene`.
+
+    `transition_seq_idx` ist NICHT der Szenenindex, sondern die laufende Nummer
+    INNERHALB der tatsächlichen Übergangs-Punkte (Position in der `transition_at`-
+    Liste des Callers: 0, 1, 2, …). Feinschliff Runde 2 (User-Feedback "Schnittmuster
+    wiederholt sich"): vorher hing die Sub-Typ-Rotation am ROHEN Szenenindex
+    (`scene["i"] % len(types)`) -- da Übergänge nur an seltenen, unregelmäßig
+    verteilten Sequenzgrenzen feuern, konnten mehrere davon zufällig dieselbe
+    Index-Parität teilen und so denselben Sub-Typ mehrmals in Folge auslösen. Über
+    `transition_seq_idx` alterniert die Sub-Typ-Folge jetzt garantiert strikt über die
+    gesamte Video-Laufzeit, unabhängig von den absoluten Szenenindizes.
 
     Family-Pick-Lookup:
     - scene.phase_source == "llm" mit phase → CLIMAX=wipe, OPENING/RESOLUTION=fade,
@@ -558,7 +701,7 @@ def _transition_for_scene(scene: dict, idx: int) -> tuple:
                  "wipe"  if pacing == "punchy" else \
                  "smooth"
     lib = TRANSITION_LIBRARY[family]
-    transition_type = lib["types"][scene.get("i", idx) % len(lib["types"])]
+    transition_type = lib["types"][transition_seq_idx % len(lib["types"])]
     return transition_type, lib["sfx"], lib["duration"]
 
 
@@ -625,6 +768,81 @@ def _render_counter_anim_sequence(out_dir, width, height, from_val, to_val, n_fr
     result = subprocess.run(args, capture_output=True, text=True, timeout=90)
     if result.returncode != 0:
         raise RuntimeError(f"Counter-Anim-Sequenz fehlgeschlagen: {result.stderr[-500:]}")
+
+
+def _render_word_caption_sequence(out_dir: str, width: int, height: int, words: list,
+                                   clip_dur: float, fps: int) -> None:
+    """Cinematic-Mix Juli 2026 (Schritt 3): baut EINE durchgehende Frame-Sequenz für
+    die 1-Wort-Captions einer Szene — ein einziger `-framerate {fps} -i seq_%04d.png`-
+    Input in _render_clip, unabhängig davon wie viele Wörter die Szene hat (gleiches
+    Muster wie counter_anim, aber hier codiert die Sequenz DISKRETE Sichtbarkeits-
+    Fenster statt einer kontinuierlichen Animation).
+
+    Ablauf:
+      1. EIN Subprocess-Aufruf rendert die N Wort-PNGs (word_caption_batch) — die
+         teure Python-Start+Pillow-Kosten fallen pro SZENE an, nicht pro Wort.
+      2. Für jedes Ausgabe-Frame [0, round(clip_dur*fps)) wird bestimmt, welches Wort
+         "aktiv" ist, und das passende PNG per Symlink unter seq_%04d.png eingehängt.
+         Wort i ist sichtbar von seinem eigenen `start` bis zum `start` des nächsten
+         Worts (oder bis clip_dur beim letzten Wort) — ABSICHTLICH lückenlos: "Jedes
+         Wort steht, bis das nächste kommt" (ruhiger als Blinken, auch über kurze
+         Pausen hinweg). Nur VOR dem ersten Wort (falls dessen `start` > 0) bleibt der
+         Frame leer/transparent.
+      3. Ein einziges vorgerendertes transparentes Blank-PNG deckt diese Lücke ab.
+
+    Wörter, deren `start` bei/über `clip_dur` liegt (Rundungsrand am Szenenende),
+    werden ignoriert — ihr Text wäre ohnehin nicht mehr sichtbar.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    n_frames = max(1, round(clip_dur * fps))
+    usable = [w for w in words if w.get("start", 0.0) < clip_dur]
+    if not usable:
+        # Keine Wörter in diesem Clip-Fenster -- ein einziges Blank-Frame reicht,
+        # ffmpeg wiederholt das letzte Bild einer -framerate-Sequenz nicht automatisch,
+        # also müssen wir trotzdem n_frames Kopien/Symlinks anlegen.
+        blank_path = os.path.join(out_dir, "blank.png")
+        _render_word_caption_blank(blank_path, width, height)
+        for f in range(n_frames):
+            os.symlink(blank_path, os.path.join(out_dir, f"seq_{f:04d}.png"))
+        return
+
+    words_b64 = base64.b64encode(json.dumps([w["word"] for w in usable]).encode("utf-8")).decode("ascii")
+    args = [WHISPER_VENV_PY, OVERLAY_SCRIPT, out_dir, str(width), str(height),
+            "word_caption_batch", words_b64]
+    result = subprocess.run(args, capture_output=True, text=True, timeout=90)
+    if result.returncode != 0:
+        raise RuntimeError(f"Wort-Caption-Batch fehlgeschlagen: {result.stderr[-500:]}")
+
+    first_start = max(0.0, usable[0].get("start", 0.0))
+    blank_frames_before = min(n_frames, round(first_start * fps))
+    if blank_frames_before > 0:
+        blank_path = os.path.join(out_dir, "blank.png")
+        _render_word_caption_blank(blank_path, width, height)
+        for f in range(blank_frames_before):
+            os.symlink(blank_path, os.path.join(out_dir, f"seq_{f:04d}.png"))
+
+    for idx, w in enumerate(usable):
+        word_png = os.path.join(out_dir, f"word_{idx:04d}.png")
+        start_f = max(blank_frames_before, round(max(0.0, w.get("start", 0.0)) * fps))
+        if idx + 1 < len(usable):
+            end_f = min(n_frames, round(max(0.0, usable[idx + 1].get("start", 0.0)) * fps))
+        else:
+            end_f = n_frames
+        for f in range(start_f, max(start_f + 1, end_f)):
+            if f >= n_frames:
+                break
+            link_path = os.path.join(out_dir, f"seq_{f:04d}.png")
+            if not os.path.exists(link_path):
+                os.symlink(word_png, link_path)
+
+
+def _render_word_caption_blank(out_path: str, width: int, height: int) -> None:
+    """Ein einzelnes transparentes PNG für die Lücke vor dem ersten Wort einer Szene
+    (z.B. eine Sequenz-Anker-Szene, deren Kamera-Bewegung schon läuft, während die
+    Stimme noch aus der Vorszene nachklingt). Eigener `blank`-Style statt `caption`
+    mit leerem Text -- render_caption zeichnet seine halbtransparente Box unabhängig
+    vom Textinhalt, das wäre hier ein sichtbarer Balken ohne Text."""
+    render_text_overlay_png(out_path, width, height, "blank", "")
 
 
 def render_text_overlay_png(out_path: str, width: int, height: int, style: str, text: str) -> None:

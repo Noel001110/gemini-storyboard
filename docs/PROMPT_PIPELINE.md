@@ -256,6 +256,32 @@ benötigt weiterhin gerenderte Bilder als Anker für visuelle Konsistenz
 (siehe §3). Erst Voice → Plan → Render mit dem Char-Ref-Fallback
 (§10) → Character-Konsistenz im fertigen Video.
 
+**Korrektur (Juli 2026, Produktionsreife-Audit — siehe §12):** die erste
+Fassung dieses Fixes hatte selbst zwei Bugs, beide inzwischen behoben:
+
+1. **Chunk-Offset war falsch.** Der kumulative Timestamp-Offset für Chunk N+1
+   wurde aus `chunk_N.words[-1].end` berechnet (letztes Wort-Ende) — aber
+   ElevenLabs hängt an jeden Chunk etwas Stille an, die in keinem Wort-
+   Timestamp auftaucht. Am Theranos-Skript (2 Chunks) betrug die reale
+   Differenz ~0,56s zwischen Wort-Ende und echtem MP3-Ende — nach dem Fix
+   (ffprobe-gemessene Dauer statt Wort-Ende) liegt sie bei ~0,03s. Ohne Fix
+   lag am Ende eines 2-Chunk-Voiceovers der Schnitt bis zu 0,74s vor dem
+   tatsächlich gesprochenen Wort; bei mehr Chunks akkumuliert sich das weiter.
+2. **`previous_request_ids` waren erfunden.** Statt der echten, von der API
+   im `request-id`-Response-Header zurückgegebenen ID (offizieller
+   Stitching-Mechanismus, siehe ElevenLabs-Docs "Request stitching") baute
+   der Code eine lokale Fake-ID (`el_{voice}_{idx}_{time}`). Bei v3 war das
+   irrelevant (Feld wird eh weggelassen), bei v2-Modellen hätte die API das
+   Feld entweder ignoriert oder mit einem Fehler abgelehnt — Continuity war
+   faktisch nie aktiv. `_elevenlabs_call_with_retry` gibt jetzt
+   `(response, request_id)` zurück, der echte Header-Wert wird verkettet.
+
+Zusätzlich ist das Chunk-Zeichenlimit jetzt modellabhängig
+(`_chunk_limit_for_model`): eleven_v3 ≈ 4800, multilingual_v2 ≈ 9500,
+flash/turbo ≈ 28000 (ElevenLabs-Docs, Stand 2026) — vorher chunkte ein
+8000-Zeichen-Skript mit multilingual_v2 unnötig in zwei Calls, obwohl das
+Modell es in einem verarbeiten könnte.
+
 ---
 
 ## 10. Character-Reference-Fallback (Juli 2026)
@@ -287,14 +313,24 @@ Drei-Stufen-Fallback-Kette in `_resolve_entity_ref`:
    `analyze_script()`-Output (`[{id: "char_01", name_or_role: "Elizabeth Holmes"}]`),
    mappt `entity` → `name`, sucht nach Charsheet-JSON mit gleichem `name`.
 
-Match wird als `data:image/png;base64,...` URL zurückgegeben (KIE.ai
-akzeptiert data-URLs direkt — kein Catbox-Upload, kein 403-Risiko, kein
-TTL-Problem). Debug-Dict enthält `source`-Feld (`anchor-scene` /
-`charsheet-png` / `charsheet-name-match`) für Diagnose.
+**Achtung (Update Juli 2026):** Ursprünglich gab der Code hier eine
+`data:image/png;base64,...` URL zurück in der Annahme, dass KIE.ai diese nativ
+versteht. In der Praxis lehnte die API (`nano-banana-2`) diese jedoch mit 
+`{"error": "KIE: File type not supported"}` ab.
+Der Code gibt nun den **lokalen Dateipfad** mit dem Flag `"is_local": True` zurück. 
+Das Dashboard fängt diesen Pfad ab und lädt das Charsheet sicherheitshalber 
+**in einen In-Memory-Cache** (via `upload_image_public`). So wird Rate-Limiting und
+paralleler Upload-Spam bei Batch-Generierungen komplett vermieden.
+**Wichtig:** Als Upload-Host muss `catbox.moe` verwendet werden! Temporäre Hoster
+wie `tmpfiles.org` oder `litterbox` liegen mittlerweile hinter starken Cloudflare- 
+oder BunkerWeb-WAFs (Web Application Firewalls) und liefern bei einem Download-
+Versuch oft HTML-Anti-Bot-Seiten statt der reinen `image/png`-Datei zurück,
+was die KIE.ai-API zum Absturz bringt (`internal error, please try again later`).
+`catbox.moe` liefert saubere Raw-Images, weshalb das Dashboard es nun primär nutzt.
 
 **Regex-Bug mit gefixt:** cid/vid-Extraktion aus plan_path anchored
 ursprünglich mit `/channels/` (leading slash), matchte aber relative
-Pfade nicht. Jetzt `(?:^|/)channels/` für beide Fälle.
+pfade nicht. Jetzt `(?:^|/)channels/` für beide Fälle.
 
 ---
 
@@ -307,6 +343,162 @@ Range praxisüblich 0.7–1.3. Werte >1.0 sprechen schneller, <1.0 langsamer.
 `voice_settings.json`, Engine-Code sendet speed an alle 5
 voice_settings-builder Sites (single + chunked Generate, voiceTestPreview,
 settings save, reset).
+
+**Korrektur (Juli 2026, §12):** 0.7–1.3 war zu großzügig — die offizielle
+ElevenLabs-Range ist 0.7–1.2 (elevenlabs.io/docs/eleven-agents/customization/
+voice/speed-control). Slider-Max jetzt 1.2, `save_voice_settings` clampt
+serverseitig zusätzlich (Werte außerhalb hätten HTTP 400 mitten im teuren
+Chunked-Call riskiert).
+
+---
+
+## 12. Produktionsreife-Audit: Sync-Drift + Char-Ref-Reliability + Frontend-Kontrakt (Juli 2026)
+
+Vollständiger Audit + Fix-Pass nach User-Report "ElevenLabs und Bild-
+Generierung sind wieder ein bisschen kaputt". Deckt drei Bereiche ab, alle
+mit echten Test-Daten verifiziert (aktives Video `19_yearold_girl`, 96
+Szenen, Theranos-Skript 5788 Zeichen enriched → 2 Chunks):
+
+**1. Sync-Drift (§9-Korrektur oben):** Am Original-Voiceover lag der letzte
+Wort-Timestamp 0,52s vor dem echten Sprechende (462,08s vs. real ~462,6s
+gemessen per `ffmpeg silencedetect`); nach Fix nur noch 0,03s. Nachweis über
+echten ffprobe/silencedetect-Vergleich, nicht nur Unit-Test.
+
+**2. Char-Ref-Fallback-Lücken (`engine/scenes.py`, `dashboard.py`):**
+- `_resolve_entity_ref`/`_wait_for_entity_anchor_scene` bekommen einen
+  `wait`-Parameter. `/api/generate_one` (Einzel-Szene, z.B. "Neu
+  generieren") hatte bisher eine eigene, abgespeckte Inline-Logik ohne den
+  3-Stufen-Fallback aus dem Batch-Worker — jetzt identische Logik
+  (`wait=False`, kein Grund auf einen parallelen Sibling zu warten).
+- Neue Stufe 1b: eine Anker-Szene mit `file` aber ohne `source_url`
+  (Recovery-Race-Fall) liefert jetzt sofort die lokale Bilddatei als
+  `data:image/...;base64` statt 170s auf eine `source_url` zu warten, die
+  nie wiederkommt (`_wait_for_entity_anchor_scene` behandelt `file` als
+  finalen Zustand, nicht nur `source_url`/`status=="fehler"`).
+- Stale-URL-Retry (Submit schlägt wegen abgelaufener Referenz fehl) lud
+  bisher nur Chain-Refs frisch hoch, ließ den Entity-Anker beim Retry
+  komplett weg — jetzt wird auch der Charakter-Anker (frisch hochgeladen
+  bei `source: anchor-scene`, sonst direkt die stabile data-URL) mitgeschickt.
+
+**3. Voiceover-Neugenerierung verwaiste Bilder (`dashboard.py`):**
+`_transcribe_generate_worker` schrieb `plan.json` bei jedem ElevenLabs-Re-Run
+komplett neu (`file: None` für jede Szene), obwohl die Bilddateien selbst
+unangetastet blieben (siehe §-Fix weiter oben zu diesem Worker). Die
+Text-Match-Preserve-Logik aus `_plan_generate_worker` ist jetzt als
+`_preserve_rendered_scenes()`-Helper extrahiert und läuft in BEIDEN
+Workern. Verifiziert am echten Video: vor und nach der Voiceover-
+Neugenerierung exakt 20 erhaltene Szenen mit `file`+`source_url`.
+
+**4. Frontend/Backend-Kontraktbrüche (`dashboard.html`, `dashboard.py`):**
+- `elModelSel` existierte im Code referenziert, aber nicht im DOM — Modell-
+  Wahl ging bei jedem Reload verloren. Dropdown ergänzt, Slider-Werte
+  (Stability/Similarity/Style/Speed/Boost/Modell) werden beim Laden jetzt
+  aus den persistierten Settings vorbelegt (vorher: immer HTML-Hardcoded-
+  Defaults, unabhängig von `voice_settings.json`).
+- `/api/voiceover_preview` ("Voice testen") baute die mitgeschickten Slider-
+  Werte, verwarf sie dann komplett bis auf `voice_id` — Preview spielte
+  immer die zuletzt gespeicherten Werte vor, nie die aktuell gezogenen.
+- `save_voice_settings` verwarf `tts_provider`/`volume`/`pitch` (nicht in
+  `ELEVENLABS_VOICE_SETTINGS_DEFAULT`) — ein Provider-Wechsel zu MiniMax
+  persistierte nie über einen Server-Neustart hinaus.
+- Resume-Precedence-Bug in `/api/voiceover_generate`: die Bedingung
+  `A and B if meta else False and C and D` parst in Python als
+  `(A and B) if meta else (...)`, NICHT als `meta and A and B and C and D`.
+  Solange `audio_meta.json` existierte, wurden die Prüfungen auf
+  `voiceover_word_timestamps` und `plan.json`-Existenz nie ausgeführt — ein
+  Resume wurde fälschlich gemeldet, auch ohne brauchbaren Plan.
+- `/api/gen_style_ref` + `/api/set_style_ref` (vom Frontend aufgerufen)
+  existierten serverseitig nur unter den alten Namen `gen_char_ref`/
+  `set_char_ref` → 404 auf die Stil-Referenz-Buttons. Beide Namen werden
+  jetzt akzeptiert.
+- `/api/render_start` startete stillschweigend auch bei nur teilweise
+  generierten Bildern — `_apply_sync_invariant` streckt die vorhandenen
+  Bilder dann über die VOLLE Audiolänge (z.B. 20/96 Bilder über 462s ≈
+  23s/Bild). Jetzt: Response `{"partial": true, "rendered": n, "total": m}`
+  wenn nicht `force`, Frontend zeigt `confirm()` bevor es mit `force: true`
+  weiterläuft.
+
+**Tests:** `tests/test_pipeline_fixes.py` — 15 neue Tests, echte ffmpeg/
+ffprobe-Läufe für den Chunk-Offset-Test (kein reines Mocking), Rest sind
+Verhaltens- oder Source-Grep-Tests nach demselben Muster wie
+`test_cinematic_e2e.py`.
+
+**Bekannte, NICHT gefixte Nebenerkenntnis:** `align_scenes_to_whisper`
+matched Szenen-Text-Wortanzahl gegen die Voiceover-Wortliste. Bei einem
+Voiceover-Re-Take (ElevenLabs v3 ist nicht deterministisch) kann die
+Gemini-Szenensegmentierung geringfügig von der tatsächlich gesprochenen
+Wortzahl abweichen (~7% beobachtet) — die letzten paar Szenen eines Videos
+bekommen dann kein `start_aligned`/`end_aligned` und fallen auf die
+geschätzte Dauer zurück (dokumentiertes, existierendes Graceful-Degradation-
+Verhalten, siehe Docstring in `dashboard.py`). Kein Regressions-Risiko durch
+diesen Audit, aber ein potenzieller Folge-Fix falls das bei echten Videos
+spürbar wird.
+
+## 13. Symbiose-Fix: Voiceover ↔ Plan ↔ Schnitt entkoppelt + Sync-Präzision (Juli 2026)
+
+User-Report nach §12: "Voiceover generieren zerstört meinen geprüften Plan" +
+Zweifel, ob Bild/Schnitt am Ende wirklich aufs gesprochene Wort passen. Drei
+Ursachen gefunden, alle an echten Daten verifiziert (Skript 919 Roh-Wörter,
+97-Szenen-Plan von `19yearold_who_faked_a_9_billio`).
+
+**1. Voiceover-Rebuild zerstörte bereits geprüfte Pläne (`engine_elevenlabs.py`):**
+`_elevenlabs_persist_and_schedule`/`_minimax_persist_and_schedule` lösten nach
+JEDEM ElevenLabs/MiniMax-Call blind `_transcribe_generate_worker` aus — der baut
+den kompletten Plan neu, mit einer ANDEREN Segmentierung (feste Zeitfenster
+statt satz-/pacing-bewusst) und neuen Prompts. Sinnvoll nur im voice-first-Fall
+(noch kein Plan), aber lief auch dann, wenn schon ein manuell erstellter,
+geprüfter Plan existierte.
+
+Fix: neuer Helper `_plan_has_usable_scenes(plan_path)` — True, wenn irgendeine
+Szene ein nicht-leeres `prompt` hat. Rebuild läuft nur noch, wenn das **nicht**
+der Fall ist. Der Render braucht die Zeitstempel ohnehin nicht aus `plan.json`,
+sondern liest sie direkt aus `audio_meta.json` — die Entkopplung ist damit ohne
+Funktionsverlust. Verifiziert am echten 97-Szenen-Plan: `_plan_has_usable_scenes`
+erkennt ihn korrekt, ein Voiceover-Klick würde ihn jetzt nicht mehr anfassen.
+
+**2. Enrichment-Tokens verschoben den Wort-Zähler beim Alignment (`dashboard.py`) —
+die eigentliche Hauptursache für Sync-Drift, nicht der in §9 gefixte Chunk-Offset:**
+`_enrich_for_tts` fügt vor dem ElevenLabs-Call `"..."`-Pausenmarker in den Text
+ein (natürlichere Betonung). ElevenLabs liefert dafür eigene Zeitstempel zurück,
+die in `voiceover_word_timestamps` landen. `align_scenes_to_whisper` zählt aber
+`len(scene["text"].split())` aus dem ROH-Skript (ohne `"..."`) und konsumiert die
+Wortliste sequenziell in dieser Zählung — jedes ungezählte `"..."`-Token
+verschiebt den Lesekopf um eins. Am echten Theranos-Skript gemessen: 919
+Roh-Wörter → 1000 nach Enrichment (81 Phantom-Tokens). Bei genug Tokens lief der
+Zähler leer, bevor die letzten Szenen ihr `start_aligned` bekamen → Fallback auf
+geschätztes Timing → Schnitt driftet.
+
+Fix: `_strip_pause_tokens(words)` entfernt Tokens, die NUR aus Punkten bestehen
+(`"..."`, `"…"`), direkt vor `_compute_pause_trims`/`align_scenes_to_whisper` im
+`_render_worker`. Bewusst NICHT "jedes Token ohne alphanumerisches Zeichen" —
+ein breiterer Filter hätte auch eigenständige Satzzeichen-Wörter aus dem
+ORIGINAL-Skript getroffen (an echten Skripten beobachtet: ein freistehendes
+`"—"` oder `"/"`, das dort schon als eigenes `.split()`-Wort zählt) und damit
+exakt dasselbe Off-by-one-Problem an anderer Stelle reproduziert. Verifiziert:
+mit dem präzisen Filter sind Roh-Skript und gestrippte Wortliste exakt
+deckungsgleich (919 = 919); ein zu breiter erster Versuch kam nur auf 917.
+
+**3. Sync-Invariant verteilte Pausen proportional statt punktgenau (`engine/render.py`):**
+`_apply_sync_invariant` nahm pro Szene nur `end_aligned - start_aligned` (reine
+Sprechzeit, OHNE die Pause danach) und skalierte alle Szenen mit
+`factor = audio_duration / summe_sprechzeit`. Da die Summe aller
+Zwischenpausen fehlte, war `factor > 1.0` — JEDE Szene wurde gestreckt, auch
+wenn ihre eigene Pause winzig war. Der Schnittpunkt vor Szene N verschob sich
+damit von der tatsächlichen Startzeit des N-ten Worts weg, akkumuliert über die
+ganze Szenenliste.
+
+Fix: wenn ALLE Szenen `start_aligned` haben, ist die Dauer einer Szene die Zeit
+bis zum NÄCHSTEN `start_aligned` (schließt die Pause danach ein), letzte Szene
+bis zum Audio-Ende. Die Summe telescopiert zu `audio_duration - scenes[0].start_aligned`
+→ `factor ≈ 1.0` bei typisch kurzer Anfangs-Stille → kumulierte Position vor
+Szene N ≈ `scenes[N].start_aligned`. Fällt zurück auf die alte, sprechzeit-basierte
+Berechnung, wenn auch nur eine Szene kein `start_aligned` hat (Whisper-Teilabdeckung).
+
+**Tests:** `tests/test_pipeline_fixes.py` um 8 Tests erweitert (Entkopplung
+inkl. Verhaltenstest mit gemocktem `_transcribe_generate_worker`, Strip-Filter
+inkl. Alignment-Regressionstest, Sync-Invariant inkl. Schnittpunkt-Berechnung
+mit ungleich verteilter Pause). 24/24 grün, bestehende Suite unverändert
+(147/149, die 2 Fehler sind vorbestehend/umgebungsbedingt).
 
 ## 8. Relevante Commits (main)
 

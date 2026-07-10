@@ -25,6 +25,7 @@ import urllib.request
 import urllib.error
 import subprocess
 import threading
+import concurrent.futures
 
 # Wildcard-import in dashboard.py braucht eine explizite `__all__`-Liste, weil
 # underscore-prefixed Namen (z.B. _enrich_for_tts) bei `import *` NICHT
@@ -201,9 +202,28 @@ def save_voice_settings(cid: str, settings: dict) -> None:
     for k in ("stability", "similarity_boost", "style"):
         try:    clean[k] = max(0.0, min(1.0, float(clean[k])))
         except Exception: clean[k] = ELEVENLABS_VOICE_SETTINGS_DEFAULT[k]
+    # ElevenLabs-Docs (elevenlabs.io/docs/eleven-agents/customization/voice/speed-control):
+    # offizieller Bereich 0.7–1.2. Werte außerhalb wurden bisher unclamped an die API
+    # weitergereicht — riskiert HTTP 400 mitten im (teuren) Chunked-Call. Der UI-Slider
+    # geht jetzt selbst nicht mehr über 1.2, aber Direkt-Aufrufe von /api/elevenlabs_settings
+    # (oder alte, im Browser gecachte Seiten mit dem 1.3-Slider) sollen serverseitig
+    # ebenfalls nie einen ungültigen Wert persistieren.
+    try:    clean["speed"] = max(0.7, min(1.2, float(clean["speed"])))
+    except Exception: clean["speed"] = ELEVENLABS_VOICE_SETTINGS_DEFAULT["speed"]
     clean["use_speaker_boost"] = bool(settings.get("use_speaker_boost", True))
     if settings.get("model_id"):
         clean["model_id"] = str(settings["model_id"])
+    # tts_provider + MiniMax-Felder (volume/pitch) lebten bisher nicht in
+    # ELEVENLABS_VOICE_SETTINGS_DEFAULT und wurden vom `k in clean`-Filter oben
+    # verworfen — jeder Provider-Wechsel via /api/tts_provider persistierte dadurch
+    # nie (nächster Server-Neustart/Reload zeigte wieder "elevenlabs"). Explizit
+    # durchreichen, unabhängig vom Default-Dict.
+    if settings.get("tts_provider"):
+        clean["tts_provider"] = str(settings["tts_provider"])
+    for k in ("volume", "pitch"):
+        if settings.get(k) is not None:
+            try:    clean[k] = float(settings[k])
+            except Exception: pass
     vid = str(settings.get("voice_id", "")).strip()
     if vid:
         with open(ch_voice_id(cid), "w") as f:
@@ -213,18 +233,43 @@ def save_voice_settings(cid: str, settings: dict) -> None:
 
 # API-Call mit Retry
 EL_BACKOFF_SEC = [5, 10, 20]
+EL_IDLE_TIMEOUT_SEC = 180   # Socket-Idle: max. Stille während ElevenLabs 1 Chunk generiert
+EL_HARD_DEADLINE_SEC = 300  # Watchdog-Deckel pro HTTP-Anfrage (feuert auch bei totem Socket)
 
-def _elevenlabs_call_with_retry(url: str, body: dict, headers: dict) -> dict:
+# Ein einziger, prozessweiter Executor für alle HTTP-Watchdogs. Ein per-Call abgehängter
+# Worker-Thread (harter Timeout griff) läuft im Hintergrund weiter, bis sein eigener
+# Socket-Idle-Timeout (EL_IDLE_TIMEOUT_SEC) ihn beendet — er blockiert NICHT den Retry.
+_HTTP_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="tts-http")
+
+
+def _urlopen_json(url: str, body: dict, headers: dict) -> tuple:
+    """Führt EINE POST-Anfrage aus und liefert (response_json, request-id-header).
+    Socket-Idle-Timeout = EL_IDLE_TIMEOUT_SEC. Läuft im Watchdog-Worker-Thread."""
+    req = urllib.request.Request(url, data=json.dumps(body).encode(),
+        headers={**headers, "Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=EL_IDLE_TIMEOUT_SEC) as r:
+        return json.load(r), r.headers.get("request-id")
+
+
+def _elevenlabs_call_with_retry(url: str, body: dict, headers: dict) -> tuple:
+    """Returns (response_json, request_id). request_id comes from the response's
+    `request-id` header — the ONLY valid way to obtain it for `previous_request_ids`
+    stitching (ElevenLabs docs: request IDs are not part of the JSON body).
+    """
     last_err = None
     for attempt, wait in enumerate([0] + EL_BACKOFF_SEC):
         if wait:
             print(f"  [ElevenLabs] Retry {attempt}/{len(EL_BACKOFF_SEC)} in {wait}s …", flush=True)
             time.sleep(wait)
-        req = urllib.request.Request(url, data=json.dumps(body).encode(),
-            headers={**headers, "Content-Type": "application/json"}, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=120) as r:
-                return json.load(r)
+            fut = _HTTP_EXECUTOR.submit(_urlopen_json, url, body, headers)
+            return fut.result(timeout=EL_HARD_DEADLINE_SEC)
+        except concurrent.futures.TimeoutError:
+            # Harter Deckel griff — Socket hängt (Idle-Timeout feuerte nicht). Der
+            # abgehängte Worker beendet sich selbst via EL_IDLE_TIMEOUT_SEC. Retry.
+            print(f"  [ElevenLabs] Harter Timeout nach {EL_HARD_DEADLINE_SEC}s — "
+                  f"Verbindung abgebrochen, Retry …", flush=True)
+            last_err = RuntimeError(f"ElevenLabs Netzwerkfehler: harter Timeout nach {EL_HARD_DEADLINE_SEC}s")
         except urllib.error.HTTPError as e:
             try:    err_body = json.loads(e.read() or b"{}")
             except: err_body = {}
@@ -252,11 +297,13 @@ def _minimax_call_with_retry(url: str, body: dict, headers: dict) -> dict:
         if wait:
             print(f"  [MiniMax] Retry {attempt}/{len(EL_BACKOFF_SEC)} in {wait}s …", flush=True)
             time.sleep(wait)
-        req = urllib.request.Request(url, data=json.dumps(body).encode(),
-            headers={**headers, "Content-Type": "application/json"}, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=120) as r:
-                return json.load(r)
+            fut = _HTTP_EXECUTOR.submit(_urlopen_json, url, body, headers)
+            return fut.result(timeout=EL_HARD_DEADLINE_SEC)[0]
+        except concurrent.futures.TimeoutError:
+            print(f"  [MiniMax] Harter Timeout nach {EL_HARD_DEADLINE_SEC}s — "
+                  f"Verbindung abgebrochen, Retry …", flush=True)
+            last_err = RuntimeError(f"MiniMax Netzwerkfehler: harter Timeout nach {EL_HARD_DEADLINE_SEC}s")
         except urllib.error.HTTPError as e:
             try:    err_body = json.loads(e.read() or b"{}")
             except: err_body = {}
@@ -343,9 +390,39 @@ def _el_words_from_alignment(alignment: dict) -> list:
 # previous_request_ids (offizielle API für multi-segment stitching), konkatenieren die
 # MP3-Streams mit ffmpeg -c copy (kein Re-Encode, also kein Qualitätsverlust), und
 # verschieben die Word-Timestamps kumulativ.
-EL_CHUNK_CHAR_LIMIT    = 4800   # Sicherheitsabstand zur 5000er API-Grenze
+EL_CHUNK_CHAR_LIMIT    = 4800   # Sicherheitsabstand zur 5000er API-Grenze (eleven_v3/multilingual_v2)
 EL_CHUNK_OVERLAP_CHARS = 0      # keine Overlap nötig bei Satzgrenzen-Split
 EL_CONTINUITY_WINDOW   = 1      # wieviele vorherige request_ids pro Chunk mitschicken
+
+# Modellabhängiges Zeichenlimit pro Request (ElevenLabs-Docs, Stand 2026): eleven_v3
+# akzeptiert nur ~5000 Zeichen, multilingual_v2 10000, flash/turbo bis 30-40k. Wir bleiben
+# jeweils mit Sicherheitsabstand drunter. Unbekannte Modelle fallen auf den v3-Wert zurück
+# (konservativste Annahme).
+EL_CHUNK_LIMIT_BY_MODEL_PREFIX = [
+    ("eleven_v3", 4800),
+    ("eleven_multilingual_v2", 9500),
+    ("eleven_flash", 28000),
+    ("eleven_turbo", 28000),
+]
+
+
+def _chunk_limit_for_model(model_id: str) -> int:
+    model_id = model_id or ""
+    for prefix, limit in EL_CHUNK_LIMIT_BY_MODEL_PREFIX:
+        if model_id.startswith(prefix):
+            return limit
+    return EL_CHUNK_CHAR_LIMIT
+
+
+def _mp3_duration_sec(path: str) -> float:
+    """ffprobe-Helper, gleiches Muster wie engine/render.py:_clip_duration_sec —
+    misst die ECHTE Audiodauer statt sich auf ein geschätztes Wort-Ende zu verlassen.
+    ElevenLabs hängt an jeden Chunk etwas Stille an; die Differenz zwischen 'letztes
+    Wort-Ende' und 'echtes Dateiende' akkumuliert sich über mehrere Chunk-Grenzen zu
+    hörbarem Sync-Drift (Juli 2026, User-Report: Schnitt liegt spürbar vor dem Wort)."""
+    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                           "-of", "csv=p=0", path], capture_output=True, text=True, timeout=15)
+    return float(out.stdout.strip())
 
 
 def _chunk_text_by_sentences(text: str, max_chars: int = EL_CHUNK_CHAR_LIMIT) -> list:
@@ -428,92 +505,101 @@ def elevenlabs_generate(text: str, settings: dict) -> dict:
     if not voice_id:
         raise RuntimeError("Keine voice_id konfiguriert: ~/.elevenlabs_key oder channels/<cid>/voice_id.txt befüllen.")
 
+    # Modellabhängiges Limit (eleven_v3 ≈ 4800, multilingual_v2 ≈ 9500, flash/turbo höher) —
+    # muss VOR dem Single-vs-Chunked-Entscheid berechnet werden, sonst chunkt ein
+    # 8000-Zeichen-Text mit multilingual_v2 unnötig, obwohl das Modell ihn in einem
+    # Call verarbeiten könnte.
+    model_id_for_limit = settings.get("model_id") or ELEVENLABS_DEFAULT_MODEL
+    chunk_limit = _chunk_limit_for_model(model_id_for_limit)
+
     # Single-Call-Pfad wenn text klein genug
-    if len(text) <= EL_CHUNK_CHAR_LIMIT:
+    if len(text) <= chunk_limit:
         return _elevenlabs_generate_single(text, settings, voice_id)
 
     # Chunked-Pfad
-    chunks = _chunk_text_by_sentences(text, EL_CHUNK_CHAR_LIMIT)
+    chunks = _chunk_text_by_sentences(text, chunk_limit)
     print(f"  [ElevenLabs] Auto-Chunking: {len(text)} Zeichen → {len(chunks)} Chunks "
-          f"({[len(c) for c in chunks]})", flush=True)
+          f"({[len(c) for c in chunks]}, Limit={chunk_limit} für {model_id_for_limit})", flush=True)
 
     key = elevenlabs_key()
     url = f"{ELEVENLABS_API}/text-to-speech/{voice_id}/with-timestamps"
     base_headers = {"xi-api-key": key, "Accept": "application/json"}
 
-    chunk_results = []   # [{"audio_bytes": ..., "words": [...], "request_id": ..., "duration": ...}, ...]
-    for idx, chunk_text in enumerate(chunks):
-        body = {
-            "text": chunk_text,
-            "model_id": settings.get("model_id") or ELEVENLABS_DEFAULT_MODEL,
-            "voice_settings": {
-                "stability": float(settings.get("stability", 0.5)),
-                "similarity_boost": float(settings.get("similarity_boost", 0.75)),
-                "style": float(settings.get("style", 0.0)),
-                "use_speaker_boost": bool(settings.get("use_speaker_boost", True)),
-                # ElevenLabs-API-Schema: speed default 1.0. Range 0.7–1.2 praxisüblich.
-                # ElevenLabs v3 hat einige Felder wie previous_request_ids abgelehnt —
-                # falls speed ebenfalls nicht akzeptiert wird, fängt der Catch-Block
-                # in _call_with_retry den 400 ab und der User sieht eine klare
-                # Fehlermeldung statt eines unerwarteten Crashs.
-                "speed": float(settings.get("speed", 1.0)),
-            },
-            "output_format": settings.get("output_format") or "mp3_44100_128",
-        }
-        # Continuity: die letzten EL_CONTINUITY_WINDOW request_ids der vorherigen Chunks mitschicken
-        # ACHTUNG (2026-07-09): ElevenLabs lehnt previous_request_ids für "eleven_v3" mit
-        # unsupported_model ab — der Continuity-Mechanismus ist für v3 noch nicht freigeschaltet.
-        # Wir prüfen das pro Call und lassen die Felder bei v3 weg.
-        model_id = body.get("model_id", "")
-        if not model_id.startswith("eleven_v3"):
-            prev_ids = [r["request_id"] for r in chunk_results[-EL_CONTINUITY_WINDOW:]]
-            if prev_ids:
-                body["previous_request_ids"] = prev_ids
-
-        resp = _elevenlabs_call_with_retry(url, body, base_headers)
-        if not isinstance(resp, dict):
-            raise RuntimeError(f"ElevenLabs-Antwort ist kein JSON-Objekt: {type(resp).__name__}")
-        if not resp.get("audio_base64"):
-            raise RuntimeError(f"ElevenLabs antwortete ohne audio_base64 (Chunk {idx+1}/{len(chunks)})")
-
-        alignment = resp.get("alignment") or resp.get("normalized_alignment") or {}
-        words = _el_words_from_alignment(alignment)
-        if not words:
-            raise RuntimeError(
-                f"ElevenLabs Chunk {idx+1}/{len(chunks)} antwortete ohne Alignment."
-            )
-        audio_bytes = base64.b64decode(resp["audio_base64"])
-        # request_id ist nicht in der Response — wir erzeugen einen deterministischen aus voice_id+chunk_index
-        # für die Continuity-Purpose reicht das, weil wir ihn nur intern weitergeben.
-        request_id = f"el_{voice_id[:8]}_{idx}_{int(time.time())}"
-        # End-Time des letzten Worts = Dauer dieses Chunks (Annahme: words sind chronologisch)
-        chunk_duration = words[-1]["end"] if words else 0.0
-        chunk_results.append({
-            "audio_bytes": audio_bytes,
-            "words": words,
-            "request_id": request_id,
-            "duration": chunk_duration,
-        })
-        print(f"  [ElevenLabs] Chunk {idx+1}/{len(chunks)}: {len(audio_bytes)} bytes, "
-              f"{len(words)} words, ~{chunk_duration:.1f}s", flush=True)
-
-    # MP3-Konkatenation via ffmpeg -c copy (verlustfrei)
     tmpdir = tempfile.mkdtemp(prefix="elevenlabs_chunk_")
     try:
-        chunk_files = []
-        for idx, r in enumerate(chunk_results):
-            p = os.path.join(tmpdir, f"chunk_{idx:03d}.mp3")
-            with open(p, "wb") as f:
-                f.write(r["audio_bytes"])
-            chunk_files.append(p)
+        chunk_results = []   # [{"file": ..., "words": [...], "request_id": ..., "duration": ...}, ...]
+        for idx, chunk_text in enumerate(chunks):
+            body = {
+                "text": chunk_text,
+                "model_id": model_id_for_limit,
+                "voice_settings": {
+                    "stability": float(settings.get("stability", 0.5)),
+                    "similarity_boost": float(settings.get("similarity_boost", 0.75)),
+                    "style": float(settings.get("style", 0.0)),
+                    "use_speaker_boost": bool(settings.get("use_speaker_boost", True)),
+                    # ElevenLabs-API-Schema: speed default 1.0, offizieller Bereich 0.7–1.2
+                    # (siehe elevenlabs.io/docs/eleven-agents/customization/voice/speed-control).
+                    # save_voice_settings() clampt bereits auf diesen Bereich; float() hier ist
+                    # nur die letzte Absicherung falls settings direkt (ohne save) übergeben wurde.
+                    "speed": float(settings.get("speed", 1.0)),
+                },
+                "output_format": settings.get("output_format") or "mp3_44100_128",
+            }
+            # Continuity: die letzten EL_CONTINUITY_WINDOW request_ids der vorherigen Chunks
+            # mitschicken. ACHTUNG (2026-07-09): ElevenLabs lehnt previous_request_ids für
+            # "eleven_v3" mit unsupported_model ab — der Continuity-Mechanismus ist für v3
+            # noch nicht freigeschaltet. Wir prüfen das pro Call und lassen die Felder bei
+            # v3 weg.
+            model_id = body.get("model_id", "")
+            if not model_id.startswith("eleven_v3"):
+                prev_ids = [r["request_id"] for r in chunk_results[-EL_CONTINUITY_WINDOW:]
+                            if r.get("request_id")]
+                if prev_ids:
+                    body["previous_request_ids"] = prev_ids
+
+            resp, request_id = _elevenlabs_call_with_retry(url, body, base_headers)
+            if not isinstance(resp, dict):
+                raise RuntimeError(f"ElevenLabs-Antwort ist kein JSON-Objekt: {type(resp).__name__}")
+            if not resp.get("audio_base64"):
+                raise RuntimeError(f"ElevenLabs antwortete ohne audio_base64 (Chunk {idx+1}/{len(chunks)})")
+
+            alignment = resp.get("alignment") or resp.get("normalized_alignment") or {}
+            words = _el_words_from_alignment(alignment)
+            if not words:
+                raise RuntimeError(
+                    f"ElevenLabs Chunk {idx+1}/{len(chunks)} antwortete ohne Alignment."
+                )
+            audio_bytes = base64.b64decode(resp["audio_base64"])
+            chunk_path = os.path.join(tmpdir, f"chunk_{idx:03d}.mp3")
+            with open(chunk_path, "wb") as f:
+                f.write(audio_bytes)
+            # Juli 2026 Fix (User-Report: Schnitt liegt vor dem gesprochenen Wort): die
+            # Dauer eines Chunks ist NICHT das Ende des letzten Worts — ElevenLabs hängt
+            # etwas Stille ans Chunk-Ende an, die in KEINEM Wort-Timestamp auftaucht. Über
+            # mehrere Chunk-Grenzen akkumuliert sich das zu hörbarem Sync-Drift. Die echte
+            # ffprobe-Dauer der MP3-Datei ist die einzige verlässliche Quelle für den
+            # kumulativen Offset der folgenden Chunks.
+            chunk_duration = _mp3_duration_sec(chunk_path)
+            chunk_results.append({
+                "file": chunk_path,
+                "words": words,
+                "request_id": request_id,
+                "duration": chunk_duration,
+            })
+            print(f"  [ElevenLabs] Chunk {idx+1}/{len(chunks)}: {len(audio_bytes)} bytes, "
+                  f"{len(words)} words, {chunk_duration:.3f}s (letztes Wort endet bei "
+                  f"{words[-1]['end']:.3f}s)", flush=True)
+
+        # MP3-Konkatenation via ffmpeg -c copy (verlustfrei)
         out_path = os.path.join(tmpdir, "concatenated.mp3")
-        _concat_mp3_files(chunk_files, out_path)
+        _concat_mp3_files([r["file"] for r in chunk_results], out_path)
         with open(out_path, "rb") as f:
             combined_b64 = base64.b64encode(f.read()).decode("ascii")
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
-    # Timestamps kumulativ verschieben
+    # Timestamps kumulativ verschieben — Offset ist die ECHTE (ffprobe-gemessene) Dauer
+    # jedes vorherigen Chunks, nicht das geschätzte letzte Wort-Ende (siehe oben).
     combined_words = []
     cumulative_offset = 0.0
     for r in chunk_results:
@@ -529,6 +615,7 @@ def elevenlabs_generate(text: str, settings: dict) -> dict:
         "audio_base64": combined_b64,
         "words": combined_words,
         "task_id": f"el_{voice_id[:8]}_chunked_{int(time.time())}",
+        "n_chunks": len(chunks),
     }
 
 
@@ -549,7 +636,7 @@ def _elevenlabs_generate_single(text: str, settings: dict, voice_id: str) -> dic
         "output_format": settings.get("output_format") or "mp3_44100_128",
     }
     headers = {"xi-api-key": key, "Accept": "application/json"}
-    resp = _elevenlabs_call_with_retry(url, body, headers)
+    resp, _request_id = _elevenlabs_call_with_retry(url, body, headers)
 
     if not isinstance(resp, dict):
         raise RuntimeError(f"ElevenLabs-Antwort ist kein JSON-Objekt: {type(resp).__name__}")
@@ -567,6 +654,7 @@ def _elevenlabs_generate_single(text: str, settings: dict, voice_id: str) -> dic
         "audio_base64": resp["audio_base64"],
         "words": norm,
         "task_id": f"el_{voice_id[:8]}_{int(time.time())}",
+        "n_chunks": 1,
     }
 
 
@@ -747,6 +835,27 @@ def _tts_persist_and_schedule(cid: str, vid: str, text: str,
     return _elevenlabs_persist_and_schedule(cid, vid, text, final_settings)
 
 
+def _plan_has_usable_scenes(v_plan_path: str) -> bool:
+    """True wenn unter v_plan_path bereits ein Plan mit echten, promptierten Szenen
+    liegt (z.B. über 'Plan aus Skript erstellen' manuell gebaut und geprüft).
+
+    Juli 2026 Fix (User-Report: "Voiceover generieren zerstört meinen geprüften Plan"):
+    _transcribe_generate_worker baut bei jedem ElevenLabs-Call den KOMPLETTEN Plan neu
+    (andere Segmentierung: feste Zeitfenster statt Satz-/Pacing-bewusst, neue Prompts).
+    Das ist nur dann ein "erster Aufbau" (harmlos), wenn noch KEIN brauchbarer Plan
+    existiert — der voice-first-Workflow, für den dieser Auto-Rebuild ursprünglich
+    gebaut wurde. Existiert schon ein Plan mit Prompts, ist der Rebuild destruktiv und
+    ohne Nutzen: der Render braucht die Zeitstempel nicht aus plan.json, sondern liest
+    sie direkt aus audio_meta.json (siehe dashboard.py _render_worker,
+    `elevenlabs_words = audio_meta.get("voiceover_word_timestamps")`)."""
+    try:
+        plan = json.load(open(v_plan_path))
+    except Exception:
+        return False
+    scenes = plan.get("scenes") or []
+    return any((s.get("prompt") or "").strip() for s in scenes)
+
+
 def _elevenlabs_persist_and_schedule(cid: str, vid: str, text: str,
                                      settings: dict = None,
                                      override_voice_id: str = "") -> dict:
@@ -796,7 +905,9 @@ def _elevenlabs_persist_and_schedule(cid: str, vid: str, text: str,
                 "stability":        final_settings.get("stability"),
                 "similarity_boost": final_settings.get("similarity_boost"),
                 "style":            final_settings.get("style"),
+                "speed":            final_settings.get("speed"),
                 "use_speaker_boost": final_settings.get("use_speaker_boost"),
+                "n_chunks":         raw.get("n_chunks", 1),
             },
         }
         json.dump(meta, open(v_audio(cid, vid), "w"), ensure_ascii=False, indent=1)
@@ -817,14 +928,25 @@ def _elevenlabs_persist_and_schedule(cid: str, vid: str, text: str,
         except Exception:
             pass
 
-    plan_thread_sec = float(settings.get("sec", 5.5)) if isinstance(settings, dict) else 5.5
-    def _run():
-        try:
-            _transcribe_generate_worker(cid, vid, plan_thread_sec)
-        except Exception as e:
-            import traceback; traceback.print_exc()
-            print(f"  [ElevenLabs→Plan] Fehler in _transcribe_generate_worker: {e}", flush=True)
-    threading.Thread(target=_run, daemon=True).start()
+    # Juli 2026 Fix: Plan-Rebuild NUR im voice-first-Fall (noch kein promptierter Plan).
+    # Existiert schon ein manuell erstellter/geprüfter Plan (z.B. via "Plan aus Skript
+    # erstellen"), bleibt er unangetastet — Render liest die Zeitstempel ohnehin direkt
+    # aus audio_meta.json, ein Rebuild bringt hier nur Schaden (andere Segmentierung,
+    # neue Prompts, verwaiste Bilder), keinen Nutzen. Siehe _plan_has_usable_scenes().
+    plan_already_usable = _plan_has_usable_scenes(v_plan(cid, vid))
+    if not plan_already_usable:
+        plan_thread_sec = float(settings.get("sec", 5.5)) if isinstance(settings, dict) else 5.5
+        def _run():
+            try:
+                _transcribe_generate_worker(cid, vid, plan_thread_sec)
+            except Exception as e:
+                import traceback; traceback.print_exc()
+                print(f"  [ElevenLabs→Plan] Fehler in _transcribe_generate_worker: {e}", flush=True)
+        threading.Thread(target=_run, daemon=True).start()
+    else:
+        print(f"  [ElevenLabs] {cid}/{vid}: bereits promptierter Plan gefunden — "
+              f"Plan-Rebuild übersprungen (Alignment läuft beim Render direkt gegen "
+              f"audio_meta.json).", flush=True)
 
     with _VOICE_JOBS_LOCK:
         VOICE_JOBS[(cid, vid)] = {
@@ -836,9 +958,12 @@ def _elevenlabs_persist_and_schedule(cid: str, vid: str, text: str,
             "voiceover_chars": char_count,
             "ts": time.time(),
             "resume": False,
+            "plan_rebuilt": not plan_already_usable,
         }
     print(f"  [ElevenLabs] {cid}/{vid}: voiceover.mp3 ({len(audio_bytes)//1024} KB, "
-          f"{len(words)} Wörter, chars={char_count}) — Plan-Worker gestartet", flush=True)
+          f"{len(words)} Wörter, chars={char_count})"
+          + (" — Plan-Worker gestartet" if not plan_already_usable else " — Plan erhalten"),
+          flush=True)
     return {
         "ok": True,
         "task_id": task_id,
@@ -911,15 +1036,22 @@ def _minimax_persist_and_schedule(cid: str, vid: str, text: str,
         except Exception:
             pass
 
-    plan_thread_sec = float(settings.get("sec", 5.5)) if isinstance(settings, dict) else 5.5
+    # Juli 2026 Fix: gleiche Entkopplung wie im ElevenLabs-Zwilling — Rebuild nur wenn
+    # noch kein promptierter Plan existiert (siehe _plan_has_usable_scenes()).
+    plan_already_usable = _plan_has_usable_scenes(v_plan(cid, vid))
+    if not plan_already_usable:
+        plan_thread_sec = float(settings.get("sec", 5.5)) if isinstance(settings, dict) else 5.5
 
-    def _run():
-        try:
-            _transcribe_generate_worker(cid, vid, plan_thread_sec)
-        except Exception as e:
-            import traceback; traceback.print_exc()
-            print(f"  [MiniMax→Plan] Fehler: {e}", flush=True)
-    threading.Thread(target=_run, daemon=True).start()
+        def _run():
+            try:
+                _transcribe_generate_worker(cid, vid, plan_thread_sec)
+            except Exception as e:
+                import traceback; traceback.print_exc()
+                print(f"  [MiniMax→Plan] Fehler: {e}", flush=True)
+        threading.Thread(target=_run, daemon=True).start()
+    else:
+        print(f"  [MiniMax] {cid}/{vid}: bereits promptierter Plan gefunden — "
+              f"Plan-Rebuild übersprungen.", flush=True)
 
     with _VOICE_JOBS_LOCK:
         VOICE_JOBS[(cid, vid)] = {
@@ -928,9 +1060,12 @@ def _minimax_persist_and_schedule(cid: str, vid: str, text: str,
             "voiceover_task_id": task_id,
             "voiceover_chars": char_count,
             "ts": time.time(), "resume": False,
+            "plan_rebuilt": not plan_already_usable,
         }
     print(f"  [MiniMax] {cid}/{vid}: voiceover.mp3 ({len(audio_bytes)//1024} KB, "
-          f"{len(words)} Wörter, chars={char_count}) — Plan-Worker gestartet", flush=True)
+          f"{len(words)} Wörter, chars={char_count})"
+          + (" — Plan-Worker gestartet" if not plan_already_usable else " — Plan erhalten"),
+          flush=True)
     return {
         "ok": True, "task_id": task_id,
         "audio_kb": len(audio_bytes) // 1024,

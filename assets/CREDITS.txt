@@ -131,18 +131,27 @@ Autor:          rson201
 Heruntergeladen: 2026-07-07
 Anmerkung:      Original 10.7s auf 2s atrim'd (afade-out 1.5-2.0s)
 
+Cinematic-Mix Juli 2026 (Schritt 2, SFX-Bibliothek erschlossen): engine/audio.py
+SFX_LIBRARY mappt zusätzlich ~25 weitere Dateien aus "Free Cinematic SFX/Inferno Free/"
+und "Free Cinematic SFX/Firestarter Free/" (Braam/Boom/Impact/Whoosh/Downshifter-
+Varianten, Rotation via _select_sfx_variant) — gleiche Quelle/Lizenz wie oben (Flame
+Sound EULA, kommerziell nutzbar). Vollständige Liste der gemappten Pfade: siehe
+SFX_LIBRARY in engine/audio.py (kein Duplikat der Liste hier, um zwei
+Wahrheitsquellen zu vermeiden).
+
 ---
 
-## Sammlungen (assets/Sounds/, nicht direkt verwendet)
+## Sammlungen (assets/Sounds/)
 
-Diese Sammlungen liegen als Backup im Repo, sind aber NICHT in MUSIC_BEDS / SFX_FILES
-gemappt. Die ausgewählten Primärdateien oben sind die, die in der Pipeline aktiv laufen.
-
-- assets/Sounds/#99S006 Cinematic Sound Effects/  — Generdyn #99S006 (Lizenzstatus unklar)
+- assets/Sounds/#99S006 Cinematic Sound Effects/  — Generdyn #99S006. Lizenzstatus
+  UNKLAR (siehe Hinweis oben in der Datei) — bewusst NICHT in SFX_LIBRARY gemappt und
+  sollte es auch zukünftig nicht werden, ohne die Lizenz vorher zu klären.
 - assets/Sounds/Free Cinematic SFX/               — Flame Sound Free Collections
-  - Firestarter Free/
-  - Heatwave Free/
-  - Inferno Free/
+  - Firestarter Free/  — aktiv gemappt (SFX_LIBRARY, s.o.)
+  - Inferno Free/      — aktiv gemappt (SFX_LIBRARY, s.o.)
+  - Heatwave Free/     — nicht gemappt (Texture/Mood/Chord-Dateien, außerhalb der
+                          aktuell genutzten Kategorien whoosh/impact/braam/boom/
+                          riser/swell/downshifter)
   - Wallpapers/ (Bilder, irrelevant)
 
 ---
