@@ -187,9 +187,9 @@ For EACH line in the chunk below, produce an object with ALL of these fields, in
   "callback_check": "Does ANALYSIS.callbacks say this scene references an earlier one? If yes,
                       name the recurring element that MUST appear in image_prompt. Else 'none'.",
   "character_consistency": "Since this is a single still with no motion/continuity anchor from
-                             a previous clip, ANCHOR the character's identity (head shape,
-                             proportions, distinguishing features like hair color/style,
-                             signature outfit) so they remain recognizable across scenes.
+                             a previous clip, ANCHOR the character's identity. Preserve their FACIAL
+                             identity first — same eyes, nose, face shape — then hair color/style,
+                             then signature outfit and build. Keep hands correct (five fingers).
                              BUT VARY pose, camera angle, framing, and facial expression per
                              scene to match THIS line's emotional beat — do NOT repeat the
                              same pose+expression+composition across scenes even if the

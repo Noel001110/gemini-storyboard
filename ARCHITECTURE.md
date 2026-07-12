@@ -32,6 +32,7 @@ NACHGANG IN LOGIC/DAVINCI:
 ```
 1. SCRIPT-EINGABE
    └─ Du tippst ein Skript in den Kanal-Editor (DE/EN, mit Stil-Preset aus 5 Templates)
+   └─ Beim Tippen läuft ein 2.5s Debounce-Speicher. Beim Klick auf "Planen" wird ein synchroner harter Save-Befehl gefeuert, damit kein Text verloren geht.
 
 2. ANALYZE (LLM)
    └─ Gemini (via KIE.ai) zerlegt Skript in:
@@ -40,7 +41,7 @@ NACHGANG IN LOGIC/DAVINCI:
       - Hook (Cold-Open) + Throughline-Question
       - Pacing (calm/normal/punchy)
       - Visual Sequences (für Style-Konsistenz über Szenen)
-      - Charsheets (Char-Referenz-Bilder)
+      - Charsheets (Char-Referenz-Bilder). Hier greift neuerdings eine Ausnahme zur "invent nothing"-Regel: Fehlt eine optische Beschreibung im Text, MUSS die KI einen Basis-Look (z.B. "young man") erfinden, um den Charakter nicht versehentlich ganz wegzuwerfen.
 
 3. VOICE (TTS) — die einzige Audio-Quelle
    └─ ElevenLabs TTS → MP3 mit Narration. Default-Modell eleven_multilingual_v2

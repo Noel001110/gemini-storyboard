@@ -46,10 +46,8 @@ Backend (`dashboard.py`) braucht Neustart. Vorher prüfen dass kein Job läuft
 Pro **Kanal** (`channels/<cid>/`) beliebig viele **Videos** (`channels/<cid>/videos/<vid>/`).
 Die Pipeline pro Video:
 
-1. **Skript** — Text eintippen oder aus Titel/Thema generieren. Wird debounced
-   in `script.json` persistiert (überlebt Browser-/Geräte-Wechsel).
-2. **Voice-Setup** — Voice + 5 Slider wählen (Stability, Similarity, Style,
-   **Speed** 0.7-1.2, Speaker-Boost). "Voice testen" für 2-Sek-Stimmprobe.
+1. **Skript** — Text eintippen oder aus Titel/Thema generieren. Wird debounced in `script.json` persistiert (beim Klick auf "Planen" wird zusätzlich synchron hart gespeichert, damit nichts verloren geht).
+2. **Voice-Setup** — Voice + 5 Slider wählen. Default-Audit Juli 2026 für Doku-Narration: Stability 0.4, Similarity 0.75, Style 0.0, **Speed** 1.1, Speaker-Boost an. "Voice testen" für 2-Sek-Stimmprobe.
 3. **Voiceover generieren** — bei Texten > 4800 Zeichen Auto-Chunking
    (Satzgrenzen + ffmpeg-concat). Ergebnis: 7-Min-MP3 + Word-Timestamps
    + Inline-Audio-Player im UI.

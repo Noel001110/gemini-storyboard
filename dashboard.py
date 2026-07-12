@@ -737,7 +737,7 @@ def analyze_script(beats):
         '  "locations": [{"id": "loc_01", "name": string, "description": string, '
         '"first_appears_beat": N}],\n'
         '  "characters": [{"id": "char_01", "name_or_role": string, "visual_description": '
-        'string, "anonymize": bool, "first_appears_beat": N}],\n'
+        '"string (EXCEPTION to the invent nothing rule: if no look is described, invent a generic basic look, e.g. \'young man, casual clothes\')", "anonymize": bool, "first_appears_beat": N}],\n'
         '  "recurring_symbols": [{"id": "sym_01", "object": string, "meaning": string, '
         '"beats": [N, N]}],\n'
         '  "emotional_arc": {"opening": "ONE word", "midpoint": "ONE word", "resolution": "ONE word"},\n'
@@ -1231,12 +1231,10 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
                     # above, background/pose/action must follow the scene description,
                     # only the character's identity is pinned to the reference.
                     full_prompt += (
-                        "\n\nCHARACTER CONTINUITY: One reference image shows this same "
-                        "character from an earlier scene in this video. You MUST keep "
-                        "their exact identity — face, hairstyle, hair color, and outfit — "
-                        "consistent with that reference. The pose, background, and action "
-                        "follow the scene description above, not the reference image's "
-                        "setting.")
+                        "\n\nCHARACTER CONTINUITY: The reference image shows this exact character. "
+                        "Preserve their FACIAL identity first — same eyes, nose, face shape — then "
+                        "hair color/style, then outfit and build. Keep hands correct (five fingers). "
+                        "Vary only pose, framing and expression to fit this scene's action above.")
                 print(f"  [BatchGen] Szene {i}: char_ref {'angehängt' if use_style_ref else 'NICHT angehängt'} "
                       f"(concrete_entity={entity!r}), Ketten-Refs: {len(chain_refs)}, "
                       f"Entity-Refs: {len(entity_refs)}", flush=True)
@@ -3976,12 +3974,10 @@ class H(BaseHTTPRequestHandler):
                         "action described above.")
                 else:
                     full_prompt += (
-                        "\n\nCHARACTER CONTINUITY: One reference image shows this same "
-                        "character from an earlier scene in this video. You MUST keep "
-                        "their exact identity — face, hairstyle, hair color, and outfit — "
-                        "consistent with that reference. The pose, background, and action "
-                        "follow the scene description above, not the reference image's "
-                        "setting.")
+                        "\n\nCHARACTER CONTINUITY: The reference image shows this exact character. "
+                        "Preserve their FACIAL identity first — same eyes, nose, face shape — then "
+                        "hair color/style, then outfit and build. Keep hands correct (five fingers). "
+                        "Vary only pose, framing and expression to fit this scene's action above.")
             # Global concurrency cap — blocks here if MAX_CONCURRENT_IMAGE_GENS are already
             # in flight from ANY source (batch or other individual clicks), instead of
             # firing this KIE submission immediately alongside all the others. Released by

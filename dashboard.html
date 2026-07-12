@@ -1575,6 +1575,7 @@ function estimate(){
 let _planPollTimer = null;
 
 async function makePlan(){
+  if(_scriptSaveTimer) { clearTimeout(_scriptSaveTimer); await _flushScriptToServer(); }
   const btn=$('planBtn'); btn.disabled=true; btn.textContent='Plane…';
   const sec = CURRENT_MODE === 'video' ? +(($('veoDuration')||{}).value||8) : +$('sec').value;
   const r=await ch_api('/api/plan',{script:$('script').value,wpm:+$('wpm').value,sec});

@@ -148,6 +148,7 @@ komplett leere `characters`-Liste zurück — bisher gab es dafür KEINEN Retry
 
 - `analyze_script()` wiederholt sich jetzt einmal, wenn `characters` bei einem
   nicht-trivialen Skript (≥5 Beats) leer zurückkommt.
+- **"Invent Nothing" Ausnahme (Der "Jake"-Bug):** Bisher verwarf `analyze_script` Charaktere komplett, wenn im Text keine explizite optische Beschreibung stand (wegen der strengen "invent nothing"-Regel). Jetzt wird per JSON-Schema-Prompt erzwungen: wenn keine Beschreibung im Text existiert, erfindet die KI einen "generic basic look" (z.B. "young man, casual clothes"). So bleiben die Charaktere erhalten und erscheinen im UI, damit du Referenzbilder hochladen kannst.
 - `_validate_image_prompt_entry()` erkennt jetzt, wenn die rohe Entity-ID
   (mit Unterstrichen) wörtlich im `image_prompt` auftaucht, und wirft den
   Eintrag in den bestehenden Single-Retry-Pfad.
