@@ -834,10 +834,11 @@ def t_shot_hint_document_has_priority_over_closeup():
     """Ein Prompt, der SOWOHL 'top-down'/'document' ALS AUCH 'close-up' enthält, muss
     die Dokument-Kategorie bekommen (Lesbarkeit schlägt Intimitäts-Zoom -- ein
     schwenkender Zoom über Bildschirmtext macht ihn unlesbar). Feinschliff Runde 2:
-    'static' ist aus der Dokument-Regel entfernt (jede Szene bekommt einen Effekt)."""
+    'static' ist aus der Dokument-Regel entfernt (jede Szene bekommt einen Effekt).
+    Feinschliff Runde 3: Pool zoom-lastig erweitert (['tilt_down','zoom_in'])."""
     from engine.render import _shot_hint_from_prompt
     hint = _shot_hint_from_prompt("A top-down close-up of a printed medical report")
-    assert hint == ["tilt_down"], f"Dokument-Priorität erwartet, war: {hint}"
+    assert hint == ["tilt_down", "zoom_in"], f"Dokument-Priorität erwartet, war: {hint}"
 
 
 def t_shot_hint_wide_and_no_match():
@@ -859,18 +860,22 @@ def t_motion_avoids_direction_reversal_from_previous_scene():
 
 def t_motion_every_scene_gets_a_real_effect_never_stylistic_static():
     """Feinschliff Runde 2 (User-Feedback 'jede Szene braucht einen Effekt'): die frühere
-    'jede 3./4. unabhängige Szene wird static'-Regel ist entfernt. 'static' darf nur noch
-    über den technischen dur<1.2s-Fallback zurückkommen, nie über die stilistische
-    Auswahl (Prompt-Hint/Phase/Pacing)."""
+    'jede 3./4. unabhängige Szene wird static'-Regel ist entfernt. 'static' darf nie
+    über die stilistische Auswahl (Prompt-Hint/Phase/Pacing) zurückkommen -- nur noch
+    über den technischen Kurz-Dauer-Fallback (Feinschliff Runde 3: Schwelle 1.2s -> 2.0s,
+    User-Wunsch 'kurze Bilder auch mal ohne Effekt')."""
     from engine.render import _motion_for_scene
     for i in range(20):
         scene = {"i": i, "dur": 3.0, "pacing": "normal", "prompt": "Generic scene description"}
         m = _motion_for_scene(scene, None)
         assert m["name"] != "static", f"i={i}: static sollte nie mehr stilistisch gewählt werden"
-    # Technischer Fallback bleibt: extrem kurze Szene ist weiterhin static.
-    short_scene = {"i": 0, "dur": 0.8, "pacing": "normal"}
-    m_short = _motion_for_scene(short_scene, None)
-    assert m_short["name"] == "static", "dur<1.2s muss weiterhin auf static fallen (technischer Grund)"
+    # Technischer Fallback: dur < 2.0s ist static (Runde 3, angehoben von 1.2s).
+    for dur in (0.8, 1.5, 1.99):
+        m_short = _motion_for_scene({"i": 0, "dur": dur, "pacing": "normal"}, None)
+        assert m_short["name"] == "static", f"dur={dur}s (<2.0s) muss static sein, war: {m_short['name']}"
+    # Ab 2.0s greift wieder die stilistische Auswahl (echter Effekt).
+    m_long = _motion_for_scene({"i": 0, "dur": 2.0, "pacing": "normal"}, None)
+    assert m_long["name"] != "static", f"dur=2.0s sollte einen echten Effekt bekommen, war: {m_long['name']}"
 
 
 def t_motion_hook_intensity_lowered_and_snap_zoom_capped():
@@ -1061,6 +1066,159 @@ def t_render_worker_motion_always_recomputed_not_cached():
     assert 's["motion"] = _motion_for_scene(' in body
 
 
+# --- Feinschliff Runde 3: Zoom-Knick-Bug, konstante Geschwindigkeit, Anti-Monotonie --
+
+def t_r3_build_motion_never_returns_z_below_one():
+    """Bug 1 (Zoom-Knick): z0/z1 dürfen NIE unter 1.0 fallen -- ffmpegs zoompan clampt
+    intern genauso, ein ungeclamptes z<1.0 in unseren eigenen Werten (wie es die alte
+    Mittelpunkt-Skalierung bei langen Szenen erzeugte, real gemessen z0=0.967) führt zu
+    einem sichtbaren Einfrieren-dann-Ansprung."""
+    from engine.render import _build_motion, MOTION_LIBRARY
+    for name in MOTION_LIBRARY:
+        for dur in (0.5, 1.0, 2.0, 3.8, 6.0, 10.0):
+            m = _build_motion(name, dur)
+            assert m["z0"] >= 1.0, f"{name} dur={dur}: z0={m['z0']} < 1.0"
+            assert m["z1"] >= 1.0, f"{name} dur={dur}: z1={m['z1']} < 1.0"
+
+
+def t_r3_zoom_focus_is_centered_not_045():
+    """Bug 1: Zoom-Fokus muss (0.5, 0.5) sein -- bei 0.45 wird der y-Ausdruck bei
+    zoom=1.0 negativ und zoompan clampt auf 0 (der Crop 'klebt' beim Zoom-Start oben)."""
+    from engine.render import _build_motion
+    for name in ("zoom_in", "zoom_out", "snap_zoom_in"):
+        m = _build_motion(name, 3.0)
+        assert tuple(m["focus0"]) == (0.5, 0.5), f"{name}: focus0={m['focus0']}"
+        assert tuple(m["focus1"]) == (0.5, 0.5), f"{name}: focus1={m['focus1']}"
+
+
+def t_r3_zoom_delta_scales_with_duration_anchored_at_130_percent():
+    """Bug 2: die Zoom-GESCHWINDIGKEIT (%/s) muss über alle Szenendauern konstant sein
+    -- das Delta zum Start skaliert mit ZOOM_RATE_PER_SEC*dur (geclamped), der Zoom-
+    ENDZUSTAND bleibt bei 1.3 (User-Vorgabe 120-140% aus Runde 2) verankert."""
+    from engine.render import _build_motion, ZOOM_RATE_PER_SEC, ZOOM_DELTA_MIN, ZOOM_DELTA_MAX
+
+    def expected_delta(dur):
+        return max(ZOOM_DELTA_MIN, min(ZOOM_DELTA_MAX, ZOOM_RATE_PER_SEC * dur))
+
+    for dur in (2.5, 3.8, 8.0, 20.0):
+        m_in = _build_motion("zoom_in", dur)
+        delta = expected_delta(dur)
+        assert m_in["z1"] == 1.3, f"zoom_in dur={dur}: z1 muss bei 1.3 verankert sein, war {m_in['z1']}"
+        assert abs(m_in["z0"] - (1.3 - delta)) < 1e-6, \
+            f"zoom_in dur={dur}: z0={m_in['z0']}, erwartet {1.3 - delta}"
+        m_out = _build_motion("zoom_out", dur)
+        assert m_out["z0"] == 1.3, f"zoom_out dur={dur}: z0 muss bei 1.3 verankert sein, war {m_out['z0']}"
+        assert abs(m_out["z1"] - (1.3 - delta)) < 1e-6, \
+            f"zoom_out dur={dur}: z1={m_out['z1']}, erwartet {1.3 - delta}"
+    # 8s-Szene bewegt sich langsamer (kleineres Delta, geclampt) als eine 2.5s-Szene, da
+    # die Rate konstant ist, aber die Dauer (und damit Sichtbarkeit) wächst.
+    assert expected_delta(8.0) > expected_delta(2.5), "8s sollte ein größeres Delta als 2.5s liefern"
+
+
+def t_r3_pan_tilt_travel_scales_with_duration_stays_centered_and_capped():
+    """Bug 2: Pan/Tilt-Fokuswanderung skaliert mit PAN_RATE_PER_SEC*dur (geclamped auf
+    PAN_TRAVEL_MAX=0.12 RADIUS pro Seite, siehe `travel` in _build_motion), bleibt aber
+    immer symmetrisch um den Mittelpunkt des MOTION_LIBRARY-Rezepts zentriert -- nie
+    nah am Bildrand. `travel` in _build_motion ist der Radius (Abstand pro Seite von
+    der Mitte) -- der volle Weg (focus1-focus0) ist entsprechend 2x travel."""
+    from engine.render import _build_motion, MOTION_LIBRARY, PAN_TRAVEL_MAX
+    for name, axis in (("pan_left", 0), ("pan_right", 0), ("tilt_up", 1), ("tilt_down", 1)):
+        base = MOTION_LIBRARY[name]
+        mid = (base["focus0"][axis] + base["focus1"][axis]) / 2
+        for dur in (1.0, 3.8, 8.0, 20.0):
+            m = _build_motion(name, dur)
+            f0, f1 = m["focus0"][axis], m["focus1"][axis]
+            radius = abs(f1 - f0) / 2
+            assert radius <= PAN_TRAVEL_MAX + 1e-6, f"{name} dur={dur}: radius={radius} > {PAN_TRAVEL_MAX}"
+            assert abs((f0 + f1) / 2 - mid) < 1e-6, f"{name} dur={dur}: nicht zentriert, Mitte={(f0+f1)/2}"
+        # Längere Szene = größere (bis zum Cap) Wanderung als eine sehr kurze.
+        travel_short = abs(_build_motion(name, 1.0)["focus1"][axis] - _build_motion(name, 1.0)["focus0"][axis])
+        travel_long = abs(_build_motion(name, 8.0)["focus1"][axis] - _build_motion(name, 8.0)["focus0"][axis])
+        assert travel_long >= travel_short, f"{name}: 8s-Wanderung sollte >= 1s-Wanderung sein"
+
+
+def t_r3_short_scene_threshold_raised_to_two_seconds():
+    """User-Wunsch 'kurze Bilder auch mal ohne Effekt': die technische Static-Schwelle
+    ist von dur<1.2s auf dur<2.0s angehoben."""
+    src = open(os.path.join(ROOT, "engine", "render.py")).read()
+    idx = src.find("def _motion_for_scene(")
+    assert idx != -1
+    body = src[idx:idx + 2500]
+    assert "dur < 2.0" in body, "Static-Schwelle sollte jetzt bei dur<2.0 liegen"
+    assert "dur < 1.2" not in body, "alte 1.2s-Schwelle sollte nicht mehr im aktiven Pfad stehen"
+
+
+def t_r3_avoid_reversal_also_forbids_exact_repeat():
+    """Bug 3: eine Kette identischer Motions (im echten Video bis zu 7x tilt_down in
+    Folge beobachtet) darf nicht mehr auftreten -- die exakte Wiederholung der
+    Vorszenen-Motion wird jetzt (zusätzlich zur Gegenrichtung) gemieden, solange ein
+    alternativer Kandidat existiert."""
+    from engine.render import _pick_motion_avoiding_reversal, _build_motion
+    prev = {"motion": _build_motion("tilt_down", 3.0)}
+    candidates = ["tilt_down", "tilt_up", "zoom_in"]
+    for seed in range(len(candidates)):
+        picked = _pick_motion_avoiding_reversal(candidates, seed, prev)
+        assert picked != "tilt_down", f"seed={seed}: exakte Wiederholung hätte gemieden werden müssen"
+
+    # Sweep über 6 unabhängige Szenen mit demselben Kandidaten-Pool: nie zweimal
+    # derselbe Name in Folge (bei >=2 unterschiedlichen Kandidaten).
+    pool = ["zoom_in", "zoom_out", "tilt_down", "pan_right"]
+    prev_scene = None
+    seen = []
+    for seed in range(6):
+        name = _pick_motion_avoiding_reversal(pool, seed, prev_scene)
+        seen.append(name)
+        prev_scene = {"motion": _build_motion(name, 3.0)}
+    for a, b in zip(seen, seen[1:]):
+        assert a != b, f"Wiederholung in Folge trotz >=2 Kandidaten: {seen}"
+
+
+def t_r3_pan_reversal_fallback_still_works_for_two_item_mutual_opposite_pool():
+    """Randfall: ein reines 2er-Pool aus mutual-opposite Bewegungen (z.B.
+    ['pan_left','pan_right'], die Wide-Shot-Regel) darf NICHT blockieren, wenn die
+    Vorszene bereits einer der beiden war -- Stufe 1 (Opposite+Repeat) schließt dann
+    ALLE Kandidaten aus, Stufe 2 fällt auf 'nur Opposite meiden' zurück (Wiederholung
+    ist weniger schlimm als Ping-Pong, siehe Docstring)."""
+    from engine.render import _pick_motion_avoiding_reversal, _build_motion
+    prev = {"motion": _build_motion("pan_right", 3.0)}
+    picked = _pick_motion_avoiding_reversal(["pan_left", "pan_right"], seed=0, prev_scene=prev)
+    assert picked == "pan_right", f"Stufe-2-Fallback hätte pan_right liefern müssen, war: {picked}"
+
+
+def t_r3_zoom_pair_removed_from_opposite_motion_table():
+    """User-Wunsch 'mehr Ken-Burns-Zooms': zoom_in<->zoom_out ist kein Ping-Pong,
+    sondern das erwünschte alternierende Doku-Muster -- darf NICHT mehr in
+    _OPPOSITE_MOTION stehen (sonst würde die Reversal-Vermeidung es fälschlich
+    blockieren)."""
+    from engine.render import _OPPOSITE_MOTION
+    assert _OPPOSITE_MOTION.get("zoom_in") != "zoom_out"
+    assert _OPPOSITE_MOTION.get("zoom_out") != "zoom_in"
+    assert "zoom_in" not in _OPPOSITE_MOTION
+    assert "zoom_out" not in _OPPOSITE_MOTION
+
+
+def t_r3_style_pools_have_at_least_two_entries_and_zoom_majority():
+    """Anti-Monotonie: jeder stilistische Kandidaten-Pool braucht >=2 EINZIGARTIGE
+    Einträge (sonst kann _pick_motion_avoiding_reversal die Wiederholung nicht
+    umgehen) und einen Zoom-Anteil >=50% (User-Wunsch 'mehr Ken-Burns-Zooms')."""
+    from engine.render import _PACING_MOTION_CANDIDATES, _PHASE_MOTION_CANDIDATES, _SHOT_HINT_RULES
+    zoom_names = {"zoom_in", "zoom_out", "snap_zoom_in"}
+
+    def check(label, candidates):
+        assert len(set(candidates)) >= 2, f"{label}: braucht >=2 einzigartige Kandidaten, war {candidates}"
+        zoom_share = sum(1 for c in candidates if c in zoom_names) / len(candidates)
+        assert zoom_share >= 0.5, f"{label}: Zoom-Anteil {zoom_share:.2f} < 50%, war {candidates}"
+
+    for pacing, candidates in _PACING_MOTION_CANDIDATES.items():
+        check(f"_PACING_MOTION_CANDIDATES[{pacing}]", candidates)
+    for phase, candidates in _PHASE_MOTION_CANDIDATES.items():
+        check(f"_PHASE_MOTION_CANDIDATES[{phase}]", candidates)
+    for keywords, candidates in _SHOT_HINT_RULES:
+        if candidates == ["pan_left", "pan_right"]:
+            continue  # Wide-Shot-Regel ist bewusst reine Pan-Achse, keine Zoom-Pflicht
+        assert len(set(candidates)) >= 2, f"_SHOT_HINT_RULES{keywords}: braucht >=2 Kandidaten"
+
+
 def t_hard_deadline_aborts_hanging_call_instead_of_blocking():
     """Ein hängender ElevenLabs-Socket (Idle-Timeout feuert nicht) darf den Job NICHT
     ewig blockieren: der Watchdog-Deckel (future.result(timeout=...)) muss feuern und
@@ -1102,6 +1260,402 @@ def t_hard_deadline_normal_call_unaffected():
     with patch.object(el, "_urlopen_json", side_effect=_fast):
         resp, rid = el._elevenlabs_call_with_retry("http://x", {}, {})
     assert resp == {"ok": True} and rid == "req-xyz"
+
+
+# --- Evaluation Juli 2026: Umbau-Vorschlag Bildgenerierung + Konsistenz ---------
+
+def t_evalu_d1_batch_worker_style_ref_always_attached():
+    """D1 (Fund 1): der Batch-Worker darf den Style-Ref nicht mehr weglassen, sobald
+    ein Chain-/Entity-Anchor existiert -- sonst verlieren Charakter-Szenen den
+    Grafik-Stil-Anker. use_style_ref darf nur noch von style_ref_urls selbst abhängen.
+    (Audit Juli 2026, Bereich 3: style_ref_url -> style_ref_urls, Liste statt Einzel-URL.)"""
+    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    idx = src.find("use_style_ref = bool(style_ref_urls)")
+    assert idx != -1, "use_style_ref-Zuweisung nicht gefunden"
+    line_end = src.find("\n", idx)
+    line = src[idx:line_end]
+    assert "has_prior_ref" not in line, f"has_prior_ref-Bedingung sollte entfernt sein: {line}"
+    assert line.strip() == "use_style_ref = bool(style_ref_urls)", f"unerwartete Zeile: {line}"
+
+
+def t_evalu_d1_generate_one_style_ref_always_attached():
+    """D1: derselbe Fix am zweiten Aufrufer (/api/generate_one, Einzelklick) -- vorher
+    hing use_style_ref hier noch von `not (entity_refs or chain_refs)` ab."""
+    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    occurrences = [i for i in range(len(src)) if src.startswith("use_style_ref = bool(style_ref_urls)", i)]
+    assert len(occurrences) == 2, f"erwartet 2 Aufrufstellen mit dem Fix, gefunden: {len(occurrences)}"
+    for idx in occurrences:
+        line_end = src.find("\n", idx)
+        assert "has_prior_ref" not in src[idx:line_end]
+        assert "entity_refs or chain_refs" not in src[idx:line_end]
+
+
+def t_evalu_d1_refs_order_identity_before_style():
+    """D1: Reihenfolge muss Identitäts-Refs (chain/entity) vor Style-Ref(s) sein --
+    frühe Referenzbilder werden stärker gewichtet (Recherche-Befund)."""
+    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    for marker in ("refs = chain_refs + entity_refs + (style_ref_urls if use_style_ref else [])",):
+        assert src.count(marker) == 2, f"erwartet 2x identische refs-Zuweisung, war: {src.count(marker)}"
+
+
+def t_evalu_d2_resolve_entity_ref_combines_charsheet_and_anchor():
+    """D2 (Fund 2): existiert ZUSÄTZLICH zur Anchor-Szene ein Charsheet-PNG, gibt
+    _resolve_entity_ref jetzt BEIDE zurück (Charsheet zuerst als Identitäts-Anker,
+    Anchor-Szene danach für Outfit/Kontext) -- vorher wurde das Charsheet in diesem
+    Fall komplett ignoriert."""
+    import dashboard
+    from engine.scenes import _resolve_entity_ref
+
+    out_dir = dashboard.v_out(TEST_CID, TEST_VID)
+    os.makedirs(out_dir, exist_ok=True)
+    img_path = os.path.join(out_dir, "010.jpg")
+    with open(img_path, "wb") as f:
+        f.write(b"\xff\xd8\xff\xfake-jpeg-bytes-for-test")
+
+    sheets_dir = dashboard.ch_sheets(TEST_CID, TEST_VID)
+    os.makedirs(sheets_dir, exist_ok=True)
+    charsheet_png = os.path.join(sheets_dir, "char_01.png")
+    with open(charsheet_png, "wb") as f:
+        f.write(b"\x89PNG-fake-bytes-for-test")
+    with open(os.path.join(sheets_dir, "char_01.json"), "w") as f:
+        json.dump({"name": "Test Person", "safe": "char_01"}, f)
+
+    plan_path = dashboard.v_plan(TEST_CID, TEST_VID)
+    plan = {
+        "scenes": [
+            {"i": 10, "concrete_entity": "char_01", "status": "fertig", "file": "010.jpg"},
+            {"i": 11, "concrete_entity": "char_01", "status": "geplant", "file": None},
+        ],
+        "characters": [],
+    }
+    with open(plan_path, "w") as f:
+        json.dump(plan, f)
+
+    try:
+        scene = plan["scenes"][1]
+        refs, debug = _resolve_entity_ref(plan_path, scene, wait=False)
+        assert refs == [charsheet_png, img_path], f"erwartet [charsheet, anchor], war: {refs}"
+        assert debug.get("source") == "anchor-scene-local-file+charsheet"
+        assert debug.get("is_local") is True
+        assert debug.get("charsheet_file") == charsheet_png
+    finally:
+        shutil.rmtree(sheets_dir, ignore_errors=True)
+
+
+def t_evalu_d2_resolve_entity_ref_anchor_only_when_no_charsheet():
+    """D2 Regressionsschutz: ohne Charsheet bleibt das alte Einzelbild-Verhalten exakt
+    erhalten (kein charsheet_file-Key, source unverändert 'anchor-scene-local-file')."""
+    import dashboard
+    from engine.scenes import _resolve_entity_ref
+
+    out_dir = dashboard.v_out(TEST_CID, TEST_VID)
+    os.makedirs(out_dir, exist_ok=True)
+    img_path = os.path.join(out_dir, "020.jpg")
+    with open(img_path, "wb") as f:
+        f.write(b"\xff\xd8\xff\xfake-jpeg-bytes-for-test")
+
+    plan_path = dashboard.v_plan(TEST_CID, TEST_VID)
+    plan = {
+        "scenes": [
+            {"i": 20, "concrete_entity": "char_02", "status": "fertig", "file": "020.jpg"},
+            {"i": 21, "concrete_entity": "char_02", "status": "geplant", "file": None},
+        ],
+        "characters": [],
+    }
+    with open(plan_path, "w") as f:
+        json.dump(plan, f)
+
+    scene = plan["scenes"][1]
+    refs, debug = _resolve_entity_ref(plan_path, scene, wait=False)
+    assert refs == [img_path], f"erwartet nur Anchor, war: {refs}"
+    assert debug.get("source") == "anchor-scene-local-file"
+    assert "charsheet_file" not in debug
+
+
+def t_evalu_a2_upload_tries_kie_first():
+    """Änderung 2: upload_image_public probiert KIEs File-Upload-API ZUERST, catbox
+    nur bei KIE-Fehler."""
+    from engine import imagegen
+    calls = []
+
+    def fake_multipart(url, field, filename, data, mime, extra_fields=None, extra_headers=None):
+        calls.append(url)
+        if url == imagegen.KIE_UPLOAD_URL:
+            return json.dumps({"success": True, "data": {"downloadUrl": "https://api.kie.ai/fake/x.jpg"}})
+        raise AssertionError(f"catbox/litterbox sollte bei KIE-Erfolg nicht aufgerufen werden: {url}")
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        f.write(b"\x89PNGfake")
+        path = f.name
+    try:
+        # kie_key() liest ~/.kie_key -- im Test-HOME (siehe setup()) existiert diese
+        # Datei nicht, muss also gemockt werden, sonst scheitert schon der Key-Read
+        # VOR dem (gemockten) _multipart_upload-Call.
+        with patch.object(imagegen, "_multipart_upload", side_effect=fake_multipart), \
+             patch.object(imagegen, "kie_key", return_value="fake-key-for-test"):
+            url = imagegen.upload_image_public(path)
+        assert url == "https://api.kie.ai/fake/x.jpg"
+        assert calls == [imagegen.KIE_UPLOAD_URL], f"erwartet nur den KIE-Call, war: {calls}"
+    finally:
+        os.remove(path)
+
+
+def t_evalu_a2_upload_falls_back_to_catbox_on_kie_failure():
+    """Änderung 2: schlägt der KIE-Upload fehl, greift die catbox-Fallback-Kette --
+    genau wie vorher, nur jetzt als zweite statt erste Stufe."""
+    from engine import imagegen
+    calls = []
+
+    def fake_multipart(url, field, filename, data, mime, extra_fields=None, extra_headers=None):
+        calls.append(url)
+        if url == imagegen.KIE_UPLOAD_URL:
+            raise RuntimeError("simulated KIE outage")
+        if "catbox.moe/user" in url:
+            return "https://files.catbox.moe/fake.png"
+        raise AssertionError(f"unerwarteter Upload-Call: {url}")
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        f.write(b"\x89PNGfake")
+        path = f.name
+    try:
+        with patch.object(imagegen, "_multipart_upload", side_effect=fake_multipart), \
+             patch.object(imagegen, "kie_key", return_value="fake-key-for-test"):
+            url = imagegen.upload_image_public(path)
+        assert url == "https://files.catbox.moe/fake.png"
+        assert calls[0] == imagegen.KIE_UPLOAD_URL, f"KIE muss zuerst versucht werden, war: {calls}"
+    finally:
+        os.remove(path)
+
+
+def t_evalu_a2_charsheet_url_cache_ttl_expires():
+    """Änderung 2: ein abgelaufener Cache-Eintrag (>20h, siehe _CHARSHEET_UPLOAD_TTL_SEC)
+    muss neu hochgeladen werden -- sonst würde eine tote KIE-URL (24h-TTL) endlos an
+    KIE als Referenz gesendet."""
+    from engine import imagegen
+    import time as _time
+    path = "/tmp/_fake_charsheet_for_ttl_test.png"
+    with imagegen._CHARSHEET_UPLOAD_LOCK:
+        imagegen._CHARSHEET_UPLOAD_CACHE[path] = (
+            "https://stale.example/old.png", _time.time() - imagegen._CHARSHEET_UPLOAD_TTL_SEC - 10)
+    calls = []
+    try:
+        with patch.object(imagegen, "upload_image_public",
+                           side_effect=lambda p: (calls.append(p), "https://fresh.example/new.png")[1]):
+            url = imagegen.get_public_charsheet_url(path)
+        assert url == "https://fresh.example/new.png", "abgelaufener Eintrag muss neu hochgeladen werden"
+        assert calls == [path]
+    finally:
+        with imagegen._CHARSHEET_UPLOAD_LOCK:
+            imagegen._CHARSHEET_UPLOAD_CACHE.pop(path, None)
+
+
+def t_evalu_a2_charsheet_url_cache_hit_within_ttl():
+    """Änderung 2: ein frischer Cache-Eintrag wird NICHT neu hochgeladen."""
+    from engine import imagegen
+    import time as _time
+    path = "/tmp/_fake_charsheet_for_ttl_hit_test.png"
+    with imagegen._CHARSHEET_UPLOAD_LOCK:
+        imagegen._CHARSHEET_UPLOAD_CACHE[path] = ("https://cached.example/still-fresh.png", _time.time())
+    try:
+        with patch.object(imagegen, "upload_image_public",
+                           side_effect=AssertionError("sollte NICHT neu hochladen")):
+            url = imagegen.get_public_charsheet_url(path)
+        assert url == "https://cached.example/still-fresh.png"
+    finally:
+        with imagegen._CHARSHEET_UPLOAD_LOCK:
+            imagegen._CHARSHEET_UPLOAD_CACHE.pop(path, None)
+
+
+def t_evalu_a1_no_image_provider_imports_from_dashboard_in_engine():
+    """Änderung 1 (DoD): engine/* darf die KIE-Submit/Auth/Upload-Symbole nicht mehr
+    per 'from dashboard import' ziehen -- das war der zirkuläre Import, den der Umbau
+    auflösen sollte. `v_out` ist bewusst NICHT in dieser Liste: es ist ein allgemeiner
+    Pfad-Helper (85+ Aufrufstellen in dashboard.py, für Audio/Render/Uploads genauso
+    wie für Bilder), kein Bild-Provider-Symbol -- ihn zu verschieben hätte den Scope
+    dieser Änderung unnötig gesprengt (siehe engine/scenes.py Stufe 1b, die ihn
+    weiterhin lazy aus dashboard zieht, exakt wie vor diesem Umbau)."""
+    forbidden = ("_kie_submit_image", "kie_key", "KIE_API", "upload_image_public")
+    for fname in ("prompts.py", "scenes.py", "render.py", "audio.py", "presets.py", "imagegen.py"):
+        path = os.path.join(ROOT, "engine", fname)
+        if not os.path.exists(path):
+            continue
+        src = open(path).read()
+        for line in src.splitlines():
+            if line.strip().startswith("from dashboard import"):
+                for sym in forbidden:
+                    assert sym not in line, f"{fname}: '{sym}' wird noch aus dashboard importiert: {line.strip()}"
+
+
+def t_evalu_a1_generate_image_kie_roundtrip_mocked():
+    """generate_image(provider='kie') macht Submit+Poll+Download in einem Call --
+    Verhalten identisch zum alten, jetzt entfernten dashboard-internen Muster
+    (Mock-Roundtrip, kein echter KIE-Call)."""
+    from engine import imagegen
+
+    def fake_submit(prompt, model="nano-banana-2", ref_urls=None, **kw):
+        return "task-123"
+
+    def fake_poll(task_id, out_path, **kw):
+        with open(out_path, "wb") as f:
+            f.write(b"fake-image-bytes")
+        return {"ok": True, "file": os.path.basename(out_path), "source_url": "https://x/y.jpg", "error": None}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = os.path.join(tmp, "out.jpg")
+        with patch.object(imagegen, "_kie_submit_image", side_effect=fake_submit), \
+             patch.object(imagegen, "_kie_poll_and_download", side_effect=fake_poll):
+            result = imagegen.generate_image("a prompt", out_path=out_path)
+        assert result == {"ok": True, "url": "https://x/y.jpg", "path": out_path, "error": None}
+        assert os.path.exists(out_path)
+
+
+def t_evalu_a1_generate_image_unknown_provider_errors_gracefully():
+    """generate_image mit unbekanntem provider-Namen darf nicht crashen, sondern
+    liefert ein {"ok": False, "error": ...} -- wichtig als Grundlage für Phase 2a
+    (FLUX-Kontext-A/B), wo ein Tippfehler im provider-Namen sonst eine kryptische
+    KeyError statt einer klaren Fehlermeldung würfe."""
+    from engine import imagegen
+    result = imagegen.generate_image("x", out_path="/tmp/whatever.jpg", provider="does-not-exist")
+    assert result["ok"] is False
+    assert "does-not-exist" in result["error"]
+
+
+def t_evalu_a1_kie_submit_image_accepts_but_does_not_use_seed():
+    """Empirisch verifiziert (echte KIE-Calls, Juli 2026): nano-banana-2 hat KEINEN
+    wirksamen seed-Parameter (Änderung 3 im Umbau-Dokument deshalb verworfen).
+    _kie_submit_image akzeptiert `seed` trotzdem als Parameter (für ein einheitliches
+    Provider-Interface, falls ein späterer Provider ihn nutzt), baut ihn aber NICHT
+    in den KIE-Request-Body ein -- Source-Check statt eines weiteren teuren Live-Calls."""
+    src = open(os.path.join(ROOT, "engine", "imagegen.py")).read()
+    idx = src.find("def _kie_submit_image(")
+    assert idx != -1
+    body = src[idx:idx + 2000]
+    assert "seed: int | None = None" in body, "seed sollte als Parameter existieren (Interface-Vorbereitung)"
+    assert '"seed"' not in body, "seed darf NICHT in den KIE-Request-Body eingebaut werden (wirkungslos, siehe Recherche)"
+
+
+# --- Audit Juli 2026: Bildgenerierung-Routing + ElevenLabs-Tempo ---------------
+
+def t_audit2_b2_gen_charsheet_passes_channel_master():
+    """Bereich 2 (Kernbug): gen_charsheet muss den Kanal-Master an gen_image
+    durchreichen -- vorher war es fest '""', wodurch der Kanal-Stil (z.B. 2D-Flat)
+    das Charsheet NIE erreichte, egal was das Style-Ref-Bild zeigte."""
+    import dashboard
+    from engine.prompts import gen_charsheet
+
+    dashboard.write_master(TEST_CID, "STYLE (apply always): flat 2D cartoon, bold outlines.")
+    captured = {}
+
+    def fake_gen_image(prompt, master, out_path, char_refs=None):
+        captured["prompt"] = prompt
+        captured["master"] = master
+        open(out_path, "wb").write(b"\xff\xd8\xff\xfake")
+        return {"ok": True}
+
+    with patch.object(dashboard, "gen_image", side_effect=fake_gen_image):
+        gen_charsheet(TEST_CID, "Test Person", "a person with brown hair and a red coat")
+
+    assert captured["master"].strip() == "STYLE (apply always): flat 2D cartoon, bold outlines.", \
+        f"Kanal-Master wurde nicht durchgereicht, war: {captured.get('master')!r}"
+
+
+def t_audit2_b2_charsheet_prompt_has_no_hardcoded_style_words():
+    """Bereich 2: der Charsheet-Prompt darf keine hardcodierten Stilwörter mehr
+    enthalten (kämpften bisher aktiv gegen den Kanal-Master) -- der Stil kommt
+    ausschließlich aus master + Style-Ref-Bild, wie bei /api/gen_style_ref.
+    Prüft den ECHTEN, zur Laufzeit gebauten Prompt-String (nicht den Quelltext --
+    ein erklärender Kommentar darf die alten Stilwörter weiter beim Namen nennen)."""
+    import dashboard
+    from engine.prompts import gen_charsheet
+
+    dashboard.write_master(TEST_CID, "STYLE (apply always): flat 2D cartoon, bold outlines.")
+    captured = {}
+
+    def fake_gen_image(prompt, master, out_path, char_refs=None):
+        captured["prompt"] = prompt
+        open(out_path, "wb").write(b"\xff\xd8\xff\xfake")
+        return {"ok": True}
+
+    with patch.object(dashboard, "gen_image", side_effect=fake_gen_image):
+        gen_charsheet(TEST_CID, "Test Person", "a person with brown hair and a red coat")
+
+    prompt = captured["prompt"]
+    for banned in ("semi-realistic", "full shading and natural lighting", "#F0F0F0", "light-grey studio"):
+        assert banned not in prompt, f"hardcodiertes Stilwort noch im Charsheet-Prompt: {banned!r}"
+
+    src = open(os.path.join(ROOT, "engine", "prompts.py")).read()
+    assert 'gen_image(prompt, "", tmp' not in src, "gen_image bekommt noch immer keinen Master"
+
+
+def t_audit2_b3_get_channel_style_refs_parses_multiline_list():
+    """Bereich 3: style_ref_url.txt wird jetzt als newline-separierte Liste gelesen.
+    Eine bestehende 1-Zeilen-Datei (Alt-Kanäle) ist automatisch eine 1-Element-Liste
+    (Abwärtskompat, keine Migration nötig)."""
+    import dashboard
+    p = os.path.join(dashboard.ch_dir(TEST_CID), "style_ref_url.txt")
+    try:
+        open(p, "w").write("https://a.example/1.png\nhttps://b.example/2.png\n")
+        refs = dashboard.get_channel_style_refs(TEST_CID)
+        assert refs == ["https://a.example/1.png", "https://b.example/2.png"], f"war: {refs}"
+
+        open(p, "w").write("https://only-one.example/x.png")
+        refs = dashboard.get_channel_style_refs(TEST_CID)
+        assert refs == ["https://only-one.example/x.png"], f"1-Zeilen-Datei sollte 1-Element-Liste sein, war: {refs}"
+        assert dashboard.get_channel_style_ref(TEST_CID) == "https://only-one.example/x.png"
+
+        os.remove(p)
+        assert dashboard.get_channel_style_refs(TEST_CID) == []
+        assert dashboard.get_channel_style_ref(TEST_CID) == ""
+    finally:
+        if os.path.exists(p):
+            os.remove(p)
+
+
+def t_audit2_b3_set_style_ref_accepts_urls_list_capped_at_three():
+    """Bereich 3: /api/set_style_ref (bzw. dessen Kern-Logik) akzeptiert eine Liste
+    von bis zu 3 URLs und überschreibt style_ref_url.txt komplett damit."""
+    import dashboard
+    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    idx = src.find('if p in ("/api/set_char_ref", "/api/set_style_ref"):')
+    assert idx != -1
+    body = src[idx:idx + 1200]
+    assert 'd.get("urls")' in body, "set_style_ref muss eine 'urls'-Liste akzeptieren"
+    assert "[:3]" in body, "muss auf max. 3 Refs capen"
+
+
+def t_audit2_b4_default_model_is_multilingual_v2():
+    """Bereich 4: v3 (langsame, dramatische Kadenz, speed wirkt kaum) ist nicht mehr
+    Default -- multilingual_v2 respektiert speed zuverlässig."""
+    import engine_elevenlabs as el
+    assert el.ELEVENLABS_DEFAULT_MODEL == "eleven_multilingual_v2", \
+        f"Default-Modell sollte multilingual_v2 sein, war: {el.ELEVENLABS_DEFAULT_MODEL}"
+
+
+def t_audit2_b4_default_settings_match_researched_preset():
+    """Bereich 4: recherche-basiertes Doku-Narration-Preset (stability ~0.4 gegen
+    Monotonie ohne Instabilität, style 0.0 für neutralen Ton, speed 1.1 für
+    dynamischeren YouTube-Takt, similarity_boost <=0.80)."""
+    import engine_elevenlabs as el
+    d = el.ELEVENLABS_VOICE_SETTINGS_DEFAULT
+    assert d["model_id"] == "eleven_multilingual_v2"
+    assert 0.30 <= d["stability"] <= 0.45, f"stability außerhalb 0.30-0.45: {d['stability']}"
+    assert d["style"] == 0.0, f"style sollte 0.0 sein (neutral), war: {d['style']}"
+    assert d["similarity_boost"] <= 0.80
+    assert 1.0 < d["speed"] <= 1.2, f"speed sollte >1.0 aber innerhalb des offiziellen Bereichs sein: {d['speed']}"
+
+
+def t_audit2_b5b_open_video_clears_stale_render_slot():
+    """Bereich 5b: openVideo() muss renderSlot beim Video-Wechsel explizit leeren --
+    sonst bleibt das <video>-Element des vorherigen Kanals/Videos im DOM und taucht
+    wieder auf, sobald updateRenderCardVisibility() die Karte neu einblendet."""
+    src = open(os.path.join(ROOT, "dashboard.html")).read()
+    idx = src.find("async function openVideo(")
+    assert idx != -1
+    next_fn = src.find("\nasync function ", idx + 1)
+    body = src[idx:next_fn if next_fn != -1 else idx + 4000]
+    assert "$('renderSlot')" in body, "openVideo muss renderSlot referenzieren"
+    assert ".innerHTML = " in body, \
+        "openVideo muss renderSlot.innerHTML zurücksetzen, nicht nur die Karte verstecken"
 
 
 def main():
@@ -1224,6 +1778,68 @@ def main():
             "Auswahl liefert nie mehr dolly_in/dolly_out/diagonal_glide")
         run(t_render_worker_motion_always_recomputed_not_cached,
             "Motion wird bei jedem Render frisch berechnet, nicht gecacht")
+
+        summary_section("Feinschliff Runde 3: Zoom-Knick-Bug, Tempo, Anti-Monotonie")
+        run(t_r3_build_motion_never_returns_z_below_one, "z0/z1 nie unter 1.0 (Bug 1)")
+        run(t_r3_zoom_focus_is_centered_not_045, "Zoom-Fokus (0.5,0.5) statt 0.45 (Bug 1)")
+        run(t_r3_zoom_delta_scales_with_duration_anchored_at_130_percent,
+            "Zoom-Delta = rate*dur, verankert bei 1.3 (Bug 2)")
+        run(t_r3_pan_tilt_travel_scales_with_duration_stays_centered_and_capped,
+            "Pan/Tilt-Travel = rate*dur, zentriert, gecapped (Bug 2)")
+        run(t_r3_short_scene_threshold_raised_to_two_seconds,
+            "Static-Schwelle 1.2s -> 2.0s (kurze Bilder ohne Effekt)")
+        run(t_r3_avoid_reversal_also_forbids_exact_repeat,
+            "exakte Wiederholung wird gemieden (Bug 3)")
+        run(t_r3_pan_reversal_fallback_still_works_for_two_item_mutual_opposite_pool,
+            "Stufe-2-Fallback rettet 2er-Mutual-Opposite-Pools")
+        run(t_r3_zoom_pair_removed_from_opposite_motion_table,
+            "zoom_in/zoom_out nicht mehr in _OPPOSITE_MOTION")
+        run(t_r3_style_pools_have_at_least_two_entries_and_zoom_majority,
+            "Stil-Pools zoom-lastig (>=50%) mit >=2 Kandidaten")
+
+        summary_section("Evaluation Juli 2026: Bildgenerierung + Konsistenz-Umbau")
+        run(t_evalu_d1_batch_worker_style_ref_always_attached,
+            "D1: Batch-Worker haengt Style-Ref immer an")
+        run(t_evalu_d1_generate_one_style_ref_always_attached,
+            "D1: /api/generate_one haengt Style-Ref immer an")
+        run(t_evalu_d1_refs_order_identity_before_style,
+            "D1: Ref-Reihenfolge Identitaet vor Stil")
+        run(t_evalu_d2_resolve_entity_ref_combines_charsheet_and_anchor,
+            "D2: Charsheet + Anchor-Szene kombiniert")
+        run(t_evalu_d2_resolve_entity_ref_anchor_only_when_no_charsheet,
+            "D2: ohne Charsheet unveraendertes Einzelbild-Verhalten")
+        run(t_evalu_a2_upload_tries_kie_first,
+            "Aenderung 2: Upload versucht KIE zuerst")
+        run(t_evalu_a2_upload_falls_back_to_catbox_on_kie_failure,
+            "Aenderung 2: Fallback auf catbox bei KIE-Fehler")
+        run(t_evalu_a2_charsheet_url_cache_ttl_expires,
+            "Aenderung 2: Cache-TTL laeuft ab -> Re-Upload")
+        run(t_evalu_a2_charsheet_url_cache_hit_within_ttl,
+            "Aenderung 2: frischer Cache-Eintrag -> kein Re-Upload")
+        run(t_evalu_a1_no_image_provider_imports_from_dashboard_in_engine,
+            "Aenderung 1: kein Bild-Pfad-Import aus dashboard in engine/*")
+        run(t_evalu_a1_generate_image_kie_roundtrip_mocked,
+            "Aenderung 1: generate_image() Submit+Poll+Download-Roundtrip")
+        run(t_evalu_a1_generate_image_unknown_provider_errors_gracefully,
+            "Aenderung 1: unbekannter Provider -> saubere Fehlermeldung")
+        run(t_evalu_a1_kie_submit_image_accepts_but_does_not_use_seed,
+            "Aenderung 3 (verworfen): seed-Parameter existiert, wirkt aber nicht")
+
+        summary_section("Audit Juli 2026: Bildgenerierung-Routing + ElevenLabs-Tempo")
+        run(t_audit2_b2_gen_charsheet_passes_channel_master,
+            "B2: gen_charsheet reicht Kanal-Master an gen_image durch")
+        run(t_audit2_b2_charsheet_prompt_has_no_hardcoded_style_words,
+            "B2: Charsheet-Prompt ohne hardcodierte Stilwoerter")
+        run(t_audit2_b3_get_channel_style_refs_parses_multiline_list,
+            "B3: get_channel_style_refs parst Mehrzeilen-Liste + Abwaertskompat")
+        run(t_audit2_b3_set_style_ref_accepts_urls_list_capped_at_three,
+            "B3: set_style_ref akzeptiert urls-Liste, gecapped auf 3")
+        run(t_audit2_b4_default_model_is_multilingual_v2,
+            "B4: Default-Modell ist eleven_multilingual_v2")
+        run(t_audit2_b4_default_settings_match_researched_preset,
+            "B4: Default-Settings matchen recherchiertes Doku-Preset")
+        run(t_audit2_b5b_open_video_clears_stale_render_slot,
+            "B5b: openVideo leert renderSlot beim Video-Wechsel")
     finally:
         teardown(tmp_home)
 

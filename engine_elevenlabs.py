@@ -55,11 +55,15 @@ __all__ = [
 
 # Konstanten
 ELEVENLABS_API           = "https://api.elevenlabs.io/v1"
-# July 2026 (User-Report): narrator voice switched from v2 to v3 — better prosody and
-# emotion handling for long documentary-style voiceovers. Channel-default voice_id for
-# the narrator is "alex" (17bSMslPF4HPyQrGIXAG). Existing channels with a saved model_id
-# in voice_settings.json keep their value; only freshly-resolved defaults use v3.
-ELEVENLABS_DEFAULT_MODEL = "eleven_v3"
+# Audit Juli 2026 (Bereich 4, "ElevenLabs zu langsam trotz speed=1.2"): v3 zurück auf
+# multilingual_v2. v3 ist das ausdrucksstarke/dramatische Modell -- Pacing läuft dort
+# über Audio-Tags statt über den numerischen speed-Parameter, die natürliche Kadenz
+# ist langsam mit dramatischen Pausen (offizielle Positionierung: "not suitable for
+# real-time"). v2 respektiert speed zuverlässig, hat neutralere/schnellere Kadenz UND
+# unterstützt Request-Stitching-Continuity (siehe previous_request_ids-Guard unten,
+# der genau v3 ausschließt). Existing channels with a saved model_id in
+# voice_settings.json keep their value; only freshly-resolved defaults use v2.
+ELEVENLABS_DEFAULT_MODEL = "eleven_multilingual_v2"
 ELEVENLABS_KEY_FILE      = os.path.expanduser("~/.elevenlabs_key")
 
 # MiniMax Speech — zweiter TTS-Provider (parallel zu ElevenLabs). Provider-Auswahl
@@ -74,11 +78,16 @@ MINIMAX_KEY_FILE         = os.path.expanduser("~/.minimax_key")
 ELEVENLABS_VOICE_SETTINGS_DEFAULT = {
     "voice_id": "",
     "model_id": ELEVENLABS_DEFAULT_MODEL,
-    "stability": 0.5,
+    # Audit Juli 2026 (Bereich 4): recherche-basiertes Doku-Narration-Preset für
+    # multilingual_v2 -- stability 0.4 (35-40% gegen Monotonie bei langen Passagen,
+    # nicht <0.30 sonst instabil), similarity_boost 0.75 (<=0.80, sonst Artefakte),
+    # style 0.0 (neutral, keine Übertreibung für dokumentarischen Ton), speed 1.1
+    # (dynamischer YouTube-Takt; v2 respektiert speed zuverlässig, anders als v3).
+    "stability": 0.4,
     "similarity_boost": 0.75,
     "style": 0.0,
     "use_speaker_boost": True,
-    "speed": 1.0,   # ElevenLabs-API: 0.7–1.2 praxisüblich, >1.0 schneller
+    "speed": 1.1,   # ElevenLabs-API: 0.7–1.2 praxisüblich, >1.0 schneller
     "output_format": "mp3_44100_128",
 }
 

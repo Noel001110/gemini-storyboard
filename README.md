@@ -49,7 +49,7 @@ Die Pipeline pro Video:
 1. **Skript** — Text eintippen oder aus Titel/Thema generieren. Wird debounced
    in `script.json` persistiert (überlebt Browser-/Geräte-Wechsel).
 2. **Voice-Setup** — Voice + 5 Slider wählen (Stability, Similarity, Style,
-   **Speed** 0.7-1.3, Speaker-Boost). "Voice testen" für 2-Sek-Stimmprobe.
+   **Speed** 0.7-1.2, Speaker-Boost). "Voice testen" für 2-Sek-Stimmprobe.
 3. **Voiceover generieren** — bei Texten > 4800 Zeichen Auto-Chunking
    (Satzgrenzen + ffmpeg-concat). Ergebnis: 7-Min-MP3 + Word-Timestamps
    + Inline-Audio-Player im UI.
@@ -57,11 +57,19 @@ Die Pipeline pro Video:
    Race-safe: bestehende gerenderte Bilder werden per Text-Match preserviert.
 5. **Char-Sheets** — manuell hochgeladen oder pipeline-generiert. Bei Duplikaten
    die manuelle Variante behalten (Pipeline-Version in `_pipeline_duplicates/`).
-6. **Bilder** — pro Szene KIE.ai-Generierung, mit Style-Ankern + Character-
-   Referenzen (3-Stufen-Fallback: Anchor-Szene → Datei-Match → Name-Match).
+6. **Bilder** — pro Szene KIE.ai-Generierung (über `engine/imagegen.py`, ein
+   Provider-Interface — `generate_image(provider="kie")`), mit Style-Ankern
+   (Settings-Tab, bis zu 3 Referenzbilder) + Character-Referenzen (3-Stufen-
+   Fallback: Anchor-Szene → Datei-Match → Name-Match). Style- und Charakter-
+   Referenzen werden **beide** angehängt, nie exklusiv gegeneinander getauscht.
 7. **Render** — ffmpeg assembliert `final.mp4` (Voice + Bilder, ohne Sound).
+   Ken-Burns-Bewegung: pro Szene reiner Zoom ODER reiner Pan/Tilt (nie kombiniert),
+   Geschwindigkeit skaliert mit der echten Szenendauer, Anti-Monotonie-Regel
+   verhindert Wiederholung der Vorszenen-Bewegung. Captions: CapCut-Style
+   1-Wort-Einblendungen statt ganzer Sätze.
 
-Optional pro Video: Tonauswahl (ElevenLabs / minimax), Bild-Modell
+Optional pro Video: Tonauswahl (ElevenLabs / minimax; Default-Modell
+`eleven_multilingual_v2` — schnellere, verlässlichere Kadenz als v3), Bild-Modell
 (`nano-banana-2` / `-lite`), Video-Modus (statische Bilder vs. Veo-Videos),
 Overlays (Captions/Callouts/Chapters), Thumbnail-Generierung.
 
@@ -81,16 +89,21 @@ dashboard.py             HTTP-Handler + Routing + persistente Helper
 dashboard.html           Frontend (komplette UI in einer Datei)
 engine/
   scenes.py              Text→Szenen-Segmentierung + Entity-Resolve mit Fallback
-  render.py              Szenen→Video (ffmpeg-Orchestrierung)
-  audio.py               Voice→Sync (Pause-Trim, Timing-Invariant)
+  render.py              Szenen→Video (ffmpeg-Orchestrierung, Ken-Burns-Motion-Lib)
+  audio.py               Voice→Sync (Pause-Trim, Timing-Invariant); Musik/SFX-Mix
+                         bleibt dormant im Code, wird nicht mehr aufgerufen
   prompts.py             Prompt-Bau (Style-Anker, Phase-Cues, Charsheets)
   presets.py             5 Stil-Presets (flat_cartoon_doc, editorial_minimal, …)
+  imagegen.py            Bild-Provider-Interface (generate_image, KIE-Submit/
+                         Poll/Upload) — ein zweiter Provider braucht nur einen
+                         neuen Registry-Eintrag, keine Änderung an Aufrufern
 engine_elevenlabs.py     ElevenLabs-TTS-Integration + Auto-Chunking + Voice-Settings
 render_overlay.py        Overlay-Renderer (Captions/Callouts/Counters)
 whisper_transcribe.py    Whisper-Worker (im .venv_whisper, nur Subprozess)
 start.sh                 Convenience-Starter (kill+restart+open-browser)
 tests/
   test_cinematic_e2e.py  E2E-Tests für die Render-Pipeline
+  test_pipeline_fixes.py Regressionstests für Sync/Char-Refs/Motion/Bild-Provider
 channels/                Laufzeitdaten (gitignored)
 docs/
   PROMPT_PIPELINE.md     Pipeline-Details: Prompt-Bau, Char-Refs, Retry-Logik
@@ -100,13 +113,13 @@ docs/
 ## Tests
 
 ```bash
-.venv_whisper/bin/python -m pytest tests/ -v   # wenn venv vorhanden
-python3 -m pytest tests/ -v                    # sonst mit System-Python
+python3 tests/test_pipeline_fixes.py   # Hand-rolled Runner, kein pytest-Discovery
+python3 tests/test_cinematic_e2e.py    # dito — Funktionsnamen bewusst t_* statt test_*
 ```
 
 ## Bekannte Grenzen
 
-- **`dashboard.py` ist ~4100 Z.** — der HTTP-Handler sollte langfristig in
+- **`dashboard.py` ist ~4260 Z.** — der HTTP-Handler sollte langfristig in
   `routes/` extrahiert werden. Riskanter Refactor, deshalb bisher nicht
   angefasst (siehe ARCHITECTURE.md §"Offene Wunden").
 - **Kein Production-Deployment** — kein Dockerfile, keine HTTPS, kein Auth.
@@ -114,7 +127,6 @@ python3 -m pytest tests/ -v                    # sonst mit System-Python
 
 ## Wenn du ein konkretes Feature suchst
 
-- Was noch offen ist → `docs/80-schwachstellen-tracker.md`
-- Großer Detail-Plan mit Hebel/Aufwand → `CINEMATIC_UPGRADE_PLAN.md`
 - Wie das System intern funktioniert → `ARCHITECTURE.md`
 - Praktische Anleitung + Troubleshooting → `docs/RUNBOOK.md`
+- Pipeline-Details (Prompt-Bau, Char-Refs, Retry-Logik) → `docs/PROMPT_PIPELINE.md`

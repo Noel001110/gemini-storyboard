@@ -593,21 +593,21 @@ def gen_charsheet(cid, name, description, vid=None):
     per-video charsheets directory. Without vid, falls back to the channel-global
     pool (backwards-compat for old call sites).
     """
-    # Lazy-imports: ch_sheets + gen_image live in dashboard.py
-    from dashboard import ch_sheets, gen_image
-    # July 2026 (User-Report: "5 Strichmännchen statt Charakter-Sheet"): Der alte
-    # Prompt war ein Test-Stub (white background, black ink only, medium-weight lines,
-    # no shading). KIE nano-banana-2 hat das brav als Strichmännchen-Skizzen
-    # gerendert. Wir wollen aber einen Character-Reference-Sheet, der im Bild-Generate
-    # als Stil-Anker dient — also: realistische Posen, konsistentes Aussehen,
-    # volle Beleuchtung. Hintergrund bleibt neutral (Studio) für saubere Ref-Verwendung.
+    # Lazy-imports: ch_sheets + gen_image + ch_master live in dashboard.py
+    from dashboard import ch_sheets, gen_image, ch_master
+    # Audit Juli 2026 (Bereich 2, "Charsheets sehen semi-realistisch aus, fertige Bilder
+    # aber wieder korrekt im Kanal-Stil"): dieser Prompt hardcodete bisher "polished,
+    # semi-realistic style with full shading and natural lighting" + eine feste
+    # Studio-Hintergrundfarbe -- das kämpfte aktiv gegen den Kanal-Master (z.B. 2D-Flat),
+    # der bisher AUSSERDEM nie angehängt wurde (siehe unten, `gen_image(prompt, "", ...)`
+    # war der zweite Teil des Bugs). Jetzt: nur noch Pose/Layout-Anweisungen hier, der
+    # Stil kommt ausschließlich aus dem Kanal-Master + Style-Ref-Bild — exakt das Muster,
+    # das /api/gen_style_ref schon immer richtig gemacht hat.
     prompt = (
         f"CHARACTER REFERENCE SHEET for '{name}' — designed for character consistency "
         f"across multiple scenes.\n\n"
-        f"Show the character in 5 different poses on a single horizontal row, on a clean "
-        f"light-grey studio background. Each pose is clearly separated with subtle "
-        f"white spacing. The character must be drawn in a polished, semi-realistic style "
-        f"with full shading and natural lighting.\n\n"
+        f"Show the character in 5 different poses on a single horizontal row, on a simple, "
+        f"uncluttered background so every pose is clearly visible and clearly separated.\n\n"
         f"Poses (left to right):\n"
         f"1. NEUTRAL — front-facing, standing relaxed, arms at sides, neutral expression\n"
         f"2. THREE-QUARTER VIEW — slight angle, hands on hips, confident expression\n"
@@ -620,9 +620,9 @@ def gen_charsheet(cid, name, description, vid=None):
         f"- All 5 poses MUST share identical face shape, head size, hair colour and style, "
         f"skin tone, and clothing design\n"
         f"- Same age, same body proportions across all poses\n"
-        f"- Each pose uses the same colour palette and rendering technique\n"
-        f"- No text labels, no captions, no annotations on the image — pure visual reference\n"
-        f"- Light grey studio background (#F0F0F0) with soft even lighting on the character"
+        f"- Each pose uses the exact same art style, rendering technique and colour palette "
+        f"as specified in the style guide below — never deviate from it\n"
+        f"- No text labels, no captions, no annotations on the image — pure visual reference"
     )
     # Pre-33.2 cleanup: backslash inside an f-string expression part is illegal on
     # Python 3.11/3.12 (PEP 701, allowed only in 3.13+). Extracting the regex
@@ -639,31 +639,34 @@ def gen_charsheet(cid, name, description, vid=None):
     # Referenz rendert KIE die Charsheets in einem generischen Look.
     char_refs = None
     try:
-        from dashboard import get_channel_style_ref
-        style_ref_url = get_channel_style_ref(cid)
-        if style_ref_url and style_ref_url.startswith(("http://", "https://")):
-            # Remote URL — direkt durchreichen
+        from dashboard import ch_dir, get_channel_style_refs
+        style_ref_urls = [u for u in get_channel_style_refs(cid) if u.startswith(("http://", "https://"))]
+        if not style_ref_urls:
+            # Legacy-Fallback: lokales PNG (noch nicht hochgeladene/URL-lose Referenz).
+            # Gilt nur für den EINEN Legacy-Slot -- Multi-Slots liegen immer als URL vor.
+            sp = os.path.join(ch_dir(cid), "style_ref.png")
+            if os.path.exists(sp):
+                style_ref_urls = [_local_png_to_data_url(sp)]
+        if style_ref_urls:
             char_refs = [{
                 "name": "style_ref",
                 "description": "Channel-wide style reference (line weight, palette, render style)",
-                "image_data_url": style_ref_url,
+                "image_data_url": url,
                 "safe": "style_ref",
-            }]
-        else:
-            # Lokales Bild (oder fehlt) — vom Disk laden, in data-URL kodieren
-            sp = os.path.join(ch_dir(cid), "style_ref.png")
-            if os.path.exists(sp):
-                char_refs = [{
-                    "name": "style_ref",
-                    "description": "Channel-wide style reference (line weight, palette, render style)",
-                    "image_data_url": _local_png_to_data_url(sp),
-                    "safe": "style_ref",
-                }]
+            } for url in style_ref_urls]
     except Exception as e:
         print(f"  [Charsheet] Style-Ref konnte nicht geladen werden: {e}", flush=True)
         char_refs = None
 
-    res = gen_image(prompt, "", tmp, char_refs=char_refs)
+    # Audit Juli 2026 (Bereich 2, Kernbug): Kanal-Master anhängen statt "" -- ohne das
+    # erreichte der Kanal-Stil (z.B. 2D-Flat, Strichmännchen) das Charsheet NIE, egal
+    # was der Style-Ref-Bild-Anker zeigte. Gleiches Muster wie /api/gen_style_ref.
+    try:
+        master = open(ch_master(cid)).read().strip()
+    except Exception:
+        master = ""
+
+    res = gen_image(prompt, master, tmp, char_refs=char_refs)
     if res["ok"]:
         data = open(tmp, "rb").read()
         try: os.unlink(tmp)
@@ -827,42 +830,16 @@ def make_thumbnail_prompt(full_script: str, master_style: str) -> str:
 def gen_thumbnail_image(prompt: str, master_style: str, out_path: str,
                          model: str = "nano-banana-2", ref_urls: list | None = None) -> dict:
     """Submits + polls + downloads a 16:9 thumbnail image. Reuses the same KIE image
-    pipeline as scene generation, just with thumbnail-specific dimensions/prompt."""
-    # Lazy-imports: KIE pipeline functions live in dashboard.py
-    import time, urllib.request
-    from dashboard import _kie_submit_image, kie_key, KIE_API
+    pipeline as scene generation, just with thumbnail-specific dimensions/prompt.
+
+    Evaluation Juli 2026 (Änderung 1): nutzt jetzt engine.imagegen.generate_image()
+    statt eines eigenen, zirkulär aus dashboard.py importierten Submit+Poll+Download-
+    Musters (das war 1:1 dieselbe Logik dreimal im Code, siehe engine/imagegen.py
+    Modul-Docstring)."""
+    from engine.imagegen import generate_image
 
     full_prompt = prompt.strip() + "\n\n" + master_style.strip()
-    try:
-        task_id = _kie_submit_image(full_prompt, model=model, ref_urls=ref_urls)
-    except RuntimeError as e:
-        return {"ok": False, "error": str(e)}
-
-    print(f"  [Thumbnail] Task {task_id} läuft …", flush=True)
-    poll_url  = f"{KIE_API}/recordInfo?taskId={task_id}"
-    poll_hdrs = {"Authorization": f"Bearer {kie_key()}"}
-    for poll_i in range(50):
-        time.sleep(3)
-        try:
-            with urllib.request.urlopen(urllib.request.Request(poll_url, headers=poll_hdrs), timeout=15) as r2:
-                info = json.load(r2).get("data", {})
-        except Exception as e:
-            print(f"  [Thumbnail] Poll-Fehler: {e}", flush=True); continue
-        state = info.get("state", "")
-        if state != "waiting" or poll_i % 5 == 0:
-            print(f"  [Thumbnail] {state}", flush=True)
-        if state == "success":
-            try:    urls = json.loads(info.get("resultJson", "{}")).get("resultUrls", [])
-            except: urls = []
-            if not urls: return {"ok": False, "error": "KIE: kein Bild in resultUrls"}
-            try:
-                dl_req = urllib.request.Request(urls[0],
-                    headers={"Referer": "https://kie.ai/", "User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(dl_req, timeout=60) as img_r:
-                    open(out_path, "wb").write(img_r.read())
-            except Exception as e:
-                return {"ok": False, "error": f"Download fehlgeschlagen: {e}"}
-            return {"ok": True, "file": os.path.basename(out_path), "source_url": urls[0]}
-        if state == "fail":
-            return {"ok": False, "error": f"KIE fehlgeschlagen: {info.get('failMsg','unbekannt')}"}
-    return {"ok": False, "error": "KIE Timeout (>150s)"}
+    result = generate_image(full_prompt, ref_urls, out_path=out_path, model=model)
+    if not result["ok"]:
+        return {"ok": False, "error": result.get("error") or "unbekannter Fehler"}
+    return {"ok": True, "file": os.path.basename(out_path), "source_url": result.get("url")}

@@ -408,39 +408,68 @@ def _resolve_entity_ref(plan_path: str, scene: dict, wait: bool = True) -> tuple
     if earlier:
         anchor_i = min(s["i"] for s in earlier)
         anchor = _wait_for_entity_anchor_scene(plan_path, entity, anchor_i, wait=wait)
-        
+
         # 1b) Anchor ist fertig gerendert (hat eine lokale Bilddatei). Wir bevorzugen
         # JEDERZEIT die lokale Datei, damit das Dashboard sie via catbox.moe hochlädt!
         # KIE.ai blockt oft seine eigenen tempfile.aiquickdraw.com URLs als Referenz,
         # was dazu führt, dass Charakter-Referenzen kommentarlos ignoriert werden.
+        #
+        # Evaluation Juli 2026 (Fund 2, D2): ein einziges Anchor-Bild lockt Outfit/Kontext
+        # der Szene, verliert aber mit jeder Wiederholung etwas Gesichts-Identität
+        # (Best-Practice-Recherche: Drift nimmt über sequentielle Generierungen zu).
+        # Existiert ZUSÄTZLICH ein Charsheet (neutrales, klares Gesicht), beide
+        # Referenzen zusammen mitschicken -- Charsheet zuerst (Identitäts-Anker,
+        # frühe Referenzbilder werden stärker gewichtet), Anchor-Szene danach
+        # (Outfit/Kontext). nano-banana-2 nimmt bis zu 14 Referenzbilder, kein Grund
+        # für exklusive Behandlung.
         if anchor.get("file") and vid:
             try:
                 from dashboard import v_out
                 local_path = os.path.join(v_out(cid, vid), anchor["file"])
                 if os.path.exists(local_path):
+                    charsheet_png, charsheet_dbg = _find_charsheet_png(plan, cid, vid, entity)
+                    if charsheet_png:
+                        return ([charsheet_png, local_path],
+                                {"entity_anchor_file": local_path, "entity_anchor_i": anchor_i,
+                                 "charsheet_file": charsheet_png,
+                                 "source": "anchor-scene-local-file+charsheet", "is_local": True,
+                                 "matched_charsheet": charsheet_dbg.get("matched_charsheet")})
                     return ([local_path],
                             {"entity_anchor_file": local_path, "entity_anchor_i": anchor_i,
                              "source": "anchor-scene-local-file", "is_local": True})
             except Exception:
                 pass
-                
+
         # 1) Fallback auf source_url, falls die lokale Datei fehlt
         if anchor.get("source_url"):
             return ([anchor["source_url"]],
                     {"entity_anchor_file": anchor.get("file"), "entity_anchor_i": anchor_i,
                      "source": "anchor-scene"})
 
-    # 2+3) Fallback: Charsheet-PNG (per-video oder channel-pool) als data-URL.
-    # Sucht zuerst nach <entity>.png (matched wenn safe == concrete_entity id),
-    # sonst nach einem Charsheet-JSON mit gleichem 'name' wie der Plan-Generator
-    # ihn erwarten würde. Das deckt den Fall ab dass der User manuell Charsheets
-    # unter sprechenden Namen (z.B. 'elizabeth_holmes') hochgeladen hat während
-    # der Plan 'char_01' als concrete_entity vergibt.
+    # 2+3) Fallback: nur Charsheet-PNG (per-video oder channel-pool), kein Anchor-Bild
+    # vorhanden. Logik in _find_charsheet_png ausgelagert (auch von 1b genutzt).
+    png_path, dbg = _find_charsheet_png(plan, cid, vid, entity)
+    if png_path:
+        return [png_path], dbg
+    return [], {}
+
+
+def _find_charsheet_png(plan: dict, cid: str, vid: str | None, entity: str) -> tuple:
+    """Sucht ein Charsheet-PNG für `entity` (per-video oder channel-pool als data-URL-
+    Fallback). Sucht zuerst nach <entity>.png (matched wenn safe == concrete_entity id),
+    sonst nach einem Charsheet-JSON mit gleichem 'name' wie der Plan-Generator ihn
+    erwarten würde. Das deckt den Fall ab dass der User manuell Charsheets unter
+    sprechenden Namen (z.B. 'elizabeth_holmes') hochgeladen hat während der Plan
+    'char_01' als concrete_entity vergibt. Rückgabe: (png_path|None, debug_dict).
+
+    Ausgelagert aus _resolve_entity_ref (Evaluation Juli 2026, D2), damit sowohl die
+    reine Charsheet-Fallback-Stufe (2+3) als auch die Anchor-Szene-Stufe (1b) dieselbe
+    Suche wiederverwenden können, um Charsheet + Anchor-Bild ZUSAMMEN zurückzugeben.
+    """
     try:
         from dashboard import ch_sheets
 
-        # Helper: alle Charsheets im Pool sammeln mit PNG-Pfad
-        all_sheets = []  # [(name, json_path, png_path), ...]
+        all_sheets = []  # [(name, safe, json_path, png_path), ...]
         for sheet_dir in (ch_sheets(cid, vid), ch_sheets(cid)):
             if not os.path.isdir(sheet_dir):
                 continue
@@ -458,8 +487,7 @@ def _resolve_entity_ref(plan_path: str, scene: dict, wait: bool = True) -> tuple
         # Stufe A: passendes safe == entity (z.B. char_01.png)
         for _name, safe, _jp, png_path in all_sheets:
             if safe == entity and os.path.exists(png_path):
-                return ([png_path],
-                        {"entity_anchor_file": png_path, "source": "charsheet-png", "is_local": True})
+                return png_path, {"entity_anchor_file": png_path, "source": "charsheet-png", "is_local": True}
 
         # Stufe B: entity -> name via plan["characters"], dann Name-Match im Pool.
         # analyze_script liefert [{id: "char_01", name_or_role: "Elizabeth Holmes"}, ...]
@@ -474,12 +502,11 @@ def _resolve_entity_ref(plan_path: str, scene: dict, wait: bool = True) -> tuple
         if char_name:
             for name, safe, jp, png_path in all_sheets:
                 if name and name.lower() == char_name.lower() and os.path.exists(png_path):
-                    return ([png_path],
-                            {"entity_anchor_file": png_path, "source": "charsheet-name-match",
-                             "matched_charsheet": safe, "is_local": True})
+                    return png_path, {"entity_anchor_file": png_path, "source": "charsheet-name-match",
+                                       "matched_charsheet": safe, "is_local": True}
     except Exception:
         pass
-    return [], {}
+    return None, {}
 
 
 # ── Phase O: Wort-Akzent-Puls ─────────────────────────────────────────────────

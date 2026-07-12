@@ -127,12 +127,15 @@ def t_phase_b_story_engine_partial_hysteresis():
 
 
 def t_phase_b_motion_selector_uses_phase():
-    """Phase B5: _motion_for_scene picks from _PHASE_MOTION_CANDIDATES when phase + LLM."""
+    """Phase B5: _motion_for_scene picks from _PHASE_MOTION_CANDIDATES when phase + LLM.
+
+    Feinschliff Runde 3 (User-Wunsch "mehr Ken-Burns-Zooms"): Pools zoom-lastig
+    umgebaut, siehe _PHASE_MOTION_CANDIDATES in engine/render.py."""
     motion_picks = {
-        "OPENING":       {"pan_right", "pan_left", "tilt_down"},
-        "RISING_ACTION": {"zoom_in", "tilt_down"},
-        "CLIMAX":        {"snap_zoom_in", "static"},
-        "RESOLUTION":    {"zoom_out", "tilt_up", "pan_left"},
+        "OPENING":       {"zoom_in", "pan_right", "zoom_out"},
+        "RISING_ACTION": {"zoom_in", "zoom_out", "tilt_down", "pan_right"},
+        "CLIMAX":        {"snap_zoom_in", "zoom_in"},
+        "RESOLUTION":    {"zoom_out", "zoom_in", "tilt_up"},
     }
     for phase, expected in motion_picks.items():
         # Phase B5 only couples phase→motion when phase_source == "llm"
@@ -148,19 +151,18 @@ def t_phase_b_motion_fallback_to_pacing():
     s = {"i": 0, "phase": "CLIMAX", "phase_source": "position-fallback",
           "pacing": "punchy", "dur": 4.0}
     m = dashboard._motion_for_scene(s, None)
-    # Phases-CLIMAX candidates are {snap_zoom_in, static}; pacing-punchy candidates are
-    # {snap_zoom_in, static} — same set, but the implementation should now use the
-    # pacing-coupling (test data happens to overlap).
-    assert m["name"] in {"snap_zoom_in", "static"}, \
+    # pacing-punchy candidates are {snap_zoom_in, zoom_in} (_PACING_MOTION_CANDIDATES).
+    assert m["name"] in {"snap_zoom_in", "zoom_in"}, \
         f"unexpected motion: {m['name']}"
 
-    # Phase RISING_ACTION with pacing normal (which gives {zoom_in/out, tilt_up, pan_left/right})
-    # — phase fallback should NOT be used when pacing says 'normal'.
+    # Phase RISING_ACTION with pacing normal — phase fallback should NOT be used when
+    # pacing says 'normal'.
     s2 = {"i": 0, "phase": "RISING_ACTION", "phase_source": "position-fallback",
            "pacing": "normal", "dur": 4.0}
     m2 = dashboard._motion_for_scene(s2, None)
-    # Phase RISING_ACTION candidates are {zoom_in, tilt_down} (subset of pacing-normal set).
-    assert m2["name"] in {"zoom_in", "zoom_out", "tilt_up", "pan_left", "pan_right"}, \
+    # pacing-normal candidates (Feinschliff Runde 3, zoom-lastig): {zoom_in, zoom_out,
+    # tilt_down, pan_right}.
+    assert m2["name"] in {"zoom_in", "zoom_out", "tilt_down", "pan_right"}, \
         f"expected pacing-normal-set motion, got {m2['name']}"
 
 
@@ -908,8 +910,11 @@ def t_round5_elevenlabs_double_click_guard():
 
 def t_round5_kie_429_retry_with_backoff():
     """Round-5 Fix-2: HTTP 429 in _kie_submit_image triggers exponential backoff retry.
-    Without it, a rate-limit spike would lose ALL batch-scenes."""
-    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    Without it, a rate-limit spike would lose ALL batch-scenes.
+
+    Evaluation Juli 2026 (Änderung 1): _kie_submit_image lebt jetzt in
+    engine/imagegen.py (verschoben aus dashboard.py), Verhalten unverändert."""
+    src = open(os.path.join(ROOT, "engine", "imagegen.py")).read()
     idx = src.find("def _kie_submit_image")
     body = src[idx:idx + 3500]
     assert "if e.code == 429 and attempt < 3" in body, \
@@ -2218,8 +2223,9 @@ def t_phase_l_is_hook_motion_override():
 
     Cinematic-Mix Juli 2026 (Schritt 4.3): Hook-Intensität 1.2 -> HOOK_MOTION_INTENSITY
     (1.0) UND snap_zoom_in's Basis-z1 1.25 -> 1.16 (25%-Zoom war der "billig"-Ausreißer
-    gegenüber professionellen Referenz-Dokus). Bei intensity_scale=1.0 reproduziert
-    _build_motion die Basis-Werte exakt (siehe dessen Docstring) -> z1 == 1.16."""
+    gegenüber professionellen Referenz-Dokus). Feinschliff Runde 3: snap_zoom_in ist
+    dauer-unabhängig -- _build_motion gibt für diesen Namen die MOTION_LIBRARY-Basis-
+    Werte 1:1 zurück (siehe dessen Docstring) -> z1 == 1.16, unabhängig vom dur-Wert."""
     from engine.render import _motion_for_scene, MOTION_LIBRARY, HOOK_MOTION_INTENSITY
 
     # Hook, nicht Sequenz-Fortsetzung → snap_zoom_in
@@ -3131,28 +3137,38 @@ def t_phase1_kie_backoff_throws_after_max():
 
 
 def t_phase1_kie_circuit_breaker_opens():
-    """#15: Circuit Breaker öffnet nach Threshold Fehlern."""
+    """#15: Circuit Breaker öffnet nach Threshold Fehlern.
+
+    Evaluation Juli 2026 (Änderung 1): der Circuit-Breaker-State (_KIE_CIRCUIT_OPENED_AT,
+    _KIE_FAILURE_TIMES) lebt jetzt in engine.imagegen (verschoben aus dashboard.py).
+    dashboard._kie_record_failure() etc. bleiben re-exportierte, IDENTISCHE Funktions-
+    objekte (mutieren also weiterhin denselben State) -- aber der State selbst muss über
+    engine.imagegen angesprochen werden, nicht über dashboard (ein `dashboard.X = ...`
+    würde nur den Namen in dashboards eigenem Namensraum umbiegen, nicht den echten
+    Modul-Global in engine.imagegen, den die Funktionen tatsächlich lesen/schreiben)."""
     import dashboard
+    from engine import imagegen
     # Reset state
     dashboard._kie_record_success()
-    dashboard._KIE_CIRCUIT_OPENED_AT = 0.0
-    dashboard._KIE_FAILURE_TIMES.clear()
+    imagegen._KIE_CIRCUIT_OPENED_AT = 0.0
+    imagegen._KIE_FAILURE_TIMES.clear()
 
     # Simuliere 10 Fehler (Threshold = 10)
     for _ in range(10):
         dashboard._kie_record_failure()
 
     # Circuit sollte jetzt offen sein
-    assert dashboard._KIE_CIRCUIT_OPENED_AT > 0,         "Circuit muss nach 10 Fehlern offen sein"
+    assert imagegen._KIE_CIRCUIT_OPENED_AT > 0,         "Circuit muss nach 10 Fehlern offen sein"
     assert not dashboard._kie_circuit_status(),         "_kie_circuit_status() muss False zurückgeben wenn offen"
 
 
 def t_phase1_kie_circuit_breaker_blocks():
-    """#15: offener Circuit blockiert Calls (wirft RuntimeError)."""
+    """#15: offener Circuit blockiert Calls (wirft RuntimeError). Siehe Docstring von
+    t_phase1_kie_circuit_breaker_opens zur engine.imagegen-State-Verschiebung."""
     import dashboard
-    dashboard._KIE_CIRCUIT_OPENED_AT = dashboard.time.time() if hasattr(dashboard, "time") else 1.0
+    from engine import imagegen
     import time
-    dashboard._KIE_CIRCUIT_OPENED_AT = dashboard.time.time()  # gerade geöffnet
+    imagegen._KIE_CIRCUIT_OPENED_AT = time.time()  # gerade geöffnet
     raised = False
     try:
         dashboard._kie_retry_with_backoff(lambda: (True, "ok"), max_attempts=2, base_sleep_s=0.001)
@@ -3161,24 +3177,26 @@ def t_phase1_kie_circuit_breaker_blocks():
         assert "Circuit Breaker" in str(e), f"Error muss Circuit Breaker erwähnen: {e}"
     assert raised, "Offener Circuit muss Call blockieren"
     # State reset
-    dashboard._KIE_CIRCUIT_OPENED_AT = 0.0
+    imagegen._KIE_CIRCUIT_OPENED_AT = 0.0
 
 
 def t_phase1_kie_circuit_breaker_resets():
-    """#15: Erfolg bei halb-offenem Circuit resettet den Breaker."""
+    """#15: Erfolg bei halb-offenem Circuit resettet den Breaker. Siehe Docstring von
+    t_phase1_kie_circuit_breaker_opens zur engine.imagegen-State-Verschiebung."""
     import dashboard
+    from engine import imagegen
     import time
     # Halb-offen: vor langer Zeit geöffnet → cooldown vorbei, status True
-    dashboard._KIE_CIRCUIT_OPENED_AT = dashboard.time.time() - dashboard.KIE_CIRCUIT_OPEN_DURATION_S - 1
-    dashboard._KIE_FAILURE_TIMES.clear()
+    imagegen._KIE_CIRCUIT_OPENED_AT = time.time() - dashboard.KIE_CIRCUIT_OPEN_DURATION_S - 1
+    imagegen._KIE_FAILURE_TIMES.clear()
 
     # Erfolgreicher Call sollte Circuit komplett schließen
     def fn():
         return (True, "ok")
     dashboard._kie_retry_with_backoff(fn, max_attempts=2, base_sleep_s=0.001)
 
-    assert dashboard._KIE_CIRCUIT_OPENED_AT == 0.0,         "Circuit muss nach Erfolg geschlossen werden"
-    assert len(dashboard._KIE_FAILURE_TIMES) == 0,         "Failure-Times müssen nach Erfolg gecleart werden"
+    assert imagegen._KIE_CIRCUIT_OPENED_AT == 0.0,         "Circuit muss nach Erfolg geschlossen werden"
+    assert len(imagegen._KIE_FAILURE_TIMES) == 0,         "Failure-Times müssen nach Erfolg gecleart werden"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -46,6 +46,7 @@ import base64
 import json
 import os
 import subprocess
+from typing import TypedDict
 
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -91,27 +92,39 @@ __all__ = [
 # brauchen alle einen LEICHTEN Zoom-Puffer (>1.0) über den ganzen Verlauf, sonst würde der
 # Crop-Ausschnitt beim Wandern des Fokuspunkts über den Bildrand hinauslaufen.
 
-MOTION_LIBRARY = {
-    # Reiner Zoom: Fokuspunkt FEST, nur die Zoomstufe ändert sich. Feinschliff Runde 2
-    # (Juli 2026): 1.12 -> 1.3 -- User-Vorgabe 120-140% GENAUSO für Zoom wie für Pan/Tilt.
-    "zoom_in":        {"z0": 1.0,  "z1": 1.3,  "focus0": (0.5, 0.45),  "focus1": (0.5, 0.45)},
-    "zoom_out":       {"z0": 1.3,  "z1": 1.0,  "focus0": (0.5, 0.45),  "focus1": (0.5, 0.45)},
-    # Reiner Slide/Pan: Zoomstufe FEST bei 1.3 (Runde 1). Feinschliff Runde 2: die
-    # Fokus-Wanderung war mit ±14% um die Mitte (0.64<->0.36) bei DIESEM Zoom-Level zu
-    # groß -- derselbe absolute Weg wirkt im kleineren, gezoomten Ausschnitt schneller
-    # als vorher bei 1.08. User-Feedback: "ganz langsam übers Bild wandeln", "nur leicht
-    # zentriert aus der Mitte raus/rein". Wanderung auf ±8% (0.58<->0.42) reduziert --
-    # spürbar langsamer UND bleibt immer nah der Mitte (nie nah am Bildrand).
+class _MotionRecipe(TypedDict):
+    z0: float
+    z1: float
+    focus0: tuple[float, float]
+    focus1: tuple[float, float]
+
+
+MOTION_LIBRARY: dict[str, _MotionRecipe] = {
+    # Reiner Zoom: Fokuspunkt FEST, nur die Zoomstufe ändert sich. Feinschliff Runde 3
+    # (User-Feedback "komische Zooms die sich dann bewegen"): Fokus 0.45 -> 0.5. Bei
+    # zoom=1.0 wird `y = ih*0.45 - ih/(2*zoom)` negativ und zoompan clampt auf 0 -- der
+    # Crop "klebt" beim Zoom-Start oben am Bildrand und wandert erst später sichtbar
+    # nach unten. 0.5 ist bei jedem Zoomlevel clamp-frei (Zentrum bleibt Zentrum). Die
+    # tatsächlichen z0/z1-Werte werden jetzt dauer-abhängig in `_build_motion` berechnet
+    # (Bug 2: konstante statt dauer-proportionale Geschwindigkeit) -- die hier
+    # hinterlegten Werte sind nur der Ziel-Endzustand (120-140%-Vorgabe aus Runde 2).
+    "zoom_in":        {"z0": 1.0,  "z1": 1.3,  "focus0": (0.5, 0.5),   "focus1": (0.5, 0.5)},
+    "zoom_out":       {"z0": 1.3,  "z1": 1.0,  "focus0": (0.5, 0.5),   "focus1": (0.5, 0.5)},
+    # Reiner Slide/Pan: Zoomstufe FEST bei 1.3 (Runde 1). Die hier hinterlegte
+    # Fokus-Wanderung ist der Referenz-Wert für dur≈3.8s (Median) -- `_build_motion`
+    # skaliert die tatsächliche Wanderung jetzt dauer-proportional (Feinschliff Runde 3,
+    # Bug 2), bleibt aber um denselben Mittelpunkt zentriert wie hier definiert.
     "pan_left":       {"z0": 1.3,  "z1": 1.3,  "focus0": (0.58, 0.48), "focus1": (0.42, 0.48)},
     "pan_right":      {"z0": 1.3,  "z1": 1.3,  "focus0": (0.42, 0.48), "focus1": (0.58, 0.48)},
     "tilt_up":        {"z0": 1.3,  "z1": 1.3,  "focus0": (0.5, 0.58),  "focus1": (0.5, 0.42)},
     "tilt_down":      {"z0": 1.3,  "z1": 1.3,  "focus0": (0.5, 0.42),  "focus1": (0.5, 0.58)},
-    # Hook/Punchy-Spezialeffekt (Runde 1) -- bewusst kurz + energisch, NICHT Ziel dieses
-    # Feedbacks, bleibt bei 1.16. Fokus fest -- reiner Zoom.
-    "snap_zoom_in":   {"z0": 1.0,  "z1": 1.16, "focus0": (0.5, 0.45),  "focus1": (0.5, 0.45)},
-    # Feinschliff Runde 2: "static" ist ab jetzt NUR noch der technische Fallback für
-    # Szenen mit dur<1.2s (zu kurz für sichtbare Bewegung ohne Ruckeln) -- taucht in
-    # KEINER stilistischen Auswahlliste mehr auf ("jede Szene braucht einen Effekt").
+    # Hook/Punchy-Spezialeffekt (Runde 1) -- bewusst kurz + energisch, dauer-unabhängig,
+    # bleibt bei 1.16. Fokus 0.45 -> 0.5 aus demselben Clamp-Grund wie oben.
+    "snap_zoom_in":   {"z0": 1.0,  "z1": 1.16, "focus0": (0.5, 0.5),   "focus1": (0.5, 0.5)},
+    # Feinschliff Runde 3 (User-Wunsch "kurze Bilder auch mal ohne Effekt"): "static"
+    # ist jetzt der Fallback für Szenen mit dur<2.0s (angehoben von 1.2s) -- schnelle
+    # Schnitte stehen bewusst als ruhiges Standbild, klassisches Montage-Muster. Taucht
+    # weiterhin in keiner stilistischen Auswahlliste auf (kein Aufruf ohne Kurz-Dauer).
     "static":         {"z0": 1.02, "z1": 1.02, "focus0": (0.5, 0.5),   "focus1": (0.5, 0.5)},
 }
 
@@ -119,48 +132,55 @@ MOTION_LIBRARY = {
 # snap_zoom_in ist mit dem gesenkten z1=1.16 schon energisch genug für den Hook-Beat).
 HOOK_MOTION_INTENSITY = 1.0
 
-# Schritt 4.2: Gegenrichtung der jeweils VORHERIGEN Szene -- wird in
-# _pick_motion_avoiding_reversal gemieden, damit zwei aufeinanderfolgende Szenen nicht
-# als Ping-Pong wirken (pan_left direkt nach pan_right etc.). Bewegungen ohne
-# Richtungs-Gegenstück (static/snap_zoom_in) haben keinen Eintrag.
+# Schritt 4.2 / Feinschliff Runde 3: Gegenrichtung der jeweils VORHERIGEN Szene -- wird
+# in _pick_motion_avoiding_reversal gemieden, damit zwei aufeinanderfolgende Szenen
+# nicht als Ping-Pong wirken (pan_left direkt nach pan_right etc.). Feinschliff Runde 3
+# (User-Wunsch "mehr Ken-Burns-Zooms"): zoom_in/zoom_out NICHT mehr hier -- ein
+# alternierendes zoom_in -> zoom_out (auf zwei verschiedenen Bildern) ist kein
+# Ping-Pong, sondern das klassische Doku-Ken-Burns-Muster und genau das gewünschte
+# Ergebnis. Die Ping-Pong-Vermeidung bleibt nur für Pan/Tilt sinnvoll (dort wirkt
+# Hin-und-Her tatsächlich billig). Bewegungen ohne Richtungs-Gegenstück
+# (static/snap_zoom_in) haben keinen Eintrag.
 _OPPOSITE_MOTION = {
     "pan_left": "pan_right", "pan_right": "pan_left",
     "tilt_up": "tilt_down", "tilt_down": "tilt_up",
-    "zoom_in": "zoom_out", "zoom_out": "zoom_in",
 }
 
-# Schritt 4.1: regelbasierte Motion-Kandidaten aus dem Bild-Prompt-Text -- kein LLM-
-# Call, reines Keyword-Matching auf dem Shot-Vokabular, das analyze_script bereits in
-# jeden Prompt schreibt ("close-up", "wide shot", "top-down", ...). Reihenfolge ist
-# Priorität: Dokument/Screen zuerst (Lesbarkeit schlägt Intimitäts-Zoom -- ein
-# schwenkender Zoom über Bildschirmtext macht ihn unlesbar), dann Close-up, Wide,
-# zuletzt der generische Portrait-Fallback.
+# Schritt 4.1 / Feinschliff Runde 3: regelbasierte Motion-Kandidaten aus dem
+# Bild-Prompt-Text -- kein LLM-Call, reines Keyword-Matching auf dem Shot-Vokabular,
+# das analyze_script bereits in jeden Prompt schreibt ("close-up", "wide shot",
+# "top-down", ...). Reihenfolge ist Priorität: Dokument/Screen zuerst (Lesbarkeit
+# schlägt Intimitäts-Zoom), dann Close-up, Wide, zuletzt der generische
+# Portrait-Fallback. Pools zoom-lastig (User-Wunsch "mehr Ken-Burns-Zooms") -- jeweils
+# ≥2 Einträge, damit _pick_motion_avoiding_reversal die exakte Wiederholung
+# überspringen kann (Bug 3: Ketten von bis zu 7x derselben Motion in Folge).
 _SHOT_HINT_RULES = [
     (("top-down", "document", "screen", "monitor", "touchscreen", "report", "paper"),
-     ["tilt_down"]),
+     ["tilt_down", "zoom_in"]),
     (("close-up", "close up", "tight shot", "extreme close-up"),
-     ["zoom_in"]),
+     ["zoom_in", "zoom_out"]),
     (("wide shot", "wide-angle", "wide angle", "establishing shot", "aerial", "bird's-eye"),
      ["pan_left", "pan_right"]),
     (("medium shot", "stands", "standing", "portrait"),
-     ["zoom_in"]),
+     ["zoom_in", "zoom_out"]),
 ]
 
 # Auswahl-Kandidaten nach `pacing` — vorbereitet für `phase` (Story-Phase-Engine):
 # wenn scene.get("phase") künftig gesetzt ist, wird das bevorzugt, sonst fällt die
 # Auswahl auf pacing zurück. Kein Zufall (Resume-Determinismus, ARCHITECTURE §13/§15.1)
-# — Auswahl über scene["i"] % len(candidates).
+# — Auswahl über scene["i"] % len(candidates). Feinschliff Runde 3: zoom-lastig
+# umgebaut (User-Wunsch), Zoom-Anteil bewusst ≥50% je Pool.
 _PACING_MOTION_CANDIDATES = {
-    "calm":   ["pan_left", "pan_right", "tilt_up", "tilt_down", "zoom_out"],
-    "normal": ["zoom_in", "zoom_out", "tilt_up", "pan_left", "pan_right"],
+    "calm":   ["zoom_out", "zoom_in", "pan_left", "tilt_up"],
+    "normal": ["zoom_in", "zoom_out", "tilt_down", "zoom_in", "pan_right"],
     "punchy": ["snap_zoom_in", "zoom_in"],
 }
 
 _PHASE_MOTION_CANDIDATES = {
-    "OPENING":       ["pan_right", "pan_left", "tilt_down"],
-    "RISING_ACTION": ["zoom_in", "tilt_down"],
+    "OPENING":       ["zoom_in", "pan_right", "zoom_out"],
+    "RISING_ACTION": ["zoom_in", "zoom_out", "tilt_down", "zoom_in", "pan_right"],
     "CLIMAX":        ["snap_zoom_in", "zoom_in"],
-    "RESOLUTION":    ["zoom_out", "tilt_up", "pan_left"],
+    "RESOLUTION":    ["zoom_out", "zoom_in", "tilt_up"],
 }
 
 
@@ -175,7 +195,13 @@ _PHASE_MOTION_CANDIDATES = {
 # Feinschliff Runde 2: wipe/smooth von 2 auf 4 Typen erweitert (zusätzlich up/down) --
 # mehr Varietät ohne den Charakter der Familie zu ändern. fade bleibt bei 2 (fade/
 # dissolve sind die einzigen sanften, zur "calm"-Familie passenden xfade-Varianten).
-TRANSITION_LIBRARY = {
+class _TransitionRecipe(TypedDict):
+    types: list[str]
+    sfx: str | None
+    duration: float
+
+
+TRANSITION_LIBRARY: dict[str, _TransitionRecipe] = {
     "fade":   {"types": ["fade", "dissolve"],
                "sfx": None,     "duration": 0.8},
     "wipe":   {"types": ["wipeleft", "wiperight", "wipeup", "wipedown"],
@@ -276,22 +302,72 @@ def _apply_sync_invariant(scenes: list, audio_duration: float, fps: int) -> list
 
 # ── Motion (Auswahl + Skalierung + Normalisierung) ───────────────────────────
 
-def _build_motion(name: str, intensity_scale: float = 1.0) -> dict:
-    """Scales a MOTION_LIBRARY recipe's movement AROUND ITS OWN MIDPOINT — intensity_scale
-    == 1.0 reproduces the base recipe exactly, <1 dampens (short scene, subtle), >1
-    amplifies (long scene, fuller movement) — without changing which direction it moves in."""
+# Feinschliff Runde 3 (Bug 2 -- "viel zu schnelles Bild-Moving"): die alte
+# Mittelpunkt-Skalierung hielt die Travel-Strecke quasi fix (0.5+0.12*dur, geclamped
+# auf 1.4) waehrend die Szenendauer stark streut (median 3.8s, >1/3 der Szenen <3s) --
+# kurze Szenen bewegten sich >2x so schnell wie lange. Jetzt: Travel = RATE * dur,
+# geclamped -- die GESCHWINDIGKEIT (%/s) ist damit uber alle Szenenlaengen konstant
+# und bewusst langsam (Profi-Doku-Ken-Burns-Tempo), nicht die End-Distanz.
+ZOOM_RATE_PER_SEC = 0.03   # Zoom-Delta pro Sekunde (3%/s)
+ZOOM_DELTA_MIN, ZOOM_DELTA_MAX = 0.05, 0.30
+PAN_RATE_PER_SEC = 0.015   # Fokus-Wanderung pro Sekunde (1.5% Bildbreite/-hoehe pro s)
+PAN_TRAVEL_MIN, PAN_TRAVEL_MAX = 0.03, 0.12
+
+
+def _clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
+
+
+def _build_motion(name: str, dur: float) -> dict:
+    """Builds the concrete zoompan geometry for one scene's motion, RATE-based on the
+    scene's actual duration (Feinschliff Runde 3) instead of the old fixed-travel /
+    midpoint-intensity scaling. `static` and `snap_zoom_in` are dauer-unabhaengig (siehe
+    MOTION_LIBRARY-Kommentare) und werden 1:1 aus der Bibliothek uebernommen.
+
+    Zoom (`zoom_in`/`zoom_out`) ist am Ziel-Endzustand (1.3, User-Vorgabe 120-140%)
+    VERANKERT -- nur das Delta zum Start skaliert mit der Dauer, der optische
+    "Zoom-Grad" am Ende bleibt gleich, nur die Geschwindigkeit sinkt bei kurzen Szenen.
+
+    Pan/Tilt bleibt um denselben Mittelpunkt wie in MOTION_LIBRARY zentriert (nie nah am
+    Bildrand), nur die Travel-Distanz um diesen Mittelpunkt skaliert mit der Dauer.
+
+    Bug 1 -- z0/z1 werden hart auf >=1.0 geclampt: ffmpegs zoompan clampt intern
+    genauso, aber ungeclampt in unseren eigenen Werten wuerde ein z0<1.0 (wie es die
+    alte Skalierung bei langen Szenen erzeugte) zu einem sichtbaren "Einfrieren dann
+    Ansprung" fuehren, weil unser z_expr und ffmpegs tatsaechliches Verhalten
+    divergieren wuerden."""
+    if name in ("static", "snap_zoom_in"):
+        base = MOTION_LIBRARY[name]
+        return {"name": name, "z0": base["z0"], "z1": base["z1"],
+                "focus0": list(base["focus0"]), "focus1": list(base["focus1"])}
+
+    if name in ("zoom_in", "zoom_out"):
+        recipe = MOTION_LIBRARY[name]
+        delta = _clamp(ZOOM_RATE_PER_SEC * dur, ZOOM_DELTA_MIN, ZOOM_DELTA_MAX)
+        if name == "zoom_in":
+            z_end = recipe["z1"]
+            z0, z1 = z_end - delta, z_end
+        else:
+            z_end = recipe["z0"]
+            z0, z1 = z_end, z_end - delta
+        z0, z1 = max(1.0, z0), max(1.0, z1)
+        fx, fy = recipe["focus0"]  # (0.5, 0.5), clamp-sicher, fest
+        return {"name": name, "z0": round(z0, 4), "z1": round(z1, 4),
+                "focus0": [fx, fy], "focus1": [fx, fy]}
+
+    # Pan/Tilt: Zoom bleibt konstant (1.3), nur die Fokus-Wanderung ist dauer-skaliert.
     base = MOTION_LIBRARY[name]
-    z_mid = (base["z0"] + base["z1"]) / 2
+    travel = _clamp(PAN_RATE_PER_SEC * dur, PAN_TRAVEL_MIN, PAN_TRAVEL_MAX)
     fx_mid = (base["focus0"][0] + base["focus1"][0]) / 2
     fy_mid = (base["focus0"][1] + base["focus1"][1]) / 2
-    z0 = z_mid + (base["z0"] - z_mid) * intensity_scale
-    z1 = z_mid + (base["z1"] - z_mid) * intensity_scale
-    fx0 = fx_mid + (base["focus0"][0] - fx_mid) * intensity_scale
-    fy0 = fy_mid + (base["focus0"][1] - fy_mid) * intensity_scale
-    fx1 = fx_mid + (base["focus1"][0] - fx_mid) * intensity_scale
-    fy1 = fy_mid + (base["focus1"][1] - fy_mid) * intensity_scale
-    return {"name": name, "z0": round(z0, 4), "z1": round(z1, 4),
-            "focus0": [round(fx0, 4), round(fy0, 4)], "focus1": [round(fx1, 4), round(fy1, 4)]}
+    sign_x = (base["focus1"][0] > base["focus0"][0]) - (base["focus1"][0] < base["focus0"][0])
+    sign_y = (base["focus1"][1] > base["focus0"][1]) - (base["focus1"][1] < base["focus0"][1])
+    z0 = z1 = max(1.0, base["z0"])
+    return {
+        "name": name, "z0": round(z0, 4), "z1": round(z1, 4),
+        "focus0": [round(fx_mid - sign_x * travel, 4), round(fy_mid - sign_y * travel, 4)],
+        "focus1": [round(fx_mid + sign_x * travel, 4), round(fy_mid + sign_y * travel, 4)],
+    }
 
 
 def _normalize_motion(motion: dict) -> dict:
@@ -326,40 +402,67 @@ def _shot_hint_from_prompt(prompt: str) -> list | None:
 
 def _pick_motion_avoiding_reversal(candidates: list, seed: int, prev_scene: dict | None) -> str:
     """Schritt 4.2: wählt `candidates[seed % len(candidates)]`, überspringt diesen
-    Kandidaten aber, wenn er die exakte Gegenrichtung der VORHERIGEN Szene ist
+    Kandidaten aber, wenn er (a) die exakte Gegenrichtung der VORHERIGEN Szene ist
     (_OPPOSITE_MOTION) — verhindert den sichtbarsten "wirkt randomisiert"-Fall:
-    pan_left direkt nach pan_right, etc. Bleibt deterministisch (gleiche Eingaben ->
-    gleiche Ausgabe, ARCHITECTURE §13/§15.1) — probiert einfach die nächsten
-    Kandidaten in der bereits deterministischen Rotation durch."""
+    pan_left direkt nach pan_right, etc. — oder (b) IDENTISCH mit der vorherigen Szene
+    ist (Feinschliff Runde 3, Bug 3: verhindert Ketten von 3+ identischen Motions in
+    Folge, die im echten Video beobachtet wurden, z.B. 7x tilt_down hintereinander).
+    Zoom_in/zoom_out sind bewusst NICHT in _OPPOSITE_MOTION (Runde 3) -- ein
+    alternierendes zoom_in -> zoom_out -> zoom_in ist erwünscht, nur exakte
+    Wiederholung (zoom_in -> zoom_in) wird hier über (b) verhindert.
+
+    Zwei-stufiger Fallback (Runde 3-Plan: "Wiederholung ist weniger schlimm als
+    Ping-Pong"): Stufe 1 vermeidet (a) UND (b). Wenn das ALLE Kandidaten ausschließt
+    (z.B. ein reines 2er-Pool aus mutual-opposite Bewegungen wie ["pan_left",
+    "pan_right"], nachdem die Vorszene bereits einer der beiden war -- Opposite UND
+    Repeat treffen dann zusammen auf die volle Liste), fällt Stufe 2 zurück auf NUR
+    die Gegenrichtung meiden (Wiederholung wird dort bewusst zugelassen). Bleibt
+    deterministisch (gleiche Eingaben -> gleiche Ausgabe, ARCHITECTURE §13/§15.1) —
+    probiert einfach die nächsten Kandidaten in der bereits deterministischen Rotation
+    durch."""
     prev_motion = prev_scene.get("motion") if prev_scene else None
     prev_name = _normalize_motion(prev_motion).get("name") if prev_motion else None
-    forbidden = _OPPOSITE_MOTION.get(prev_name) if prev_name else None
+    opposite = _OPPOSITE_MOTION.get(prev_name) if prev_name else None
     n = len(candidates)
+
+    forbidden_strict = {x for x in (prev_name, opposite) if x}
     for offset in range(n):
         name = candidates[(seed + offset) % n]
-        if name != forbidden:
+        if name not in forbidden_strict:
             return name
-    return candidates[seed % n]  # alle Kandidaten sind die Gegenrichtung -- gibt es bei den aktuellen Listen nicht (>=2 Einträge, nicht alle dieselbe Achse), Sicherheitsnetz
+
+    forbidden_soft = {opposite} if opposite else set()
+    for offset in range(n):
+        name = candidates[(seed + offset) % n]
+        if name not in forbidden_soft:
+            return name
+
+    return candidates[seed % n]  # auch Stufe 2 leer -- Sicherheitsnetz (nie erreicht bei >=1 Kandidat)
 
 
-def _motion_for_scene(scene: dict, prev_scene: dict) -> dict:
+def _motion_for_scene(scene: dict, prev_scene: dict | None) -> dict:
     """Rule-based motion recipe — no LLM call. Sequence continuations (seq_pos >= 1)
     inherit the previous scene's motion (continuity = one camera move per sequence).
     Otherwise, priority order (Schritt 4.1): Prompt-Shot-Hint > Phase-Kandidaten
-    (LLM-driven) > Pacing-Fallback (position-based / legacy). Feinschliff Runde 2
-    (User-Feedback): JEDE Szene bekommt einen echten Ken-Burns-Effekt -- die frühere
-    "jede 3.-4. Szene bleibt static"-Regel ist entfernt, "static" ist nur noch der
-    technische dur<1.2s-Fallback unten. Die finale Auswahl vermeidet zusätzlich die
-    Gegenrichtung der Vorszene (Schritt 4.2, _pick_motion_avoiding_reversal).
+    (LLM-driven) > Pacing-Fallback (position-based / legacy). Feinschliff Runde 3
+    (User-Wunsch "kurze Bilder auch mal ohne Effekt"): "static" ist der Fallback für
+    Szenen mit dur<2.0s -- schnelle Schnitte bleiben bewusst ruhige Standbilder. Die
+    finale Auswahl vermeidet zusätzlich die Gegenrichtung UND die exakte Wiederholung
+    der Vorszenen-Motion (Schritt 4.2 + Runde 3, _pick_motion_avoiding_reversal).
 
     Phase L: Hook-Szenen (scene['is_hook'] = True) erzwingen snap_zoom_in — AUSSER die
     Szene ist Fortsetzung einer Sequenz (CINEMATIC_UPGRADE_PLAN.md §11.3 Schutzregel 2:
     Motion-Vererbung schlägt jede neue Motion-Regel). Hook gewinnt nur, wenn die Szene
     einen eigenen Look hat (= Anker einer Sequenz oder eigenständige Szene).
+
+    `dur` bevorzugt die tatsächliche, post-Sync-Invariant Framezahl (`_frames`, von
+    dashboard.py NACH _apply_sync_invariant gesetzt) statt der rohen WPM-Schätzung
+    (Feinschliff Runde 3, Bug 2: Geschwindigkeit muss zur ECHTEN Clip-Länge passen).
     """
-    dur = scene.get("dur", 3.0)
-    if dur < 1.2:
-        return _build_motion("static", 1.0)
+    frames = scene.get("_frames")
+    dur = (frames / RENDER_FPS) if frames else scene.get("dur", 3.0)
+    if dur < 2.0:
+        return _build_motion("static", dur)
 
     is_seq_continuation = (
         scene.get("seq_id") is not None
@@ -372,7 +475,7 @@ def _motion_for_scene(scene: dict, prev_scene: dict) -> dict:
     if scene.get("is_hook") and not is_seq_continuation:
         return _build_motion("snap_zoom_in", HOOK_MOTION_INTENSITY)
 
-    if is_seq_continuation:
+    if is_seq_continuation and prev_scene:
         name = _normalize_motion(prev_scene["motion"]).get("name", "zoom_in")
     else:
         i = scene.get("i", 0)
@@ -388,8 +491,7 @@ def _motion_for_scene(scene: dict, prev_scene: dict) -> dict:
                 candidates = _PACING_MOTION_CANDIDATES[pacing]
         name = _pick_motion_avoiding_reversal(candidates, i, prev_scene)
 
-    intensity_scale = min(0.5 + dur * 0.12, 1.4)
-    return _build_motion(name, intensity_scale)
+    return _build_motion(name, dur)
 
 
 # ── Overlay-Specs ─────────────────────────────────────────────────────────────

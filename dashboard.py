@@ -2,7 +2,7 @@
 """Localhost-Dashboard für die Storyboard-Bildgenerierung.
 Nur Python-Standardlib. Start: python3 dashboard.py [--port 8000]
 """
-import os, re, sys, json, time, base64, zipfile, io, threading, concurrent.futures, collections
+import os, re, sys, json, time, base64, zipfile, io, threading, concurrent.futures
 import urllib.request, urllib.error, subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -10,7 +10,6 @@ import shutil
 from urllib.parse import urlparse, parse_qs
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-KIE_KEY_FILE  = os.path.expanduser("~/.kie_key")
 CHANNELS_DIR  = os.path.join(HERE, "channels")
 CHANNELS_FILE = os.path.join(CHANNELS_DIR, "channels.json")
 
@@ -145,6 +144,22 @@ from engine.prompts import (  # noqa: F401,F403
 from engine.presets import (  # noqa: F401,F403
     PRESET_MASTERS, PRESET_DESCRIPTIONS, DEFAULT_PRESET,
     IMAGE_MASTER_DEFAULT, VIDEO_MASTER_DEFAULT,
+)
+
+# ── Evaluation Juli 2026, Änderung 1: Bild-Provider nach engine/imagegen.py ────
+# Re-Export. Der KIE-Client lebte vorher hier im Monolithen; engine/prompts.py und
+# engine/scenes.py griffen deshalb zirkulär auf dashboard.py zurück. Verhalten
+# unverändert -- reines Verschieben, kein neues Feature (siehe engine/imagegen.py
+# Modul-Docstring für die volle Begründung).
+from engine.imagegen import (  # noqa: F401,F403
+    KIE_KEY_FILE, KIE_API, VALID_IMAGE_MODELS, kie_key,
+    KIE_SUBMIT_RATE_LIMIT, KIE_SUBMIT_RATE_WINDOW,
+    KIE_FAILURE_WINDOW_S, KIE_FAILURES_THRESHOLD, KIE_CIRCUIT_OPEN_DURATION_S,
+    _kie_rate_limit_wait, _kie_circuit_status, _kie_record_failure,
+    _kie_record_success, _kie_retry_with_backoff, _kie_submit_image,
+    KIE_UPLOAD_URL, _multipart_upload, get_public_charsheet_url, upload_image_public,
+    _CHARSHEET_UPLOAD_CACHE, _CHARSHEET_UPLOAD_LOCK,
+    generate_image,
 )
 
 # ── Background job tracking ───────────────────────────────────────────────────
@@ -369,12 +384,25 @@ def ch_videos_file(cid):return os.path.join(ch_dir(cid), "videos.json")
 # (Phase 1 keeps it channel-scoped only).
 def ch_voice_id(cid):       return os.path.join(ch_dir(cid), "voice_id.txt")
 def ch_voice_settings(cid): return os.path.join(ch_dir(cid), "voice_settings.json")
-def get_channel_style_ref(cid: str) -> str:
-    # Style-Reference-Image: defines the global look (line weight, palette, render style)
-    # for image generation. Renamed from get_channel_style_ref — this is NOT a character.
+def get_channel_style_refs(cid: str) -> list:
+    """Style-Reference-Images: defines the global look (line weight, palette, render
+    style) for image generation. Bis zu 3 Referenzbilder (Audit Juli 2026, Bereich 3
+    "Multi-Style-References") -- gespeichert als newline-separierte Liste in
+    style_ref_url.txt. Eine bestehende 1-Zeilen-Datei (Alt-Kanäle) ist automatisch
+    eine 1-Element-Liste, keine Migration nötig."""
     p = os.path.join(ch_dir(cid), "style_ref_url.txt")
-    try:    return open(p).read().strip()
-    except: return ""
+    try:
+        lines = open(p).read().splitlines()
+    except Exception:
+        return []
+    return [ln.strip() for ln in lines if ln.strip()]
+
+
+def get_channel_style_ref(cid: str) -> str:
+    # Abwärtskompat für Aufrufer, die nur EINEN Style-Ref brauchen (z.B. schnelle
+    # Existenz-Checks). Neue Aufrufer sollten get_channel_style_refs() (Liste) nutzen.
+    refs = get_channel_style_refs(cid)
+    return refs[0] if refs else ""
 
 # ── Per-video path helpers (one video = one script/plan/generated set) ────────
 def v_dir(cid, vid):     return os.path.join(ch_dir(cid), "videos", vid)
@@ -561,8 +589,8 @@ init_channels()
 # Schwäche #69: räume alte render_tmp/ von gecrashten Renders
 _cleanup_stale_render_tmp()
 
-# KIE.ai — image generation
-KIE_API      = "https://api.kie.ai/api/v1/jobs"
+# KIE.ai — image generation: KIE_API, VALID_IMAGE_MODELS, kie_key() etc. jetzt in
+# engine/imagegen.py (Evaluation Juli 2026, Änderung 1), re-exportiert oben.
 KIE_MODEL    = "nano-banana-2"
 # KIE.ai — text + audio (OpenAI-compatible)
 KIE_CHAT_URL = "https://api.kie.ai/gemini-2.5-flash/v1/chat/completions"
@@ -581,9 +609,6 @@ def tx(step, msg):
     TX_STATUS["step"] = step
     TX_STATUS["msg"] = msg
     print(f"  [TX {step}/{TX_STATUS['total']}] {msg}", flush=True)
-
-def kie_key():
-    return open(KIE_KEY_FILE).read().strip()
 
 def post_kie_text(messages, json_mode=False, temp=0.7):
     """KIE.ai OpenAI-compatible chat completions (Gemini 2.5 Flash)."""
@@ -946,167 +971,9 @@ def _assign_phases(scenes: list, analysis: dict, total: int) -> None:
           f"{len(phase_break_sorted)} title-card(s)", flush=True)
 
 
-VALID_IMAGE_MODELS = ("nano-banana-2", "nano-banana-2-lite")
-
-# KIE's real documented limit is 20 submissions per 10s account-wide. Concurrent batch
-# dispatch (MAX_CONCURRENT_IMAGE_GENS) has no natural pacing of its own — if several
-# scenes finish or fail in quick succession, the freed slots all resubmit near-instantly,
-# which live testing showed can burst past 20/10s and trigger KIE's "call frequency too
-# high" error for a whole cascade of scenes at once. This tracks recent submission
-# timestamps process-wide and makes every submitter wait its turn, capped comfortably
-# under the real ceiling.
-_KIE_SUBMIT_TIMES = collections.deque()
-_KIE_SUBMIT_LOCK = threading.Lock()
-KIE_SUBMIT_RATE_LIMIT = 12
-KIE_SUBMIT_RATE_WINDOW = 10.0
-
-def _kie_rate_limit_wait():
-    """Sliding-window Rate-Limit (Phase H). Bewegt Calls in 10s-Fenster auf max 12."""
-    while True:
-        with _KIE_SUBMIT_LOCK:
-            now = time.time()
-            while _KIE_SUBMIT_TIMES and now - _KIE_SUBMIT_TIMES[0] > KIE_SUBMIT_RATE_WINDOW:
-                _KIE_SUBMIT_TIMES.popleft()
-            if len(_KIE_SUBMIT_TIMES) < KIE_SUBMIT_RATE_LIMIT:
-                _KIE_SUBMIT_TIMES.append(now)
-                return
-            wait_for = KIE_SUBMIT_RATE_WINDOW - (now - _KIE_SUBMIT_TIMES[0]) + 0.05
-        time.sleep(max(wait_for, 0.05))
-
-
-# Phase 1.3 (#14): Exponential Backoff + Circuit Breaker für externe APIs
-# Circuit-Breaker-State: nach N_FAILURES_THRESHOLD Fehlern in FAILURE_WINDOW_S Sekunden
-# → CIRCUIT_OPEN_DURATION_S Sekunden keine Calls mehr (verhindert Thundering-Herd)
-_KIE_FAILURE_TIMES = collections.deque(maxlen=20)
-KIE_FAILURE_WINDOW_S = 60.0
-KIE_FAILURES_THRESHOLD = 10
-KIE_CIRCUIT_OPEN_DURATION_S = 60.0
-_KIE_CIRCUIT_OPENED_AT = 0.0  # 0 = closed; sonst time.time() der Öffnung
-
-
-def _kie_circuit_status():
-    """True wenn Circuit geschlossen (Calls erlaubt), False wenn offen (Calls blockiert)."""
-    global _KIE_CIRCUIT_OPENED_AT
-    if _KIE_CIRCUIT_OPENED_AT == 0.0:
-        return True
-    if time.time() - _KIE_CIRCUIT_OPENED_AT > KIE_CIRCUIT_OPEN_DURATION_S:
-        # Halb-offen: probieren lassen, aber Erfolg schließt den Circuit
-        return True
-    return False
-
-
-def _kie_record_failure():
-    """Zählt Fehler. Bei Threshold → Circuit öffnen."""
-    global _KIE_CIRCUIT_OPENED_AT
-    now = time.time()
-    while _KIE_FAILURE_TIMES and now - _KIE_FAILURE_TIMES[0] > KIE_FAILURE_WINDOW_S:
-        _KIE_FAILURE_TIMES.popleft()
-    _KIE_FAILURE_TIMES.append(now)
-    if len(_KIE_FAILURE_TIMES) >= KIE_FAILURES_THRESHOLD and _KIE_CIRCUIT_OPENED_AT == 0.0:
-        _KIE_CIRCUIT_OPENED_AT = now
-        _log("WARNING", "kie_circuit_opened",
-             threshold=KIE_FAILURES_THRESHOLD,
-             window_s=KIE_FAILURE_WINDOW_S,
-             duration_s=KIE_CIRCUIT_OPEN_DURATION_S)
-
-
-def _kie_record_success():
-    """Schließt Circuit bei Erfolg."""
-    global _KIE_CIRCUIT_OPENED_AT
-    if _KIE_CIRCUIT_OPENED_AT != 0.0:
-        _log("INFO", "kie_circuit_closed")
-        _KIE_CIRCUIT_OPENED_AT = 0.0
-    _KIE_FAILURE_TIMES.clear()
-
-
-def _kie_retry_with_backoff(fn, max_attempts: int = 4, base_sleep_s: float = 2.0):
-    """Phase 1.3 (#14): Exponential Backoff für einen KIE-Call.
-
-    fn: callable() → (success_bool, result_or_error)
-    - True → Result wird zurückgegeben
-    - False → Error wird geloggt, Backoff, nächster Versuch
-    Wirft RuntimeError nach max_attempts-Versuchen.
-    Respektiert Circuit-Breaker: wenn offen, wirft sofort.
-    """
-    if not _kie_circuit_status():
-        raise RuntimeError(f"KIE Circuit Breaker ist offen — kein Call erlaubt (warte {KIE_CIRCUIT_OPEN_DURATION_S}s)")
-    last_err = None
-    for attempt in range(max_attempts):
-        _kie_rate_limit_wait()
-        try:
-            ok, result = fn()
-            if ok:
-                _kie_record_success()
-                return result
-            last_err = result
-        except Exception as e:
-            last_err = str(e)
-            _kie_record_failure()
-        if attempt < max_attempts - 1:
-            wait = base_sleep_s ** (attempt + 1)   # 2s, 4s, 8s
-            print(f"  [KIE Backoff] Versuch {attempt+1}/{max_attempts} fehlgeschlagen ({last_err[:80] if last_err else "-"}); "
-                  f"warte {wait}s", flush=True)
-            time.sleep(wait)
-    raise RuntimeError(f"KIE nach {max_attempts} Versuchen aufgegeben: {last_err}")
-
-def _kie_submit_image(full_prompt: str, model: str = "nano-banana-2", ref_urls: list | None = None) -> str:
-    """Submit image task to KIE, return task_id.
-
-    ref_urls: reference image URL(s) for visual consistency. IMPORTANT — the correct
-    field per KIE's actual docs is "image_input" for nano-banana-2 (up to 14 images) and
-    "image_urls" for nano-banana-2-lite (up to 10). Using the wrong field name silently
-    does nothing — KIE accepts the request (200 OK) but the reference has zero effect on
-    the output, which is exactly the bug this fixes (verified empirically: submitting
-    "image_urls" against nano-banana-2 produced a result with no resemblance at all to
-    the reference image)."""
-    if model not in VALID_IMAGE_MODELS:
-        model = "nano-banana-2"
-    hdrs = {"Authorization": f"Bearer {kie_key()}", "Content-Type": "application/json"}
-    input_body = {
-        "prompt": full_prompt, "aspect_ratio": "16:9",
-        "resolution": "2K", "output_format": "jpg",
-    }
-    if ref_urls:
-        ref_field = "image_input" if model == "nano-banana-2" else "image_urls"
-        input_body[ref_field] = ref_urls[:14 if model == "nano-banana-2" else 10]
-    body = {"model": model, "input": input_body}
-    req_data = json.dumps(body).encode()
-
-    last_err = None
-    for attempt in range(4):
-        _kie_rate_limit_wait()
-        req = urllib.request.Request(f"{KIE_API}/createTask", data=req_data, headers=hdrs)
-        try:
-            with urllib.request.urlopen(req, timeout=30) as r:
-                resp = json.load(r)
-        except urllib.error.HTTPError as e:
-            # Round-5 Fix-2: HTTP 429 (Too Many Requests) is transient — the account
-            # exceeded the per-window limit. Retry with backoff instead of letting the
-            # caller mark the scene as failed. Without this fix, a single rate-limit
-            # spike would lose ALL 60 scenes in a batch because the worker calls
-            # _mark_scene_error() and continues to the next scene (which hits the same
-            # 429 and fails identically). 4 attempts × exponential backoff covers
-            # normal KIE rate windows (the API documentation says ~20/min for our tier).
-            if e.code == 429 and attempt < 3:
-                wait = 2 ** (attempt + 1)   # 2s, 4s, 8s
-                _log("WARNING", "kie_429", attempt=attempt+1, wait_s=wait)
-                time.sleep(wait)
-                continue
-            raise RuntimeError(f"KIE HTTP {e.code}: {e.read().decode()[:200]}")
-        if resp.get("code") == 200:
-            return resp["data"]["taskId"]
-        msg = resp.get("msg", str(resp))
-        last_err = msg
-        # "Your call frequency is too high" is transient and self-inflicted by our own
-        # burst — worth a short backoff + retry instead of giving up the whole scene.
-        # Anything else (e.g. insufficient credits) is not transient, fail immediately.
-        if "frequency" in msg.lower() and attempt < 3:
-            _log("WARNING", "kie_frequency", attempt=attempt+1, wait_s=2*(attempt+1))
-            time.sleep(2 * (attempt + 1))
-            continue
-        raise RuntimeError(f"KIE: {msg}")
-    raise RuntimeError(f"KIE: {last_err}")
-
+# VALID_IMAGE_MODELS, Rate-Limit/Circuit-Breaker (_kie_rate_limit_wait etc.) und
+# _kie_submit_image jetzt in engine/imagegen.py (Evaluation Juli 2026, Änderung 1),
+# re-exportiert oben — Verhalten unverändert, reines Verschieben.
 
 IMAGE_JOB_MAX_POLLS = 50  # 50 * 3s = 150s. 90s (30 polls) turned out too aggressive in
 # practice — live runs showed several legitimate generations still succeeding well past
@@ -1243,7 +1110,7 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
 
     master = read_master(cid)
     image_model = get_video_image_model(cid, vid)
-    style_ref_url = get_channel_style_ref(cid)
+    style_ref_urls = get_channel_style_refs(cid)
 
     def process_scene(scene):
         i = scene["i"]
@@ -1338,19 +1205,16 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
                 if entity_debug.get("is_local"):
                     entity_refs = [get_public_charsheet_url(ref) for ref in entity_refs]
 
-                has_prior_ref = bool(chain_refs) or bool(entity_refs)
-                use_style_ref = bool(style_ref_url) and not has_prior_ref
-                # Juli 2026 (User-Report: falscher Charakter generiert): der Kanal kann
-                # Charsheets aus einem komplett anderen, längst abgeschlossenen Video
-                # enthalten (die Multi-Charakter-Bibliothek-UI dafür ist im aktuellen
-                # Dashboard tot/unerreichbar — switchTopTab() wird nirgends mehr
-                # aufgerufen). Diese Charsheets NIE mehr als Text oder Bild anhängen —
-                # jede Bild-Anfrage besteht nur noch aus: Szenen-Prompt, Master-Prompt
-                # (in full_prompt eingebettet), und genau EIN Referenzbild (entweder die
-                # erste generierte Szene desselben Charakters, oder — nur falls es die
-                # noch nicht gibt — das eine vom Nutzer in den Settings gesetzte
-                # Referenzbild) — nichts sonst.
-                refs = chain_refs + entity_refs + ([style_ref_url] if use_style_ref else [])
+                # Evaluation Juli 2026 (Fund 1, "Grafik-Look driftet in Charakter-Szenen"):
+                # der Style-Ref wurde bisher WEGGELASSEN, sobald eine Szene schon einen
+                # Chain-/Entity-Anchor hatte ("nie zwei Bilder gleichzeitig"). nano-banana-2
+                # nimmt aber bis zu 14 Referenzbilder — es gibt keinen technischen Grund,
+                # Identitäts- und Stil-Referenz exklusiv zu behandeln. Jetzt: Style-Ref(s)
+                # IMMER anhängen, Reihenfolge Identität zuerst (frühe Referenzbilder werden
+                # stärker gewichtet, siehe Recherche), Stil zuletzt. Audit Juli 2026
+                # (Bereich 3): bis zu 3 Style-Refs statt nur einem.
+                use_style_ref = bool(style_ref_urls)
+                refs = chain_refs + entity_refs + (style_ref_urls if use_style_ref else [])
                 full_prompt = _build_image_prompt(scene.get("prompt", ""), master, None, phase=scene.get("phase", ""))
                 if scene.get("seq_id") is not None and scene.get("seq_pos", 0) >= 1:
                     # Positive constraints only — negated instructions ("do NOT redesign")
@@ -1413,6 +1277,15 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
                                 if os.path.exists(local_path):
                                     fresh_refs.append(upload_image_public(local_path))
                             elif entity_debug.get("is_local") and entity_debug.get("entity_anchor_file"):
+                                # D2 (Evaluation Juli 2026): kombinierte Charsheet+Anchor-Refs
+                                # haben ZWEI lokale Dateien -- charsheet_file zuerst frisch
+                                # hochladen (sonst würde der Retry den Identitäts-Anker
+                                # stillschweigend verlieren), dann die Anchor-Szene.
+                                charsheet_local = entity_debug.get("charsheet_file")
+                                if charsheet_local and os.path.exists(charsheet_local):
+                                    with _CHARSHEET_UPLOAD_LOCK:
+                                        _CHARSHEET_UPLOAD_CACHE.pop(charsheet_local, None)
+                                    fresh_refs.append(get_public_charsheet_url(charsheet_local))
                                 local_path = entity_debug["entity_anchor_file"]
                                 if os.path.exists(local_path):
                                     with _CHARSHEET_UPLOAD_LOCK:
@@ -1421,7 +1294,7 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
                             elif entity_refs:
                                 fresh_refs.extend(entity_refs)
                             if use_style_ref:
-                                fresh_refs.append(style_ref_url)
+                                fresh_refs.extend(style_ref_urls)
                             IMAGE_GEN_SEMAPHORE.acquire()
                             try:
                                 task_id = _kie_submit_image(full_prompt, model=image_model, ref_urls=fresh_refs or None)
@@ -2120,11 +1993,11 @@ def _thumbnail_generate_worker(cid: str, vid: str, full_script: str, master_styl
         print("  [Thumbnail] Semaphore erhalten, submitte an KIE …", flush=True)
         with _THUMB_JOBS_LOCK:
             THUMB_JOBS[key]["step"] = "Erzeuge Bild bei KIE …"
-        style_ref_url = get_channel_style_ref(cid)
+        style_ref_urls = get_channel_style_refs(cid)
         try:
             res = gen_thumbnail_image(prompt, master_style, os.path.join(v_out(cid, vid), "thumbnail.jpg"),
                                        model=get_video_image_model(cid, vid),
-                                       ref_urls=[style_ref_url] if style_ref_url else None)
+                                       ref_urls=style_ref_urls or None)
         finally:
             IMAGE_GEN_SEMAPHORE.release()
         if not res["ok"]:
@@ -2298,77 +2171,8 @@ def gen_image(scene_prompt, master, out_path, char_refs=None):
 
 
 
-def _multipart_upload(url: str, field: str, filename: str, data: bytes, mime: str, extra_fields: dict | None = None) -> str:
-    """Generic multipart/form-data upload, returns response body."""
-    boundary = b"----upload-" + str(int(time.time())).encode()
-    body = b""
-    if extra_fields:
-        for k, v in extra_fields.items():
-            body += b"--" + boundary + b"\r\n"
-            body += f'Content-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
-    body += (b"--" + boundary + b"\r\n"
-             + f'Content-Disposition: form-data; name="{field}"; filename="{filename}"\r\n'.encode()
-             + f"Content-Type: {mime}\r\n\r\n".encode()
-             + data + b"\r\n--" + boundary + b"--\r\n")
-    req = urllib.request.Request(url, data=body,
-                                 headers={
-                                     "Content-Type": f"multipart/form-data; boundary={boundary.decode()}",
-                                     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
-                                 })
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return r.read().decode().strip()
-
-
-_CHARSHEET_UPLOAD_CACHE = {}
-_CHARSHEET_UPLOAD_LOCK = threading.Lock()
-
-def get_public_charsheet_url(local_path: str) -> str:
-    """Gets or uploads a local charsheet image. Ensures each file is only uploaded once per server session."""
-    with _CHARSHEET_UPLOAD_LOCK:
-        if local_path in _CHARSHEET_UPLOAD_CACHE:
-            return _CHARSHEET_UPLOAD_CACHE[local_path]
-    
-    url = upload_image_public(local_path)
-    
-    with _CHARSHEET_UPLOAD_LOCK:
-        _CHARSHEET_UPLOAD_CACHE[local_path] = url
-    return url
-
-
-def upload_image_public(local_path: str) -> str:
-    """Upload local image to a public host, return URL. Uses catbox.moe."""
-    with open(local_path, "rb") as f:
-        data = f.read()
-    ext   = os.path.splitext(local_path)[1].lower() or ".png"
-    mime  = "image/png" if ext == ".png" else "image/jpeg"
-    fname = "image" + ext
-
-    # Try catbox.moe (permanent, reliable, returns raw image)
-    try:
-        url = _multipart_upload(
-            "https://catbox.moe/user/api.php",
-            "fileToUpload", fname, data, mime,
-            extra_fields={"reqtype": "fileupload"}
-        )
-        if url.startswith("http"):
-            print(f"  [Upload] catbox → {url}", flush=True)
-            return url
-    except Exception as e:
-        print(f"  [Upload] catbox fehlgeschlagen: {e} — versuche litterbox …", flush=True)
-
-    # Fallback: litterbox.catbox.moe (72h temp)
-    try:
-        url = _multipart_upload(
-            "https://litterbox.catbox.moe/resources/internals/api.php",
-            "fileToUpload", fname, data, mime,
-            extra_fields={"reqtype": "fileupload", "time": "72h"}
-        )
-        if url.startswith("http"):
-            print(f"  [Upload] litterbox → {url}", flush=True)
-            return url
-    except Exception as e:
-        print(f"  [Upload] litterbox fehlgeschlagen: {e}", flush=True)
-        raise ValueError(f"Upload fehlgeschlagen: {e}")
+# _multipart_upload, get_public_charsheet_url, upload_image_public, KIE_UPLOAD_URL
+# jetzt in engine/imagegen.py (Evaluation Juli 2026, Änderung 1+2), re-exportiert oben.
 
 
 # T2V-Mindest-Promptlänge. HINWEIS: Der gesamte T2V-Pfad (make_t2v_prompt +
@@ -3089,9 +2893,10 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/videos":
             return self._send(200, {"videos": load_videos(cid)})
         if p == "/api/char_ref":
-            ref_path = os.path.join(ch_dir(cid), "style_ref_url.txt")
-            url = open(ref_path).read().strip() if os.path.exists(ref_path) else ""
-            return self._send(200, {"url": url})
+            # Audit Juli 2026 (Bereich 3): style_ref_url.txt kann jetzt mehrzeilig sein
+            # (bis zu 3 Refs) -- über get_channel_style_ref() lesen statt raw, sonst
+            # würde diese Legacy-Route eine gejointe Mehrzeilen-URL zurückgeben.
+            return self._send(200, {"url": get_channel_style_ref(cid)})
         if p == "/api/get_mode":
             return self._send(200, {"mode": get_video_mode(cid, vid)})
         if p == "/api/vid_master":
@@ -3233,10 +3038,13 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/image_model":
             return self._send(200, {"model": get_video_image_model(cid, vid), "options": list(VALID_IMAGE_MODELS)})
         if p == "/api/style_ref":
-            # Channel-level reference image. The frontend (openChannelSettings,
+            # Channel-level reference image(s). The frontend (openChannelSettings,
             # loadStyleRefStatus) calls /api/style_ref — the file is owned by the
-            # channel (channels/<cid>/style_ref.png + .txt), not the video.
-            return self._send(200, {"url": get_channel_style_ref(cid)})
+            # channel (channels/<cid>/style_ref.png + .txt), not the video. Audit
+            # Juli 2026 (Bereich 3): bis zu 3 Refs -- "urls" ist die Liste (Quelle der
+            # Wahrheit), "url" bleibt für alte Frontend-Versionen als erster Eintrag.
+            urls = get_channel_style_refs(cid)
+            return self._send(200, {"urls": urls, "url": urls[0] if urls else ""})
         if p == "/api/overlay_opts":
             return self._send(200, get_video_overlay_opts(cid, vid))
         if p == "/api/plan":
@@ -3672,8 +3480,10 @@ class H(BaseHTTPRequestHandler):
                 duration_veo = 8
             else:
                 # Load char ref or scene image for REFERENCE_2_VIDEO (fresh anchor shot)
-                style_ref_path = os.path.join(ch_dir(cid), "style_ref_url.txt")
-                style_ref_url  = open(style_ref_path).read().strip() if os.path.exists(style_ref_path) else ""
+                # Audit Juli 2026 (Bereich 3): über get_channel_style_ref() lesen, sonst
+                # gibt eine mehrzeilige style_ref_url.txt (2-3 Refs) hier eine gejointe
+                # Mehrzeilen-URL zurück statt einer einzelnen gültigen URL.
+                style_ref_url = get_channel_style_ref(cid)
                 scene_img_url = scene.get("source_url", "")
                 ref_url = style_ref_url or scene_img_url
 
@@ -4177,7 +3987,7 @@ class H(BaseHTTPRequestHandler):
             # firing this KIE submission immediately alongside all the others. Released by
             # _image_job_worker once this scene's generation fully finishes.
             IMAGE_GEN_SEMAPHORE.acquire()
-            style_ref_url = get_channel_style_ref(cid)
+            style_ref_urls = get_channel_style_refs(cid)
             # Juli 2026 (User-Report: "sobald kein Mensch im Prompt ist, denkt er sich
             # was aus"): Referenzbild jetzt an JEDE Szene (nicht mehr nur char_-Entities)
             # — es ist ein reiner STIL-Anker (siehe Master-Prompt), kein erzwungenes
@@ -4189,8 +3999,13 @@ class H(BaseHTTPRequestHandler):
             # kanalweite Charsheets aus einem anderen Video überstimmten sonst die
             # Szenenbeschreibung).
             chain_refs, chain_debug = _resolve_chain_refs(v_plan(cid, vid), scene_for_phase)
-            use_style_ref = bool(style_ref_url) and not (entity_refs or chain_refs)
-            refs = chain_refs + entity_refs + ([style_ref_url] if use_style_ref else [])
+            # D1 (Evaluation Juli 2026, Fund 1): Style-Ref(s) IMMER anhängen, nicht mehr
+            # nur wenn kein Chain-/Entity-Anchor existiert -- sonst verliert die
+            # Einzelklick-Generierung genau wie der Batch-Worker den Grafik-Stil-Anker bei
+            # Charakter-Szenen. Reihenfolge: Identität zuerst, Stil zuletzt. Audit Juli
+            # 2026 (Bereich 3): bis zu 3 Style-Refs statt nur einem.
+            use_style_ref = bool(style_ref_urls)
+            refs = chain_refs + entity_refs + (style_ref_urls if use_style_ref else [])
             try:
                 task_id = _kie_submit_image(full_prompt, model=get_video_image_model(cid, vid),
                                              ref_urls=refs or None)
@@ -4234,9 +4049,9 @@ class H(BaseHTTPRequestHandler):
                 return self._send(500, {"error": f"Plan lesen fehlgeschlagen: {e}"})
             if not scene:
                 return self._send(404, {"error": f"Szene {i} nicht gefunden"})
-            # Load canonical character reference URL (if set)
-            style_ref_path = os.path.join(ch_dir(cid), "style_ref_url.txt")
-            style_ref_url = open(style_ref_path).read().strip() if os.path.exists(style_ref_path) else ""
+            # Load canonical character reference URL (if set). Audit Juli 2026
+            # (Bereich 3): über get_channel_style_ref() lesen (Mehrzeilen-sicher).
+            style_ref_url = get_channel_style_ref(cid)
 
             # Scene image as fallback reference (upload if no CDN url yet)
             source_url = scene.get("source_url", "")
@@ -4340,20 +4155,40 @@ class H(BaseHTTPRequestHandler):
         # (404). Beide Namen akzeptieren statt umzubenennen, damit nichts anderes
         # bricht, das noch den alten Namen aufruft.
         if p in ("/api/set_char_ref", "/api/set_style_ref"):
-            url = d.get("url", "").strip()
+            # Audit Juli 2026 (Bereich 3, Multi-Style-Ref): akzeptiert jetzt entweder
+            # ein einzelnes "url" (Legacy, 1 Slot) ODER eine Liste "urls" (bis zu 3
+            # Slots) -- das Frontend schickt bei jeder Änderung (Add/Remove/Edit
+            # eines Slots) die komplette aktuelle Liste, der Server überschreibt
+            # style_ref_url.txt komplett. Keine Index-Patch-Semantik nötig, das hält
+            # die Datei immer konsistent mit dem, was das Frontend gerade anzeigt.
+            urls = d.get("urls")
+            if urls is None:
+                single = d.get("url", "").strip()
+                urls = [single] if single else []
+            urls = [str(u).strip() for u in urls if str(u).strip()][:3]
+            for u in urls:
+                if not u.startswith("http"):
+                    return self._send(400, {"error": f"Ungültige URL: {u}"})
             ref_path = os.path.join(ch_dir(cid), "style_ref_url.txt")
-            if not url:
-                # Clear: delete file
+            if not urls:
                 if os.path.exists(ref_path): os.remove(ref_path)
-                return self._send(200, {"ok": True, "url": ""})
-            if not url.startswith("http"):
-                return self._send(400, {"error": "Ungültige URL"})
-            open(ref_path, "w").write(url)
-            return self._send(200, {"ok": True, "url": url})
+                return self._send(200, {"ok": True, "url": "", "urls": []})
+            open(ref_path, "w").write("\n".join(urls) + "\n")
+            return self._send(200, {"ok": True, "url": urls[0], "urls": urls})
 
         # ── Generate + upload canonical character reference image ──────────────
         # Gleicher Alias-Grund wie bei set_char_ref/set_style_ref oben.
         if p in ("/api/gen_char_ref", "/api/gen_style_ref"):
+            # Audit Juli 2026 (Bereich 3, Multi-Style-Ref): optionales "index" (0-2)
+            # ersetzt genau diesen Slot; ohne index wird ein neuer Slot angehängt
+            # (max. 3 -- kein KIE-Credit verbrennen, wenn eh kein Platz ist).
+            existing_refs = get_channel_style_refs(cid)
+            slot_index = d.get("index")
+            if slot_index is not None:
+                try: slot_index = int(slot_index)
+                except Exception: slot_index = None
+            if slot_index is None and len(existing_refs) >= 3:
+                return self._send(400, {"error": "Maximal 3 Style-Referenzen — erst eine entfernen."})
             master = ""
             try: master = open(ch_master(cid)).read().strip()
             except: pass
@@ -4388,12 +4223,21 @@ class H(BaseHTTPRequestHandler):
                                 headers={"Referer": "https://kie.ai/", "User-Agent": "Mozilla/5.0"})
                             with urllib.request.urlopen(dl_req, timeout=60) as vr:
                                 img_data = vr.read()
-                            # Save locally
-                            ref_path = os.path.join(ch_dir(cid), "style_ref.png")
+                            # Save locally -- erster Slot behält den Legacy-Namen
+                            # "style_ref.png" (gen_charsheet's lokaler Fallback-Pfad
+                            # erwartet genau diesen Namen), weitere Slots timestamped.
+                            ref_fname = "style_ref.png" if not existing_refs else f"style_ref_{int(time.time())}.png"
+                            ref_path = os.path.join(ch_dir(cid), ref_fname)
                             open(ref_path, "wb").write(img_data)
                             pub_url = upload_image_public(ref_path)
-                            open(os.path.join(ch_dir(cid), "style_ref_url.txt"), "w").write(pub_url)
-                            return self._send(200, {"ok": True, "url": pub_url})
+                            if slot_index is not None and 0 <= slot_index < len(existing_refs):
+                                existing_refs[slot_index] = pub_url
+                            else:
+                                existing_refs.append(pub_url)
+                            existing_refs = existing_refs[:3]
+                            open(os.path.join(ch_dir(cid), "style_ref_url.txt"), "w").write(
+                                "\n".join(existing_refs) + "\n")
+                            return self._send(200, {"ok": True, "url": pub_url, "urls": existing_refs})
                     elif info.get("state") == "fail":
                         return self._send(500, {"error": f"KIE fail: {info.get('failMsg')}"})
                 except Exception as e:

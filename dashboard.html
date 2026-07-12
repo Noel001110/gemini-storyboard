@@ -69,6 +69,10 @@
     .sidebar{position:fixed;top:0;left:0;height:100vh;z-index:55;transform:translateX(-100%);box-shadow:0 0 0 transparent;width:240px}
     body.sidebar-open .sidebar{transform:translateX(0);box-shadow:4px 0 24px rgba(0,0,0,.15)}
     .sidebar-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:54;backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px)}
+  .jump-render-btn{position:fixed;left:50%;bottom:16px;z-index:40;background:none;border:0;padding:6px 14px;color:var(--mut-2);font-size:24px;line-height:1;cursor:pointer;filter:drop-shadow(0 1px 3px rgba(0,0,0,.15));opacity:0;pointer-events:none;transform:translate(-50%,8px);transition:opacity .25s,transform .25s}
+  .jump-render-btn.is-visible{opacity:.75;pointer-events:auto;transform:translate(-50%,0);animation:jumpBounce 2.2s ease-in-out infinite}
+  .jump-render-btn:hover{opacity:1;color:var(--acc)}
+  @keyframes jumpBounce{0%,100%{transform:translate(-50%,0)}50%{transform:translate(-50%,5px)}}
     body.sidebar-open .sidebar-backdrop{display:block}
   }
   /* Phase 33.3.1 — Hamburger im Header nur auf Mobile anzeigen */
@@ -397,6 +401,11 @@
   <div id="view-editor" style="display:none">
     <div class="back-link" onclick="backToVideoList()">← Zurück zu Videos</div>
 
+    <!-- Juli 2026, Nutzerwunsch: bei 20+ Szenen ist der Weg zur Render-Karte ein langer
+         Scroll. Dezenter Pfeil, unten mittig, sichtbar nur solange renderCard existiert
+         UND noch nicht im Viewport ist (siehe IntersectionObserver-Setup unten). -->
+    <button class="jump-render-btn" id="jumpRenderBtn" onclick="scrollToRender()" title="Zum Rendern springen">↓</button>
+
     <!-- Stepper-Querleiste ENTFERNT (Juli 2026, Nutzerwunsch): die nummerierten
          Sektionen ①–⑤ sind bereits untereinander gestapelt (Single-Page-Flow) und
          DIENEN selbst als Schritt-Navigation. Der separate Balken oben war redundant.
@@ -568,19 +577,19 @@
         <div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:6px">
           <label style="flex:0 0 200px">Modell
             <select id="elModelSel" style="width:100%">
-              <option value="eleven_v3">eleven_v3 (beste Prosodie)</option>
-              <option value="eleven_multilingual_v2">eleven_multilingual_v2 (Request-Stitching)</option>
+              <option value="eleven_multilingual_v2" selected>eleven_multilingual_v2 (Default — respektiert Speed, Request-Stitching)</option>
+              <option value="eleven_v3">eleven_v3 (beste Prosodie, aber langsame Kadenz — Speed wirkt kaum)</option>
               <option value="eleven_flash_v2_5">eleven_flash_v2_5 (schnell/günstig)</option>
             </select>
           </label>
         </div>
         <div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:6px">
-          <label style="flex:1;min-width:160px">Stability <span id="elStabVal" class="hint">0.50</span><input type="range" id="elStab" min="0" max="1" step="0.05" value="0.5" style="width:100%"></label>
+          <label style="flex:1;min-width:160px">Stability <span id="elStabVal" class="hint">0.40</span><input type="range" id="elStab" min="0" max="1" step="0.05" value="0.4" style="width:100%"></label>
           <label style="flex:1;min-width:160px">Similarity <span id="elSimVal" class="hint">0.75</span><input type="range" id="elSim" min="0" max="1" step="0.05" value="0.75" style="width:100%"></label>
         </div>
         <div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:6px">
           <label style="flex:1;min-width:160px">Style <span id="elStyleVal" class="hint">0.00</span><input type="range" id="elStyle" min="0" max="1" step="0.05" value="0" style="width:100%"></label>
-          <label style="flex:1;min-width:160px">Speed <span id="elSpeedVal" class="hint">1.00×</span><input type="range" id="elSpeed" min="0.7" max="1.2" step="0.05" value="1.0" style="width:100%" title="ElevenLabs-API: 1.0 = normal. Offizieller Bereich 0.7–1.2 (elevenlabs.io/docs) — Werte außerhalb riskieren HTTP 400."></label>
+          <label style="flex:1;min-width:160px">Speed <span id="elSpeedVal" class="hint">1.10×</span><input type="range" id="elSpeed" min="0.7" max="1.2" step="0.05" value="1.1" style="width:100%" title="ElevenLabs-API: 1.0 = normal. Offizieller Bereich 0.7–1.2 (elevenlabs.io/docs) — Werte außerhalb riskieren HTTP 400."></label>
         </div>
         <div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:6px">
           <label style="flex:1;min-width:160px">Speaker Boost <span id="elBoostVal" class="hint">on</span>
@@ -1032,6 +1041,17 @@ async function openVideo(vid, name){
   // them) never runs when there's no plan to render.
   $('renderCard').style.display = 'none';
   $('produceCard').style.display = 'none';
+  // Audit Juli 2026 (Bereich 5b): renderCard.display='none' versteckt nur die KARTE,
+  // aber renderSlot behält sein <video src="...?channel=<ALTER-KANAL>..."> im DOM.
+  // Öffnet man danach ein anderes Video (auch ohne eigenes final.mp4), blendet
+  // updateRenderCardVisibility() die Karte wieder ein und das FREMDE Video taucht
+  // wieder auf. Slot explizit leeren, nicht nur die Karte verstecken.
+  const _renderSlot = $('renderSlot');
+  if(_renderSlot){
+    _renderSlot.style.display = 'none';
+    _renderSlot.innerHTML = `<div class="slot-empty"><span class="slot-icon">🎬</span><span class="slot-label">Noch kein Video gerendert</span></div>`;
+  }
+  if($('renderDlRow')) $('renderDlRow').style.display = 'none';
 
   // Skript dieses Videos wiederherstellen — Server (script.json) ist Source-of-Truth,
   // localStorage nur als Offline-Fallback. Promise nicht awaited: das Skript-Feld kann
@@ -1368,7 +1388,7 @@ async function openChannelSettings(){
   const master    = await ch_get('/api/master').then(r => r.master).catch(() => '');
   const vidMaster = await ch_get('/api/vid_master').then(r => r.vid_master || '').catch(() => '');
   const imgModel  = await ch_get('/api/image_model').then(r => r.image_model || 'nano-banana-2').catch(() => 'nano-banana-2');
-  const styleRefUrl= await ch_get('/api/style_ref').then(r => r.url || '').catch(() => '');
+  const styleRefUrls = await ch_get('/api/style_ref').then(r => r.urls || (r.url ? [r.url] : [])).catch(() => []);
   document.getElementById('settingsContent').innerHTML =
     `<label class="block text-xs font-semibold text-app-mut uppercase tracking-wide mb-2">Bild-Master-Prompt</label>`
     + `<textarea id="settingsMaster" rows="6" class="w-full px-3 py-2 border border-app-border rounded-md focus:outline-none focus:ring-2 focus:ring-app-acc text-sm mb-1">${escHtml(master)}</textarea>`
@@ -1382,28 +1402,19 @@ async function openChannelSettings(){
     + `<option value="nano-banana-2-lite">nano-banana-2-lite (günstiger)</option>`
     + `</select>`
     + `<div class="flex justify-end mb-4"></div>`
-    + `<label class="block text-xs font-semibold text-app-mut uppercase tracking-wide mb-2 mt-4">Charakter-Referenz</label>`
-    // Vorschau/Status des aktuell gesetzten Referenzbilds (wird von _applyStyleRef befüllt)
-    + `<div id="charRefBox" style="display:flex;align-items:center;gap:12px;padding:10px;background:var(--surface-2);border:1px solid var(--border);border-radius:6px;margin-bottom:10px">`
-    +   `<div id="charRefThumb" style="width:80px;height:45px;background:#000;border-radius:4px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:20px;color:var(--mut)">🎭</div>`
-    +   `<div style="flex:1;min-width:0"><div id="charRefLabel" style="font-size:12px;color:var(--mut)">Kein Referenzbild gesetzt</div>`
-    +   `<div id="charRefUrl" style="font-size:10px;color:var(--mut);opacity:.6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div></div>`
-    + `</div>`
-    + `<input id="settingsCharRefUrl" type="url" value="${escHtml(styleRefUrl)}" class="w-full px-3 py-2 border border-app-border rounded-md focus:outline-none focus:ring-2 focus:ring-app-acc text-sm mb-1" placeholder="https://… oder Bild hochladen/generieren">`
-    + `<div class="flex justify-end mb-2"><button onclick="saveSettingsStyleRef()" class="sm ghost">💾 URL speichern</button></div>`
-    + `<div class="row" style="margin-top:8px;gap:8px;flex-wrap:wrap">`
-    + `<button class="sm ghost" onclick="$('charRefUploadFile').click()" style="flex:1">📁 Bild hochladen</button>`
+    // Audit Juli 2026 (Bereich 3): "Charakter-Referenz" -> "Style-Referenz(en)" umbenannt
+    // (es ist faktisch der globale Grafik-Stil-Anker, keine Charakter-Referenz) + auf bis
+    // zu 3 Slots erweitert. Die Slots selbst werden von _renderStyleRefSlots() befüllt.
+    + `<label class="block text-xs font-semibold text-app-mut uppercase tracking-wide mb-2 mt-4">Style-Referenzen <span class="hint" style="text-transform:none;letter-spacing:0">(bis zu 3, definieren den globalen Grafik-Stil)</span></label>`
+    + `<div id="styleRefSlots"></div>`
     + `<input type="file" id="charRefUploadFile" accept="image/*" style="display:none" onchange="charRefFileSelected()">`
-    + `<button class="sm ghost" id="btnCharRef" onclick="genStyleRef()" style="flex:1">✨ Aus Master generieren</button>`
-    + `<button class="sm ghost" onclick="clearStyleRef()" style="color:var(--mut)">✕ Löschen</button>`
-    + `</div>`
     + `<div id="charRefUploadPreview" style="display:none;margin-top:10px;padding:12px;background:var(--surface-2);border-radius:var(--radius-sm)">`
     + `<img id="charRefPreviewImg" style="max-height:100px;border-radius:6px;border:1px solid var(--border);display:block;margin-bottom:8px">`
     + `<div class="row" style="gap:8px"><button class="sm blue" id="charRefUploadBtn" onclick="uploadStyleRefImage()">Hochladen &amp; als Referenz setzen</button>`
     + `<button class="sm ghost" onclick="cancelStyleRefUpload()">Abbrechen</button></div>`
     + `</div>`;
   document.getElementById('settingsImageModel').value = imgModel;
-  loadStyleRefStatus();  // aktuelles Referenzbild in charRefBox/Thumb/Label anzeigen
+  _renderStyleRefSlots(styleRefUrls);
 
   // Brand-Color pro Channel — wird live aus dem ersten Video / channels-default abgeleitet
   const channels = (await api('/api/channels')).channels || [];
@@ -1423,11 +1434,6 @@ async function saveSettingsVidMaster(){
 }
 async function saveSettingsImageModel(){
   await ch_api('/api/image_model', {model: $('settingsImageModel').value});
-  showToast('gespeichert ✓');
-}
-async function saveSettingsStyleRef(){
-  const url = $('settingsStyleRefUrl').value;
-  await ch_api('/api/style_ref', { url });
   showToast('gespeichert ✓');
 }
 // Phase 33.3.1 Bug-1 — Brand-Color speichern. Der Color-Picker triggert input-Event
@@ -1699,10 +1705,11 @@ async function loadTtsVoices(){
   $('elVoiceSelect').onchange = async () => {
     const v = $('elVoiceSelect').value;
     if(provider === 'elevenlabs'){
-      // July 2026 (User-Report: "denk an v3"): use whatever model_id is currently shown
-      // in the UI select (default eleven_v3), not a hardcoded multilingual_v2.
+      // Audit Juli 2026 (Bereich 4): use whatever model_id is currently shown in the
+      // UI select (default eleven_multilingual_v2 -- v3 war zu langsam, siehe
+      // engine_elevenlabs.py ELEVENLABS_DEFAULT_MODEL).
       const modelSel = $('elModelSel');
-      const model_id = modelSel ? (modelSel.value || 'eleven_v3') : 'eleven_v3';
+      const model_id = modelSel ? (modelSel.value || 'eleven_multilingual_v2') : 'eleven_multilingual_v2';
       await ch_api('/api/elevenlabs_settings', {
         voice_id: v,
         model_id,
@@ -2010,7 +2017,7 @@ async function voiceTestPreview(){
       body: JSON.stringify({
         text: 'Hallo, das ist ein Stimm-Sample.',
         voice_id: $('elVoiceSelect').value,
-        model_id: ($('elModelSel') && $('elModelSel').value) || 'eleven_v3',
+        model_id: ($('elModelSel') && $('elModelSel').value) || 'eleven_multilingual_v2',
         stability: +$('elStab').value,
         similarity_boost: +$('elSim').value,
         style: +$('elStyle').value,
@@ -2106,7 +2113,7 @@ async function elevenLabsGenerate(){
   $('elStatus').textContent = 'Persistiere Voice-Setting …';
   await ch_api('/api/elevenlabs_settings', {
     voice_id: $('elVoiceSelect').value,
-    model_id: (typeof $('elModelSel') !== 'undefined' && $('elModelSel') && $('elModelSel').value) || 'eleven_v3',
+    model_id: (typeof $('elModelSel') !== 'undefined' && $('elModelSel') && $('elModelSel').value) || 'eleven_multilingual_v2',
     stability: +$('elStab').value,
     similarity_boost: +$('elSim').value,
     style: +$('elStyle').value,
@@ -2345,52 +2352,86 @@ function dlVideo(i){
   a.href=`/generated/${s.video_file}?channel=${ACTIVE_CHANNEL}&video=${ACTIVE_VIDEO}`; a.download=`${ts}.mp4`; a.click();
 }
 
-function _applyStyleRef(url){
+// Audit Juli 2026 (Bereich 3, Multi-Style-Ref): bis zu 3 Style-Referenz-Slots statt
+// einem. _styleRefUrls ist der aktuelle Client-Stand (Quelle der Wahrheit für
+// Slot-Indizes bei Ersetzen/Entfernen); der Server überschreibt style_ref_url.txt
+// bei jeder Änderung komplett mit der gerade angezeigten Liste (keine Index-Patch-
+// Semantik im Backend nötig).
+let _styleRefUrls = [];
+
+function _renderStyleRefSlots(urls){
+  _styleRefUrls = urls || [];
+  const box = $('styleRefSlots');
+  if(box){
+    box.innerHTML = '';
+    for(let i=0; i<3; i++){
+      const url = _styleRefUrls[i];
+      const slot = document.createElement('div');
+      slot.style.cssText = 'display:flex;align-items:center;gap:12px;padding:10px;background:var(--surface-2);border:1px solid var(--border);border-radius:6px;margin-bottom:8px';
+      slot.innerHTML = url ? `
+        <div style="width:80px;height:45px;border-radius:4px;flex-shrink:0;overflow:hidden"><img src="${url}" style="width:100%;height:100%;object-fit:cover"></div>
+        <div style="flex:1;min-width:0"><div style="font-size:12px;color:var(--ok)">Slot ${i+1} — Referenz gesetzt</div>
+        <div style="font-size:10px;color:var(--mut);opacity:.6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(url)}</div></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="sm ghost" onclick="charRefUploadForSlot(${i})">📁 Ersetzen</button>
+          <button class="sm ghost" onclick="genStyleRef(${i})">✨ Neu generieren</button>
+          <button class="sm ghost" onclick="clearStyleRefSlot(${i})" style="color:var(--mut)">✕ Entfernen</button>
+        </div>` : `
+        <div style="width:80px;height:45px;background:#000;border-radius:4px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:20px;color:var(--mut)">🎭</div>
+        <div style="flex:1;min-width:0"><div style="font-size:12px;color:var(--mut)">Slot ${i+1} — leer</div></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="sm ghost" onclick="charRefUploadForSlot(${i})">📁 Hochladen</button>
+          <button class="sm ghost" onclick="genStyleRef(${i})">✨ Aus Master generieren</button>
+        </div>`;
+      box.appendChild(slot);
+    }
+  }
+  // Sidebar-Status zeigt jetzt die Anzahl statt einer einzelnen URL.
   const sidebar = $('charRefStatus'), sidebarBox = $('charRefStatusBox');
-  if(url){
-    const name = url.split('/').pop().slice(0,28);
-    if(sidebar){ sidebar.textContent='✅ '+name; sidebar.title=url; }
-    if(sidebarBox) sidebarBox.style.display='block';
-    const lbl=$('charRefLabel'), urlEl=$('styleRefUrl'), thumb=$('charRefThumb');
-    if(lbl) lbl.textContent='Referenz gesetzt';
-    if(lbl) lbl.style.color='var(--ok)';
-    if(urlEl){ urlEl.textContent=url; urlEl.style.display='block'; }
-    if(thumb){ thumb.innerHTML=`<img src="${url}" style="width:100%;height:100%;object-fit:cover;border-radius:4px">`; }
-  } else {
-    if(sidebar){ sidebar.textContent=''; sidebar.title=''; }
-    if(sidebarBox) sidebarBox.style.display='none';
-    const lbl=$('charRefLabel'), urlEl=$('styleRefUrl'), thumb=$('charRefThumb');
-    if(lbl){ lbl.textContent='Kein Referenzbild gesetzt'; lbl.style.color='var(--mut)'; }
-    if(urlEl){ urlEl.textContent=''; urlEl.style.display='none'; }
-    if(thumb) thumb.innerHTML='🎭';
+  if(sidebar && sidebarBox){
+    if(_styleRefUrls.length){
+      sidebar.textContent = `✅ ${_styleRefUrls.length} Style-Ref${_styleRefUrls.length>1?'s':''}`;
+      sidebar.title = _styleRefUrls.join('\n');
+      sidebarBox.style.display = 'block';
+    } else {
+      sidebar.textContent = ''; sidebar.title = '';
+      sidebarBox.style.display = 'none';
+    }
   }
 }
 
 async function loadStyleRefStatus(){
   try{
     const r = await api('/api/style_ref?channel='+ACTIVE_CHANNEL);
-    _applyStyleRef(r.url || null);
+    _renderStyleRefSlots(r.urls || (r.url ? [r.url] : []));
   }catch(e){}
 }
 
-async function genStyleRef(){
-  const btn=$('btnStyleRef');
-  if(!btn) return;
-  btn.disabled=true; btn.textContent='⏳ Generiere …';
+async function genStyleRef(slotIndex){
+  const box = $('styleRefSlots');
+  if(box) box.style.opacity = '.5';
   try{
-    const r=await ch_api('/api/gen_style_ref',{});
-    if(r.ok){ _applyStyleRef(r.url); }
+    // Slot bereits belegt -> ersetzen (index mitschicken); sonst neuen Slot anhängen.
+    const body = (slotIndex < _styleRefUrls.length) ? {index: slotIndex} : {};
+    const r = await ch_api('/api/gen_style_ref', body);
+    if(r.ok){ _renderStyleRefSlots(r.urls || _styleRefUrls); }
     else alert('Fehler: '+(r.error||'unbekannt'));
   }catch(e){ alert('Fehler: '+e); }
-  btn.disabled=false; btn.textContent='✨ Aus Master generieren';
+  if(box) box.style.opacity = '';
 }
 
-async function clearStyleRef(){
-  await ch_api('/api/set_style_ref',{url:''});
-  _applyStyleRef(null);
+async function clearStyleRefSlot(slotIndex){
+  const urls = _styleRefUrls.slice();
+  urls.splice(slotIndex, 1);
+  await ch_api('/api/set_style_ref', {urls});
+  _renderStyleRefSlots(urls);
 }
 
-let _styleRefB64=null, _styleRefMime=null;
+let _styleRefB64=null, _styleRefMime=null, _styleRefUploadSlot=null;
+function charRefUploadForSlot(slotIndex){
+  _styleRefUploadSlot = slotIndex;
+  $('charRefUploadFile').click();
+}
 function charRefFileSelected(){
   const f=$('charRefUploadFile').files[0]; if(!f) return;
   _styleRefMime = f.type||'image/png';
@@ -2402,7 +2443,8 @@ function charRefFileSelected(){
   reader.readAsDataURL(f);
 }
 function cancelStyleRefUpload(){
-  _styleRefB64=null; $('charRefUploadPreview').style.display='none';
+  _styleRefB64=null; _styleRefUploadSlot=null;
+  $('charRefUploadPreview').style.display='none';
   $('charRefUploadFile').value='';
 }
 async function uploadStyleRefImage(){
@@ -2415,8 +2457,11 @@ async function uploadStyleRefImage(){
   }).then(r=>r.json());
   btn.disabled=false; btn.textContent='Hochladen & als Referenz setzen';
   if(!r.ok){ alert('Fehler: '+(r.error||'unbekannt')); return; }
-  await ch_api('/api/set_style_ref',{url: r.uri});
-  _applyStyleRef(r.uri);
+  const urls = _styleRefUrls.slice();
+  const slot = _styleRefUploadSlot != null ? _styleRefUploadSlot : urls.length;
+  if(slot < urls.length) urls[slot] = r.uri; else urls.push(r.uri);
+  await ch_api('/api/set_style_ref', {urls});
+  _renderStyleRefSlots(urls);
   cancelStyleRefUpload();
 }
 
@@ -2521,11 +2566,39 @@ const RENDER_STAGE_LABELS = {
 const RENDER_STAGE_ORDER = ['prepare', 'timing', 'motion', 'clips', 'transitions', 'assemble', 'audio', 'review'];
 
 
+function scrollToRender(){
+  const el = $('renderCard');
+  if(el) el.scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+// Pfeil ist sichtbar nur wenn die Render-Karte eligible ist (genug Szenen, Bild-Modus)
+// UND aktuell NICHT im Viewport steht — sobald man hingescrollt ist, verschwindet er.
+let _jumpBtnEligible = false;
+let _jumpBtnCardInView = false;
+let _jumpBtnObserver = null;
+function _syncJumpBtn(){
+  const btn = $('jumpRenderBtn');
+  if(btn) btn.classList.toggle('is-visible', _jumpBtnEligible && !_jumpBtnCardInView);
+}
+function _ensureJumpBtnObserver(){
+  if(_jumpBtnObserver) return;
+  const card = $('renderCard');
+  if(!card) return;
+  _jumpBtnObserver = new IntersectionObserver((entries) => {
+    _jumpBtnCardInView = entries[0].isIntersecting;
+    _syncJumpBtn();
+  }, {threshold: 0.2});
+  _jumpBtnObserver.observe(card);
+}
+
 function updateRenderCardVisibility(){
   const card = $('renderCard');
   if(!card) return;
   const isVideo = CURRENT_MODE === 'video';
   card.style.display = (isVideo || !SCENES.length) ? 'none' : '';
+  _jumpBtnEligible = !isVideo && !!SCENES.length;
+  _ensureJumpBtnObserver();
+  _syncJumpBtn();
   if(isVideo || !SCENES.length) return;
   const doneCount = SCENES.filter(s=>s.file).length;
   const btn = $('renderBtn');
