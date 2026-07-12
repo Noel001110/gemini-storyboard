@@ -737,7 +737,7 @@ def analyze_script(beats):
         '  "locations": [{"id": "loc_01", "name": string, "description": string, '
         '"first_appears_beat": N}],\n'
         '  "characters": [{"id": "char_01", "name_or_role": string, "visual_description": '
-        '"string (EXCEPTION to the invent nothing rule: if no look is described, invent a generic basic look, e.g. \'young man, casual clothes\')", "anonymize": bool, "first_appears_beat": N}],\n'
+        '"string (CRITICAL: You MUST extract the narrator and ALL mentioned people. If no physical description exists, you MUST invent a generic basic look, e.g. \'young man, casual clothes\')", "anonymize": bool, "first_appears_beat": N}],\n'
         '  "recurring_symbols": [{"id": "sym_01", "object": string, "meaning": string, '
         '"beats": [N, N]}],\n'
         '  "emotional_arc": {"opening": "ONE word", "midpoint": "ONE word", "resolution": "ONE word"},\n'
@@ -3152,8 +3152,8 @@ class H(BaseHTTPRequestHandler):
         _qs = parse_qs(urlparse(self.path).query)
         try:    d = self._read()
         except: return self._send(400, {"error": "bad json"})
-        cid = d.get("channel", _qs.get("channel", ["default"])[0])
-        vid = d.get("video", _qs.get("video", [""])[0])
+        cid = d.get("cid", d.get("channel", _qs.get("channel", ["default"])[0]))
+        vid = d.get("vid", d.get("video", _qs.get("video", [""])[0]))
 
         # ── Phase 34: TTS-Provider setzen (GET-Pendant liegt in do_GET) ────────
         if p == "/api/tts_provider":
@@ -3303,6 +3303,7 @@ class H(BaseHTTPRequestHandler):
         # debounced (every ~2.5s while typing), read once on video load, never blocks.
         # (GET /api/script lives in do_GET since it has no body.)
         if p == "/api/save_script":
+            print(f"SAVE_SCRIPT DEBUG: vid={vid!r}, d={d!r}")
             if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
             text = d.get("text", "")
             if not isinstance(text, str):
