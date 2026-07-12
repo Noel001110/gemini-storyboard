@@ -2839,6 +2839,12 @@ class H(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        # Das Dashboard ist eine einzige HTML-Datei mit dem gesamten JS inline. Ohne
+        # Cache-Header darf der Browser sie beliebig lange wiederverwenden — dann läuft
+        # nach einem Bugfix weiter der ALTE Code, und der Fix sieht aus als wirke er
+        # nicht. Bei einem lokalen Dev-Dashboard ist Caching ohnehin wertlos.
+        if ctype.startswith("text/html"):
+            self.send_header("Cache-Control", "no-store, must-revalidate")
         self.end_headers()
         # HEAD-Requests dürfen laut HTTP-Spec keinen Body senden — sonst
         # kann der Browser den Body nicht zuverlässig vom Content-Length abgrenzen
@@ -3303,7 +3309,6 @@ class H(BaseHTTPRequestHandler):
         # debounced (every ~2.5s while typing), read once on video load, never blocks.
         # (GET /api/script lives in do_GET since it has no body.)
         if p == "/api/save_script":
-            print(f"SAVE_SCRIPT DEBUG: vid={vid!r}, d={d!r}")
             if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
             text = d.get("text", "")
             if not isinstance(text, str):
@@ -3376,6 +3381,19 @@ class H(BaseHTTPRequestHandler):
             text = clean_script(d.get("script", ""))
             if not text: return self._send(200, {"scenes": []})
             if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
+            
+            # Script speichern! Wenn der User klickt und sofort reloadet, bricht der Timeout ab
+            try:
+                payload = {
+                    "text": d.get("script", ""),
+                    "language": d.get("language", "de"),
+                    "preset": d.get("preset", "flat_cartoon_doc"),
+                    "updatedAt": int(time.time()),
+                }
+                save_v_script(cid, vid, payload)
+            except Exception as e:
+                print(f"WARNUNG: /api/plan Skript speichern: {e}", flush=True)
+
             key = (cid, vid)
             with _PLAN_JOBS_LOCK:
                 if PLAN_JOBS.get(key, {}).get("running"):
@@ -3679,13 +3697,28 @@ class H(BaseHTTPRequestHandler):
             # ElevenLabs-Calls, double-bill the user, and race-write voiceover.mp3.
             with _VOICE_JOBS_LOCK:
                 existing = VOICE_JOBS.get((cid, vid), {})
-                if existing.get("running"):
+                # Der Dedupe-Riegel darf nicht ewig halten. Stirbt der Request-Thread,
+                # ohne running=False zu setzen (Client-Disconnect beim Reload, Laptop-
+                # Zuklappen mitten im Call), bleibt das Flag stehen — und _cleanup_stale_jobs
+                # fasst laufende Jobs bewusst NICHT an. Ergebnis: jeder weitere Klick auf
+                # "Voiceover generieren" landet hier, bekommt ok+deduped zurück und tut
+                # nichts. Im Frontend sieht das aus, als reagiere der Button gar nicht mehr,
+                # und nur ein Server-Neustart half. Ein Job, der älter ist als der harte
+                # ElevenLabs-Deckel (EL_HARD_DEADLINE_SEC=300s) plus Puffer, KANN nicht mehr
+                # echt laufen — den überschreiben wir statt zu blockieren.
+                VOICE_JOB_STALE_SEC = 900
+                age = time.time() - (existing.get("ts") or 0)
+                if existing.get("running") and age <= VOICE_JOB_STALE_SEC:
                     print(f"  [ElevenLabs] Job für {cid}/{vid} bereits in Arbeit — dupliziere nicht", flush=True)
                     return self._send(200, {
                         "ok": True, "task_id": existing.get("voiceover_task_id"),
                         "deduped": True,
                         "chars": existing.get("voiceover_chars"),
                     })
+                if existing.get("running"):
+                    print(f"  [ElevenLabs] Verwaister Job für {cid}/{vid} (running seit "
+                          f"{age/60:.1f} min, älter als {VOICE_JOB_STALE_SEC/60:.0f} min) — "
+                          f"Thread ist tot, Sperre wird gelöst.", flush=True)
                 VOICE_JOBS[(cid, vid)] = {
                     "running": True, "stage": "elevenlabs-generate",
                     "error": None, "voiceover_source": "elevenlabs",

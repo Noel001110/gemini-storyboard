@@ -495,7 +495,7 @@
 
       <div id="cardSettings" style="margin-bottom:16px;padding-bottom:14px;border-bottom:1px solid var(--border)">
         <div id="settingsImg" class="row" style="align-items:center">
-          <label>Ziel-Länge pro Bild (Sek.)<input type="number" id="sec" value="5.5" min="2" max="8" step="0.5"></label>
+          <label>Ziel-Länge pro Bild (Sek.)<input type="number" id="sec" value="4.5" min="2" max="8" step="0.5"></label>
           <span class="hint">Richtwert 2–8s. Höherer Wert = cinematisch langsamerer Schnitt; Backend kappt "normal" auf maximal 5.5s/Pacing-Hardcap (ruhige dürfen bis 6s, punchy-Momente ≈1.1s).</span>
         </div>
         <div id="settingsVid" style="display:none">
@@ -515,7 +515,7 @@
       <div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Sprecher-Skript eingeben</div>
       <textarea id="script" rows="10" placeholder="Füge hier das Skript ein, das für das Video gesprochen wird …" oninput="estimate();_elRefreshGenBtn();saveScriptLocal()"></textarea>
       <div class="row" style="margin-top:10px;align-items:center">
-        <label>Wörter / Minute<input type="number" id="wpm" value="150" min="80" max="220" oninput="estimate()"></label>
+        <label>Wörter / Minute<input type="number" id="wpm" value="160" min="80" max="220" oninput="estimate()"></label>
         <span class="est" id="est">—</span>
       </div>
       <div class="row" style="margin-top:12px;gap:10px;align-items:center">
@@ -1006,6 +1006,7 @@ async function deleteVideo(vid, name){
 }
 
 function showVideoListView(){
+  if(typeof _scriptPending !== 'undefined' && _scriptPending) _flushScriptToServer().catch(()=>{});
   ACTIVE_VIDEO = '';
   $('view-videolist').style.display = '';
   $('view-editor').style.display = 'none';
@@ -1013,6 +1014,12 @@ function showVideoListView(){
 }
 
 async function openVideo(vid, name){
+  // Noch nicht geschriebene Änderung des ZULETZT offenen Videos rausschreiben, bevor
+  // ACTIVE_VIDEO umspringt und das Feld geleert wird. Der Snapshot trägt seine eigene
+  // cid/vid, landet also beim richtigen Video — aber wenn wir hier nicht flushen,
+  // ginge eine Änderung verloren die noch im Debounce hing.
+  if(_scriptPending) await _flushScriptToServer();
+
   ACTIVE_VIDEO = vid;
   $('view-videolist').style.display = 'none';
   $('view-editor').style.display = '';
@@ -1575,7 +1582,7 @@ function estimate(){
 let _planPollTimer = null;
 
 async function makePlan(){
-  if(_scriptSaveTimer) { clearTimeout(_scriptSaveTimer); await _flushScriptToServer(); }
+  if(_scriptPending) await _flushScriptToServer();
   const btn=$('planBtn'); btn.disabled=true; btn.textContent='Plane…';
   const sec = CURRENT_MODE === 'video' ? +(($('veoDuration')||{}).value||8) : +$('sec').value;
   const r=await ch_api('/api/plan',{script:$('script').value,wpm:+$('wpm').value,sec});
@@ -1830,49 +1837,109 @@ function _mmWireSliders(){
 // Beim Laden: Server zuerst, localStorage nur wenn Server nichts hat UND der
 // localStorage-Eintrag neuer ist als der Server-Stand (verhindert Überschreiben
 // eines rezenten Server-Stands durch veralteten Browser-Cache).
-function _scriptKey(){ return `script_${ACTIVE_CHANNEL}_${ACTIVE_VIDEO}`; }
+// Eigener input-Listener fürs Speichern, aufgerufen aus dem Init-Block. Das
+// Inline-Attribut lautet oninput="estimate();_elRefreshGenBtn();saveScriptLocal()" —
+// wirft einer der beiden ersten Aufrufe, läuft saveScriptLocal() NIE und der Text ist
+// beim Reload weg, ohne dass irgendwo eine Fehlermeldung sichtbar wäre (genau so ging
+// das Skript verloren: _elRefreshGenBtn() knallte auf einem entfernten DOM-Element).
+// Persistenz darf nicht davon abhängen, dass unrelated UI-Code fehlerfrei durchläuft.
+function wireScriptPersistence(){
+  const el = $('script');
+  if(!el) return;
+  el.addEventListener('input', saveScriptLocal);
+  el.addEventListener('change', saveScriptLocal);   // Blur-Sicherheitsnetz
+}
+
+function _scriptKey(cid, vid){ return `script_${cid ?? ACTIVE_CHANNEL}_${vid ?? ACTIVE_VIDEO}`; }
 
 let _scriptSaveTimer = null;
 let _scriptSaving = false;
 let _scriptLastSavedAt = 0;
-const _SCRIPT_DEBOUNCE_MS = 2500;
+// Der Debounce feuert erst NACH dem Tippen — je länger er ist, desto grösser das
+// Fenster in dem ein Reload den Text verschluckt. 800ms reicht um Tastendruck-Spam
+// zu bündeln; der beforeunload-Beacon unten deckt den Rest ab.
+const _SCRIPT_DEBOUNCE_MS = 800;
+
+// Der Payload wird beim EDIT eingefroren, nicht beim Flush. Vorher las der Timer
+// 2.5s später `$('script').value` + ACTIVE_VIDEO frisch aus — hatte der Nutzer
+// inzwischen ein anderes Video geöffnet (openVideo() leert das Feld und setzt
+// ACTIVE_VIDEO um), schrieb der Flush einen LEEREN String in die script.json des
+// NEUEN Videos und das getippte Skript des alten war nie beim Server. Genau das
+// stand in den kaputten script.json-Dateien: {"text": ""}.
+let _scriptPending = null;   // {cid, vid, text, language, preset}
+
+function _scriptSnapshot(){
+  const presetEl = $('scriptPreset');
+  return {
+    cid: ACTIVE_CHANNEL,
+    vid: ACTIVE_VIDEO,
+    text: $('script').value,
+    language: (typeof _scriptLang !== 'undefined') ? _scriptLang : 'de',
+    preset: presetEl ? presetEl.value : 'flat_cartoon_doc',
+  };
+}
 
 function saveScriptLocal(){
+  if(!ACTIVE_VIDEO || !$('script')) return;
+  _scriptPending = _scriptSnapshot();
+
   // localStorage: synchron, sofort — billig, kein Netzwerk
-  try{ if(ACTIVE_VIDEO && $('script')) localStorage.setItem(_scriptKey(), $('script').value); }catch(e){}
+  try{ localStorage.setItem(_scriptKey(), _scriptPending.text); }catch(e){}
 
   // Server: debounced — jeder Tastendruck würde sonst 100+ Writes/Min auslösen
-  if(!ACTIVE_VIDEO || !$('script')) return;
   if(_scriptSaveTimer) clearTimeout(_scriptSaveTimer);
   _showScriptSaveStatus('pending');
   _scriptSaveTimer = setTimeout(_flushScriptToServer, _SCRIPT_DEBOUNCE_MS);
 }
 
 async function _flushScriptToServer(){
-  if(!ACTIVE_VIDEO || !$('script')) return;
+  if(_scriptSaveTimer){ clearTimeout(_scriptSaveTimer); _scriptSaveTimer = null; }
+  const snap = _scriptPending;
+  if(!snap || !snap.vid) return;
+  _scriptPending = null;
+  // Status nur anzeigen wenn das Video noch offen ist — ein Flush kann einen
+  // Snapshot des VORIGEN Videos wegschreiben (Video-Wechsel), da wäre die
+  // "gespeichert"-Anzeige am neuen Video gelogen.
+  const visible = (snap.cid === ACTIVE_CHANNEL && snap.vid === ACTIVE_VIDEO);
   _scriptSaving = true;
-  _showScriptSaveStatus('saving');
+  if(visible) _showScriptSaveStatus('saving');
   try{
-    const lang = (typeof _scriptLang !== 'undefined') ? _scriptLang : 'de';
-    const presetEl = $('scriptPreset');
-    const preset = presetEl ? presetEl.value : 'flat_cartoon_doc';
-    const r = await ch_api('/api/save_script', {
-      text: $('script').value,
-      language: lang,
-      preset: preset,
+    // ch_api() NICHT benutzen: das injiziert die LIVE-ACTIVE_*-Werte und würde den
+    // Snapshot wieder an das falsche Video adressieren. cid/vid kommen aus dem Snapshot.
+    const r = await api('/api/save_script', 'POST', {
+      text: snap.text,
+      language: snap.language,
+      preset: snap.preset,
+      channel: snap.cid,
+      video: snap.vid,
     });
     if(r && r.ok){
       _scriptLastSavedAt = r.savedAt || Date.now()/1000;
-      _showScriptSaveStatus('saved', _scriptLastSavedAt);
+      if(visible) _showScriptSaveStatus('saved', _scriptLastSavedAt);
     } else {
-      _showScriptSaveStatus('error', null, r && r.error);
+      if(visible) _showScriptSaveStatus('error', null, r && r.error);
     }
   }catch(e){
-    _showScriptSaveStatus('error', null, String(e));
+    if(visible) _showScriptSaveStatus('error', null, String(e));
   }finally{
     _scriptSaving = false;
   }
 }
+
+// Reload/Tab-Close während der Debounce noch läuft: fetch() wird beim Unload
+// abgebrochen, sendBeacon nicht — der Browser stellt den Request garantiert zu.
+// Ohne das ging "Skript einfügen und sofort neu laden" immer verloren.
+window.addEventListener('beforeunload', () => {
+  const snap = _scriptPending;
+  if(!snap || !snap.vid) return;
+  try{
+    navigator.sendBeacon('/api/save_script', new Blob([JSON.stringify({
+      text: snap.text, language: snap.language, preset: snap.preset,
+      channel: snap.cid, video: snap.vid,
+    })], {type: 'application/json'}));
+    _scriptPending = null;
+  }catch(e){}
+});
 
 function _showScriptSaveStatus(state, savedAt, errMsg){
   // Visueller Indikator neben dem Skript-Feld — nutzt das vorhandene #scriptStatus
@@ -1907,39 +1974,50 @@ async function restoreScriptLocal(){
   const el = $('script'); if(!el || !ACTIVE_VIDEO) return false;
 
   // 1) Server versuchen (blockiert nicht wenn offline — async/await fängt Fehler)
-  let serverText = null, serverUpdatedAt = 0;
+  //    Ein LEERER Server-Text zählt als "nichts da", nicht als gültiger Stand:
+  //    `r.text != null` war true für "" und hat damit den intakten localStorage-Stand
+  //    verdeckt. Ein einziger fehlerhafter Leer-Write hat das Skript so dauerhaft
+  //    unrettbar gemacht, obwohl der Browser es noch hatte.
+  const cid = ACTIVE_CHANNEL, vid = ACTIVE_VIDEO;
+  let serverText = null;
   try{
     const r = await ch_get('/api/script');
-    if(r && r.text != null){
+    if(r && typeof r.text === 'string' && r.text.trim()){
       serverText = r.text;
-      serverUpdatedAt = r.updatedAt || 0;
-      _scriptLastSavedAt = serverUpdatedAt;
+      _scriptLastSavedAt = r.updatedAt || 0;
     }
   }catch(e){ /* Server nicht erreichbar — Fallback auf localStorage */ }
 
   // 2) localStorage als Fallback / Offline-Stand
   let localText = null;
   try{
-    const saved = localStorage.getItem(_scriptKey());
-    if(saved != null) localText = saved;
+    const saved = localStorage.getItem(_scriptKey(cid, vid));
+    if(saved != null && saved.trim()) localText = saved;
   }catch(e){}
 
-  // 3) Server gewinnt wenn vorhanden — UND wenn er neuer ist als localStorage
-  //    (verhindert dass ein veralteter Browser-Cache einen frischen Server-Stand überschreibt)
-  let chosen = null;
-  if(serverText != null){
-    chosen = serverText;
-  } else if(localText != null && localText.trim()){
-    chosen = localText;
-  }
+  // Das Video kann während des await gewechselt worden sein — dann gehört dieser
+  // Text nicht mehr ins Feld.
+  if(cid !== ACTIVE_CHANNEL || vid !== ACTIVE_VIDEO) return false;
 
-  if(chosen != null && chosen.trim()){
-    el.value = chosen;
-    if(typeof estimate==='function') estimate();
-    if(serverText != null) _showScriptSaveStatus('saved', _scriptLastSavedAt);
-    return true;
+  // 3) Server gewinnt wenn er echten Inhalt hat, sonst localStorage.
+  const chosen = serverText != null ? serverText : localText;
+  if(chosen == null) return false;
+
+  el.value = chosen;
+  if(typeof estimate==='function') estimate();
+  if(typeof _elRefreshGenBtn==='function') _elRefreshGenBtn();
+
+  if(serverText != null){
+    _showScriptSaveStatus('saved', _scriptLastSavedAt);
+  } else {
+    // Self-Heal: der Server hat nichts (oder einen Leer-Write), der Browser schon.
+    // Zurückschreiben, damit der Stand den nächsten Cache-Clear/Geräte-Wechsel überlebt.
+    _scriptPending = {cid, vid, text: chosen,
+                      language: (typeof _scriptLang !== 'undefined') ? _scriptLang : 'de',
+                      preset: $('scriptPreset') ? $('scriptPreset').value : 'flat_cartoon_doc'};
+    _flushScriptToServer().catch(()=>{});
   }
-  return false;
+  return true;
 }
 
 function fillScriptFromScenesIfEmpty(){
@@ -1957,7 +2035,14 @@ function _elRefreshGenBtn(){
   const btn = $('elGenBtn');
   if(!btn) return;
   btn.disabled = !(script && hasVoice);
-  $('elGenHint').textContent =
+  // #elGenHint existiert im aktuellen Markup NICHT mehr (bei einem UI-Rebuild
+  // entfernt, der Aufruf blieb stehen). Ungeguarded warf diese Zeile bei JEDEM
+  // Tastendruck im Skript-Feld eine TypeError — und weil der Inline-Handler
+  // oninput="estimate();_elRefreshGenBtn();saveScriptLocal()" lautet, kam
+  // saveScriptLocal() danach nie dran: das Skript wurde nie gespeichert.
+  const hint = $('elGenHint');
+  if(!hint) return;
+  hint.textContent =
     !script ? 'Erst Skript in Option B eintippen, dann hier generieren'
     : !hasVoice ? 'Voice auswählen'
     : `Bereit: ${script.length} Zeichen, ${wordCount(script)} Wörter`;
@@ -3036,6 +3121,7 @@ function copyScript(){
 
 // ---- Init ----
 (async()=>{
+  wireScriptPersistence();
   const ch = await api('/api/channels');
   const channels = ch.channels || [{id:'default',name:'Kanal 1'}];
   ACTIVE_CHANNEL = channels[0].id;
