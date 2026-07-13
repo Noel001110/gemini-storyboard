@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Localhost-Dashboard für die Storyboard-Bildgenerierung.
-Nur Python-Standardlib. Start: python3 dashboard.py [--port 8000]
+Nur Python-Standardlib. Start: python3 dashboard.py [--port 8010]
 """
 import os, re, sys, json, time, base64, zipfile, io, threading, concurrent.futures
 import urllib.request, urllib.error, subprocess
@@ -703,6 +703,74 @@ def post_gemini_native(messages, json_mode=False, temp=0.7, model="gemini-3-5-fl
         time.sleep(2)
         return _do_call()
 
+# ---------- Charakter-Steckbrief für den Prompt-Text ----------
+# Evaluation Juli 2026 (User-Report "Jake/Narrator sehen von Szene zu Szene anders aus,
+# teils bricht der Stil ganz"): _build_image_prompt() KANN einen kanonischen Steckbrief
+# plus die entscheidende Konfliktregel ("bei Widerspruch gewinnt das Referenzbild") in
+# den Prompt schreiben — beide Aufrufer in der Bild-Generierung übergaben aber
+# char_refs=None und gar kein entity, also blieb char_hint IMMER leer. Das Referenzbild
+# ging zwar an KIE, aber ohne den Text der ihm Vorrang gibt. Da die Szenen-Prompts in
+# 12er-Chunks geschrieben werden und der Prompt-Autor den Charakter in jedem Chunk neu
+# erfindet ("grey crewneck" statt des roten T-Shirts im Charsheet), gewann regelmäßig
+# der konkrete Szenentext gegen das Referenzbild.
+#
+# Zweite Hürde: _filter_char_refs_for_entity vergleicht `safe == entity[5:]`, also
+# "01" gegen den Charsheet-Namen "narrator" — das matcht NIE. Deshalb lösen wir hier
+# concrete_entity (char_01) über plan["characters"] auf den echten Charsheet-Eintrag
+# auf und geben dessen eigenen `safe`-Key als entity zurück, womit der Filter greift.
+def charsheet_refs_for_entity(plan: dict, cid: str, vid: str, entity: str):
+    """(char_refs, entity_key) für _build_image_prompt. Leer, wenn kein Charsheet passt."""
+    if not entity:
+        return [], ""
+    try:
+        from engine.scenes import _find_charsheet_png
+        png_path, _dbg = _find_charsheet_png(plan, cid, vid, entity)
+        if not png_path:
+            return [], ""
+        meta = json.load(open(png_path.replace(".png", ".json")))
+    except Exception:
+        return [], ""
+    safe = (meta.get("safe") or "").strip()
+    desc = (meta.get("description") or "").strip()
+    if not safe or not desc:
+        return [], ""
+    # Der Charsheet-Steckbrief ist die Wahrheit, nicht plan["characters"]: das PNG wurde
+    # aus ihm erzeugt, plan["characters"] kann davon abweichen (z.B. fehlt dort das rote
+    # T-Shirt des Narrators, das im Charsheet-Bild deutlich zu sehen ist).
+    return [{"name": meta.get("name") or safe, "safe": safe, "description": desc}], safe
+
+
+# Szenen ohne Charakter-Anker, die trotzdem Menschen/Körperteile zeigen (Hände, Füße,
+# "he/she", ein namentlich genannter Charakter). concrete_entity ist dort ein Objekt
+# ("expensive designer sneakers"), also stieg die Referenz-Auflösung aus und das Modell
+# erfand Hautton und Strichführung frei — sichtbar an Szene 73 (weiße, glänzende Haut,
+# kompletter Stilbruch). 9 von 131 Szenen des warnenden Videos fielen in diese Lücke.
+_PEOPLE_IN_PROMPT_RE = re.compile(
+    r"\b(hands?|feet|foot|arms?|legs?|fingers?|face|shoulders?|"
+    r"man|woman|men|women|person|people|boy|girl|he|she|his|her|"
+    r"narrator|figure|silhouette)\b", re.I)
+
+
+def scene_depicts_people(scene: dict) -> bool:
+    return bool(_PEOPLE_IN_PROMPT_RE.search(scene.get("prompt") or ""))
+
+
+def nearest_character_entity(plan: dict, scene: dict) -> str:
+    """concrete_entity des nächstgelegenen Charakters — erst rückwärts (der Kontext, aus
+    dem die Szene kommt), sonst vorwärts. Damit bekommt eine Hand-/Fuß-Nahaufnahme den
+    Hautton und Strich des Charakters, um den es inhaltlich gerade geht."""
+    i = scene.get("i", 0)
+    scenes = plan.get("scenes") or []
+    chars = [s for s in scenes if str(s.get("concrete_entity", "")).startswith("char_")]
+    before = [s for s in chars if s.get("i", -1) < i]
+    if before:
+        return str(max(before, key=lambda s: s["i"])["concrete_entity"])
+    after = [s for s in chars if s.get("i", -1) > i]
+    if after:
+        return str(min(after, key=lambda s: s["i"])["concrete_entity"])
+    return ""
+
+
 # ---------- Master-Prompt ----------
 def read_master(cid="default"):
     try:    return open(ch_master(cid), encoding="utf-8").read().strip()
@@ -1201,6 +1269,24 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
                 # spezifischere eigene Referenz (chain_refs = gleicher Shot, entity_refs =
                 # erste Erscheinung desselben Charakters) — dann NIE zwei Bilder gleichzeitig
                 # (siehe Farb-Inkonsistenz-Fix), sondern nur die spezifischere.
+                # Fix 4: Szene zeigt Menschen/Körperteile, hat aber keinen Charakter-Anker
+                # (concrete_entity ist ein Objekt). Dann den Charakter heranziehen, um den
+                # es im Kontext gerade geht — sonst erfindet das Modell Hautton und Strich
+                # frei (Szene 73: weiße, hochglänzende Haut, kompletter Stilbruch).
+                prompt_entity = entity
+                if (not entity.startswith("char_")) and not entity_refs \
+                        and scene_depicts_people(scene):
+                    fallback_entity = nearest_character_entity(plan, scene)
+                    if fallback_entity:
+                        fb_png, fb_dbg = _find_charsheet_png(plan, cid, vid, fallback_entity)
+                        if fb_png:
+                            entity_refs = [fb_png]
+                            entity_debug = fb_dbg
+                            prompt_entity = fallback_entity
+                            print(f"  [BatchGen] Szene {i}: kein Charakter-Anker "
+                                  f"(entity={entity!r}), aber Menschen im Prompt — nutze "
+                                  f"Charsheet von {fallback_entity}", flush=True)
+
                 # Lokale Pfade (aus Charsheets) in öffentliche URLs wandeln
                 if entity_debug.get("is_local"):
                     entity_refs = [get_public_charsheet_url(ref) for ref in entity_refs]
@@ -1215,7 +1301,14 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
                 # (Bereich 3): bis zu 3 Style-Refs statt nur einem.
                 use_style_ref = bool(style_ref_urls)
                 refs = chain_refs + entity_refs + (style_ref_urls if use_style_ref else [])
-                full_prompt = _build_image_prompt(scene.get("prompt", ""), master, None, phase=scene.get("phase", ""))
+                # Fix 1 (Hauptursache): char_refs + entity ÜBERGEBEN. Vorher stand hier
+                # `None` und kein entity — dadurch blieb char_hint in _build_image_prompt
+                # immer leer, und weder der kanonische Steckbrief ("Narrator: rotes
+                # T-Shirt") noch die Konfliktregel ("bei Widerspruch gewinnt das
+                # Referenzbild") erreichten KIE jemals. Siehe charsheet_refs_for_entity().
+                char_refs, entity_key = charsheet_refs_for_entity(plan, cid, vid, prompt_entity)
+                full_prompt = _build_image_prompt(scene.get("prompt", ""), master, char_refs,
+                                                  phase=scene.get("phase", ""), entity=entity_key)
                 if scene.get("seq_id") is not None and scene.get("seq_pos", 0) >= 1:
                     # Positive constraints only — negated instructions ("do NOT redesign")
                     # are weighted weaker by instruction-following image models and can
@@ -3985,7 +4078,16 @@ class H(BaseHTTPRequestHandler):
                 plan = {}
                 scene_phase = ""
             entity = str(scene_for_phase.get("concrete_entity", ""))
-            full_prompt = _build_image_prompt(prompt, read_master(cid), None, phase=scene_phase)
+            # Fix 1/4 auch hier (siehe _batch_generate_worker): dieser Pfad übergab
+            # ebenfalls char_refs=None und kein entity — ausgerechnet der Klick, mit dem
+            # man ein misslungenes Bild korrigiert, schickte den Steckbrief nie mit.
+            prompt_entity = entity
+            if (not entity.startswith("char_")) and scene_for_phase \
+                    and scene_depicts_people(scene_for_phase):
+                prompt_entity = nearest_character_entity(plan, scene_for_phase) or entity
+            char_refs, entity_key = charsheet_refs_for_entity(plan, cid, vid, prompt_entity)
+            full_prompt = _build_image_prompt(prompt, read_master(cid), char_refs,
+                                              phase=scene_phase, entity=entity_key)
             # Juli 2026 Fix (Audit A2 "generate_one hat den Fallback-Fix nicht"): dieser
             # Pfad hatte bisher eine eigene, abgespeckte Inline-Logik, die NUR source_url
             # kannte — ausgerechnet der manuelle "Neu generieren"-Klick (mit dem man
@@ -4277,7 +4379,12 @@ class H(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found"})
 
 def main():
-    port = 8000
+    # 8000 kollidiert auf diesem Rechner mit Docker Desktop (com.docker.backend hört
+    # auf *:8000 per IPv6, während dieser Server nur IPv4/127.0.0.1 bindet). Löst der
+    # Browser "localhost" zu ::1 auf (macOS bevorzugt das oft), landet die Anfrage bei
+    # Docker statt hier und liefert ein nacktes 404 — sah aus wie ein Absturz, war aber
+    # nur der falsche Port. 8010 ist auf dieser Maschine kollisionsfrei.
+    port = 8010
     if "--port" in sys.argv:
         port = int(sys.argv[sys.argv.index("--port") + 1])
     if not os.path.exists(KIE_KEY_FILE):

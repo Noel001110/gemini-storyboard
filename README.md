@@ -32,9 +32,15 @@ mit Troubleshooting** in [docs/RUNBOOK.md](docs/RUNBOOK.md).
 ## Start
 
 ```bash
-./start.sh [port]                # Standard: 8000, öffnet automatisch den Browser
+./start.sh [port]                # Standard: 8010, öffnet automatisch den Browser
 python3 dashboard.py --port 8765 # direkter Start ohne Browser-Auto-Open
 ```
+
+> **Port 8010, nicht 8000:** Docker Desktop belegt auf manchen Rechnern `*:8000` per
+> IPv6, während dieser Server nur IPv4 (`127.0.0.1`) bindet. Löst der Browser
+> `localhost` zu `::1` auf, landet die Anfrage bei Docker und antwortet mit einem
+> nackten 404 — das sieht aus wie ein abgestürztes Dashboard, ist aber der falsche
+> Nachbar auf demselben Port.
 
 Frontend (`dashboard.html`) wirkt sofort — wird pro Request frisch geladen.
 Backend (`dashboard.py`) braucht Neustart. Vorher prüfen dass kein Job läuft
@@ -60,6 +66,24 @@ Die Pipeline pro Video:
    (Settings-Tab, bis zu 3 Referenzbilder) + Character-Referenzen (3-Stufen-
    Fallback: Anchor-Szene → Datei-Match → Name-Match). Style- und Charakter-
    Referenzen werden **beide** angehängt, nie exklusiv gegeneinander getauscht.
+   Zusätzlich geht der **Charsheet-Steckbrief als Text** mit, inklusive der Regel
+   „bei Widerspruch gewinnt das Referenzbild" — ohne die gewinnt der Szenentext,
+   und Charaktere driften von Szene zu Szene (siehe `docs/PROMPT_PIPELINE.md` §14).
+
+### Stil vs. Identität vs. Inhalt
+
+Drei Ebenen, strikt getrennt — sonst driften Charaktere oder der Stil bricht:
+
+| Ebene | Ort | Gilt für | Enthält |
+|---|---|---|---|
+| **Stil** | `channels/<cid>/master_prompt.txt` | ganzen Kanal | **WIE** gezeichnet wird (Linien, Flatcolors, Body-Rule). Nie Charaktere/Farben einzelner Figuren. |
+| **Identität** | `videos/<vid>/charsheets/*.json` + `.png` | ein Video | **WER** zu sehen ist (rotes T-Shirt, braune Haare, Hautton). |
+| **Inhalt** | `plan.json` → `scenes[].prompt` | eine Szene | **WAS** passiert (Pose, Handlung, Kamera). |
+
+Ein neues Video im selben Kanal bekommt neue Charsheets und neue Szenen, erbt den Stil
+aber unverändert. Deshalb gehört **kein** Hautton-Hex und keine Kleidungsfarbe in den
+Master-Prompt — nur die Regel, *wie* Haut gezeichnet wird; *welche* Farbe sie hat,
+liefert das Charsheet.
 7. **Render** — ffmpeg assembliert `final.mp4` (Voice + Bilder, ohne Sound).
    Ken-Burns-Bewegung: pro Szene reiner Zoom ODER reiner Pan/Tilt (nie kombiniert),
    Geschwindigkeit skaliert mit der echten Szenendauer, Anti-Monotonie-Regel

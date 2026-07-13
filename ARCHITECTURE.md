@@ -1,4 +1,4 @@
-# ARCHITECTURE — Storyboard Generator (Stand 2026-07-12)
+# ARCHITECTURE — Storyboard Generator (Stand 2026-07-13)
 
 ## Was das System tut (in einem Satz)
 
@@ -142,6 +142,29 @@ channels/
         render_tmp/      ── Working-Dir
         final.mp4        ── Output (nur Voice + Bilder, KEIN Sound)
 ```
+
+## Stil / Identität / Inhalt — die drei Ebenen (Architekturregel)
+
+Bildkonsistenz entsteht nur, wenn diese drei Ebenen **strikt getrennt** bleiben. Ein
+neues Video im selben Kanal bringt neue Charaktere und neue Szenen mit, erbt aber den
+Stil unverändert — deshalb darf nichts Video-Spezifisches in die Stil-Ebene rutschen.
+
+| Ebene | Ort | Gültigkeit | Inhalt |
+|---|---|---|---|
+| **Stil** | `channels/<cid>/master_prompt.txt` (Startwert aus `PRESET_MASTERS`) + `style_ref_url.txt` | ganzer Kanal | **WIE** gezeichnet wird: Linienführung, Flatcolors, weißer Hintergrund, Body-Rule. Enthält **niemals** Charakternamen, Kleidungsfarben oder Szeneninhalte. |
+| **Identität** | `videos/<vid>/charsheets/<name>.json` + `.png` | ein Video | **WER** dargestellt wird: rotes T-Shirt, braune Haare, konkreter Hautton. |
+| **Inhalt** | `videos/<vid>/generated/plan.json` → `scenes[].prompt` | eine Szene | **WAS** passiert: Pose, Handlung, Kamera. |
+
+Konkretes Beispiel für die Regel: Die Body-Rule im Master sagt *„Gliedmaßen als
+schwarze Linien, Haut flach und umrandet ohne Schattierung — Hautton aus dem
+Referenzbild"*. Sie schreibt **keinen** Hautton-Hex fest, denn das wäre Identität und
+würde jeden künftigen Charakter zwangsvereinheitlichen. Den Ton liefert das Charsheet.
+
+Damit die Identitäts-Ebene die Inhalts-Ebene überstimmen kann, übergibt die
+Bild-Generierung `char_refs` + `entity` an `_build_image_prompt()` — daraus entsteht
+der Steckbrief plus die Regel „bei Widerspruch gewinnt das Referenzbild". Fehlt das,
+gewinnt der (chunkweise neu erfundene) Szenentext, und Charaktere driften.
+Details + Fehleranalyse: `docs/PROMPT_PIPELINE.md` §14.
 
 ## Was du im Frontend steuerst
 

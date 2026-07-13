@@ -286,7 +286,7 @@ def t_a2_generate_one_uses_resolve_entity_ref():
     src = open(os.path.join(ROOT, "dashboard.py")).read()
     idx = src.find('if p == "/api/generate_one"')
     assert idx != -1
-    body = src[idx:idx + 3000]
+    body = src[idx:idx + 5000]
     assert "_resolve_entity_ref(v_plan(cid, vid), scene_for_phase, wait=False)" in body, \
         "A2 fix missing: generate_one must call _resolve_entity_ref with wait=False"
 

@@ -1,7 +1,10 @@
 #!/bin/bash
 # Startet das Storyboard-Dashboard und öffnet den Browser.
 cd "$(dirname "$0")"
-PORT="${1:-8000}"
+# 8010 statt 8000: Docker Desktop (com.docker.backend) lauscht auf *:8000 per IPv6,
+# während dieser Server nur IPv4/127.0.0.1 bindet. Löst der Browser "localhost" zu ::1
+# auf, landet die Anfrage bei Docker (nacktes 404) statt hier — sah aus wie ein Absturz.
+PORT="${1:-8010}"
 
 # evtl. alte Instanz auf dem Port beenden
 lsof -ti tcp:"$PORT" | xargs kill -9 2>/dev/null

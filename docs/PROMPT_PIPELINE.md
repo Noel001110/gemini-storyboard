@@ -501,6 +501,86 @@ inkl. Alignment-Regressionstest, Sync-Invariant inkl. Schnittpunkt-Berechnung
 mit ungleich verteilter Pause). 24/24 grün, bestehende Suite unverändert
 (147/149, die 2 Fehler sind vorbestehend/umgebungsbedingt).
 
+## 14. Stil-Drift-Analyse: der Steckbrief erreichte KIE nie (Juli 2026)
+
+**Symptom (User-Report nach dem 131-Szenen-Video `why_you_never_get_rich_2_0`):**
+Charaktere wechseln zwischen Szenen das Aussehen (Szene 52 „short dark hair" vs.
+121 „short brown hair", beide `char_01`), Arme mal schwarzer Strich, mal gefüllt
+mit Hautfarbe, und vereinzelt bricht der Animationsstil komplett (Szene 73:
+hochglänzende, schattierte, spiegelnde Sneaker statt Flat-Line-Art).
+
+### Ursache 1 (Hauptursache): `char_refs=None` an beiden Aufrufstellen
+
+`_build_image_prompt()` (`engine/prompts.py`) **kann** einen kanonischen Steckbrief
+plus die entscheidende Konfliktregel in den Prompt schreiben:
+
+> „The character design(s) above, and any attached reference image, define this
+> character's true appearance. **If the scene description conflicts with them, the
+> character design / reference image wins.**"
+
+Beide Aufrufer in der Bild-Generierung übergaben aber `char_refs=None` und gar kein
+`entity` — `char_hint` blieb damit **immer leer**. Das Referenzbild ging zwar als
+`image_input` an KIE, aber **ohne den Text, der ihm Vorrang gibt**. Da die
+Szenen-Prompts in 12er-Chunks (`IMAGE_PROMPT_CHUNK_SIZE`) von einem Prompt-Autor
+geschrieben werden, der den Charakter in jedem Chunk neu erfindet, gewann regelmäßig
+der konkrete Szenentext gegen das Referenzbild. Beispiel: Charsheet zeigt ein rotes
+T-Shirt, Prompt sagt „grey crewneck sweater" — das Bild wurde grau.
+
+**Zweite, versteckte Hürde:** `_filter_char_refs_for_entity()` vergleicht
+`safe == entity[5:]`, also `"01"` gegen den Charsheet-Namen `"narrator"` — das matcht
+**nie**. Deshalb löst `charsheet_refs_for_entity()` (`dashboard.py`) `concrete_entity`
+zuerst über das Charsheet auf und übergibt dessen eigenen `safe`-Key als `entity`.
+
+**Fix:** `char_refs` + `entity` werden jetzt in `_batch_generate_worker` und in
+`/api/generate_one` übergeben.
+
+### Ursache 2: Szenen mit Menschen, aber ohne Charakter-Anker
+
+`_resolve_entity_ref()` steigt bei `if not entity.startswith("char_")` sofort aus.
+30 von 131 Szenen hatten ein Objekt als `concrete_entity` (z.B.
+`"expensive designer sneakers"`), **9 davon zeigten trotzdem Menschen oder
+Körperteile** — dort erfand das Modell Hautton und Strichführung frei (Szene 73).
+
+**Fix:** `scene_depicts_people()` + `nearest_character_entity()` (`dashboard.py`):
+Zeigt eine Szene ohne Charakter-Anker Menschen/Körperteile, wird das Charsheet des
+inhaltlich nächstliegenden Charakters herangezogen.
+
+### Ursache 3: Der Master-Prompt hatte eine Lücke
+
+Der Kanal-Master beschrieb „stick-figure line bodies" und „flat block colors for
+clothing **and hair**" — **Haut wurde mit keinem Wort erwähnt**. Sobald ein Prompt
+einen Pullover oder eine Hand-Nahaufnahme verlangte, gab es keine Regel, und das
+Modell füllte mal Ärmel, mal Haut.
+
+**Fix:** BODY RULE im Master (schwarze Strich-Gliedmaßen, flache umrandete Haut ohne
+Schattierung, gilt auch in Close-ups) + eine Vorrang-Klausel gegen photorealistische
+Formulierungen im Szenentext.
+
+### Die drei Ebenen — strikt getrennt halten
+
+Das ist die architektonische Regel, aus der die Fixes folgen:
+
+| Ebene | Ort | Gültigkeit | Inhalt |
+|---|---|---|---|
+| **Stil** | `channels/<cid>/master_prompt.txt` (Startwert: `PRESET_MASTERS`) | ganzer Kanal, alle Videos | **WIE** gezeichnet wird: Linien, Flatcolors, weißer Hintergrund, Body-Rule. **Niemals** Charakternamen, Kleidungsfarben oder Szeneninhalte. |
+| **Identität** | `charsheets/<name>.json` + `.png` (pro Video) | ein Video | **WER** dargestellt wird: rotes T-Shirt, braune Haare, konkreter Hautton. |
+| **Inhalt** | `plan.json` → `scenes[].prompt` | eine Szene | **WAS** passiert: Pose, Handlung, Kamera. |
+
+Konkret heißt das: Ein neues Video im selben Kanal bringt neue Charsheets und neue
+Szenen-Prompts mit, erbt aber denselben Stil unverändert. Deshalb darf im Master
+**kein** Hautton-Hex und keine Kleidungsfarbe stehen — die Body-Rule sagt nur
+*„flache, umrandete Haut ohne Schattierung, Ton aus dem Referenzbild"*, den
+tatsächlichen Ton liefert das Charsheet.
+
+### Nicht behoben (bewusst offen)
+
+Der Prompt-Autor (`_image_prompt_chunk`) sieht den Master-Stil weiterhin **nicht**
+(`engine/prompts.py`: „Style is NOT included in the prompt text") und schreibt
+deshalb weiter Material-/Lichtsprache („glossy", „reflective asphalt", „warm desk
+lamp", „rustic wooden table"), die gegen „NO shading / NO background scenery"
+arbeitet. Die neue Vorrang-Klausel im Master fängt das ab, beseitigt aber nicht die
+Quelle. Sauberer wäre, `visual_prompts()` die Stil-Randbedingungen mitzugeben.
+
 ## 8. Relevante Commits (main)
 
 - `c7cb1cb` — Thumbnail async + Charsheet-Kontamination behoben
