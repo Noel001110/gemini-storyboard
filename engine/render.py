@@ -721,6 +721,35 @@ def _assemble_clips(clip_paths: list, out_path: str) -> None:
         raise RuntimeError(f"ffmpeg Zusammenschnitt fehlgeschlagen: {result.stderr.decode(errors='replace')[-300:]}")
 
 
+# Sprach-Veredelung auf der Voiceover-Spur (Juli 2026). Rohes TTS-Audio klingt dünn und
+# "digital"; dieselbe Kette wie in klassischen Podcast-/Voiceover-Workflows lässt es nach
+# Studio-Mikrofon klingen:
+#   highpass 80Hz    — Rumpeln/DC-Offset raus, unter der männlichen Grundfrequenz
+#   equalizer 250Hz  — leichter Mulm-Cut (der "Pappkarton"-Bereich)
+#   equalizer 3kHz   — Präsenz-Anhebung, macht Konsonanten verständlicher
+#   deesser          — nimmt harte S-/Zisch-Laute, die TTS oft überbetont
+#   acompressor      — sanftes Zusammenleimen der Lautstärke (Ratio 3:1, weich)
+#   alimiter         — Deckel gegen Clipping nach dem Makeup-Gain
+#
+# HARTE AUFLAGE: keiner dieser Filter darf die DAUER verändern. Die Bild-Szenen sind über
+# _apply_sync_invariant frame-genau auf diese Audiospur getaktet — eine auch nur um
+# Millisekunden verschobene Spur lässt den kompletten Schnitt driften. Deshalb bewusst
+# KEIN loudnorm (2-Pass kann resamplen) und KEIN dynaudnorm. apad bleibt am Ende.
+# `level=disabled` am alimiter ist NICHT optional: per Default ist dort `level=auto`
+# aktiv, was das Signal auf das Limit HOCHZIEHT statt es nur zu deckeln — gemessen am
+# echten Voiceover landete die Spitze dadurch auf 0.0 dB (Vollausschlag, kein Headroom),
+# während der Mittelpegel sogar SANK. Mit level=disabled: mean -16.4 -> -13.5 dB
+# (dichter, lauter), max -0.9 -> -1.0 dB (sauberer Headroom).
+VOICE_POLISH_FILTERS = (
+    "highpass=f=80,"
+    "equalizer=f=250:t=q:w=1.0:g=-2,"
+    "equalizer=f=3000:t=q:w=1.2:g=2,"
+    "deesser=i=0.4,"
+    "acompressor=threshold=-20dB:ratio=3:attack=5:release=50:makeup=4,"
+    "alimiter=limit=0.89:level=disabled"
+)
+
+
 def _mux_audio(silent_path: str, audio_path: str, out_path: str) -> None:
     """Final mux: one continuous voiceover track over the assembled silent video.
     -af apad pads the audio with a small buffer if it's a touch shorter than the video —
@@ -728,10 +757,14 @@ def _mux_audio(silent_path: str, audio_path: str, out_path: str) -> None:
     a replacement for it; if there's still a residual mismatch, the audio gets padded
     rather than the video getting truncated. -movflags +faststart moves the MP4 metadata
     to the front so the <video> preview can start playing before the whole file has
-    downloaded — without it the browser waits for the complete file first."""
+    downloaded — without it the browser waits for the complete file first.
+
+    VOICE_POLISH_FILTERS läuft VOR apad — alle Filter darin sind dauer-neutral, siehe
+    Kommentar dort. Der Bildschnitt hängt an dieser Dauer."""
     cmd = ["ffmpeg", "-y", "-i", silent_path, "-i", audio_path,
            "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-           "-af", "apad=pad_dur=0.3", "-shortest", "-movflags", "+faststart", out_path]
+           "-af", f"{VOICE_POLISH_FILTERS},apad=pad_dur=0.3",
+           "-shortest", "-movflags", "+faststart", out_path]
     result = subprocess.run(cmd, capture_output=True, timeout=180)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg Audio-Mux fehlgeschlagen: {result.stderr.decode(errors='replace')[-300:]}")
