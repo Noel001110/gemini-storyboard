@@ -92,7 +92,7 @@ from engine.scenes import (  # noqa: F401,F403
     ACCENT_PAUSE_THRESHOLD_SEC, ACCENT_MIN_SCENE_DUR_SEC,
     split_units, segment_by_pacing, _renumber_seq_pos, _apply_visual_sequences_direct,
     _wait_for_chain_scene, _resolve_chain_refs,
-    _wait_for_entity_anchor_scene, _resolve_entity_ref,
+    _wait_for_entity_anchor_scene, _resolve_entity_ref, _find_charsheet_png,
     _is_accent_eligible, _compute_accent_t,
 )
 
@@ -806,6 +806,20 @@ def analyze_script(beats):
         '"first_appears_beat": N}],\n'
         '  "characters": [{"id": "char_01", "name_or_role": string, "visual_description": '
         '"string (CRITICAL: You MUST extract the narrator and ALL mentioned people. If no physical description exists, you MUST invent a generic basic look, e.g. \'young man, casual clothes\')", "anonymize": bool, "first_appears_beat": N}],\n'
+        # Juli 2026 (User-Report "es wurden keine Charaktere aus dem Skript generiert"):
+        # Bei einem Skript in der ZWEITEN Person ("Your phone buzzes... You open it") lieferte
+        # das Modell zweimal eine LEERE characters-Liste — es hielt "du" offenbar für keine
+        # Person. Folge: keine Charsheets, und visual_prompts erfand pro Chunk eigene IDs
+        # (114 Szenen -> 59 verschiedene char_-Schreibweisen für vier Personen). Deshalb hier
+        # explizit: unbenannte Rollen und das angesprochene "du" SIND Charaktere.
+        '  # CHARACTERS ARE MANDATORY. A script with any human presence NEVER has an empty '
+        'characters list.\n'
+        '  # Second-person scripts ("you", "your") DO have characters: the addressed person IS '
+        'the protagonist — emit them as char_01 with name_or_role "Protagonist (You)".\n'
+        '  # Unnamed roles are characters too (a coworker, the boss, an investor, a friend). '
+        'Give each ONE stable id and invent a plain generic look for them.\n'
+        '  # Do NOT create separate ids for the same person at different ages or moods '
+        '(no char_protagonist_young / char_protagonist_elderly) — ONE id per person.\n'
         '  "recurring_symbols": [{"id": "sym_01", "object": string, "meaning": string, '
         '"beats": [N, N]}],\n'
         '  "emotional_arc": {"opening": "ONE word", "midpoint": "ONE word", "resolution": "ONE word"},\n'
@@ -2655,17 +2669,31 @@ def _strip_pause_tokens(words: list) -> list:
     return [w for w in words if not re.fullmatch(r"\.+|…+", w.get("word", "").strip())]
 
 
+# Sicherheitsabstand vor dem nächsten Wort. Der Schnitt endete früher EXAKT auf dessen
+# start-Zeitstempel — und der kommt vom Aligner, nicht aus einer Stille-Messung. Liegt er
+# auch nur Millisekunden zu spät (Plosive wie "p"/"t"/"k" starten mit einer stimmlosen
+# Verschlussphase, die der Aligner gern verschluckt), wird der Wortanlaut weggeschnitten.
+# Das ist der "als wären sie abgeschnitten"-Effekt, den der User über das ganze Voiceover
+# hört: bei 124 Schnitten reicht eine kleine systematische Ungenauigkeit.
+PAUSE_GUARD_SEC = 0.04
+
+
 def _compute_pause_trims(words: list, max_pause: float = MAX_PAUSE_SEC) -> list:
     """Returns [(trim_start, trim_end), ...] -- the EXCESS portion of every gap between
-    consecutive words that's longer than max_pause. Each interval lies entirely inside
-    a silent gap, never overlapping an actual spoken word, so cutting it out can never
-    clip speech."""
+    consecutive words that's longer than max_pause.
+
+    Der Schnitt hört PAUSE_GUARD_SEC VOR dem nächsten Wort auf, nicht exakt auf dessen
+    Start — siehe Konstante. Ein Intervall, das dadurch auf <= 0 schrumpft, wird gar nicht
+    geschnitten (die Pause ist dann ohnehin kaum länger als erlaubt)."""
     trims = []
     for i in range(len(words) - 1):
         gap_start = words[i]["end"]
         gap_end = words[i + 1]["start"]
         if gap_end - gap_start > max_pause:
-            trims.append((gap_start + max_pause, gap_end))
+            cut_start = gap_start + max_pause
+            cut_end = gap_end - PAUSE_GUARD_SEC
+            if cut_end - cut_start > 0.01:      # unter 10ms lohnt der Schnitt nicht
+                trims.append((cut_start, cut_end))
     return trims
 
 
@@ -2686,10 +2714,24 @@ def _trim_audio_pauses(audio_path: str, trims: list, out_path: str) -> None:
     if cursor < audio_duration:
         keep_intervals.append((cursor, audio_duration))
 
+    # Mikro-Blenden an jeder Schnittkante (8ms). Ohne sie stößt `concat` zwei Wellenform-
+    # Punkte mit beliebig unterschiedlicher Amplitude/Phase hart aneinander — jeder Sprung
+    # ist ein hörbarer Klick. Bei 124 Schnitten über ein 8-Minuten-Voiceover ergibt das
+    # genau die "Sound-Laggs", die der User berichtet.
+    # 8ms sind als Lautstärke-Änderung unhörbar, beseitigen den Sprung aber vollständig.
+    # DAUER bleibt unverändert (afade skaliert nicht, es dämpft nur) — kritisch, weil die
+    # Wort-Timeline über _adjust_words_for_trims aus derselben trims-Liste berechnet wird.
+    EDGE_FADE = 0.008
     filter_parts, labels = [], []
     for idx, (s, e) in enumerate(keep_intervals):
         label = f"a{idx}"
-        filter_parts.append(f"[0:a]atrim=start={s}:end={e},asetpts=PTS-STARTPTS[{label}]")
+        seg_dur = max(0.0, e - s)
+        fade = min(EDGE_FADE, seg_dur / 4) if seg_dur > 0 else 0.0
+        chain = f"[0:a]atrim=start={s}:end={e},asetpts=PTS-STARTPTS"
+        if fade > 0:
+            chain += (f",afade=t=in:st=0:d={fade:.4f}"
+                      f",afade=t=out:st={max(0.0, seg_dur - fade):.4f}:d={fade:.4f}")
+        filter_parts.append(f"{chain}[{label}]")
         labels.append(f"[{label}]")
     filter_complex = ";".join(filter_parts) + f";{''.join(labels)}concat=n={len(labels)}:v=0:a=1[outa]"
     cmd = ["ffmpeg", "-y", "-i", audio_path, "-filter_complex", filter_complex, "-map", "[outa]", out_path]

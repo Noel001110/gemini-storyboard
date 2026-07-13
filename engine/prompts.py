@@ -70,7 +70,7 @@ Bad image_prompt: "Dark ominous scene, surveillance concept"
 EXAMPLE — CORRECT:
 Line: "Reports suggested that people around him were monitored before his murder."
 core_statement: "The target's inner circle was surveilled before his death."
-concrete_entity: "char_target (anonymized), sym_surveillance_device"
+concrete_entity: "char_target"
 Good image_prompt: "An empty chair in a press room, a phone resting on the floor beside it,
 a faint glow on the phone screen suggesting active surveillance, dim somber lighting, nobody
 visible in frame, composition emphasizing absence and unease"
@@ -90,6 +90,49 @@ def _anonymized_words(analysis: dict) -> set:
             for field in (c.get("id", ""), c.get("name_or_role", "")):
                 words.update(w.lower() for w in re.findall(r"[a-zA-Z]{4,}", field))
     return words
+
+
+def _normalize_concrete_entity(raw) -> str:
+    """Erzwingt EINE saubere Entity-ID. Der Prompt verlangt das zwar, aber das Modell hält
+    sich nicht daran — Verlass darauf ist der Grund, warum ein 114-Szenen-Plan
+    59 verschiedene `char_`-Schreibweisen für vier Personen enthielt:
+
+        "char_protagonist, smartphone"       -> char_protagonist
+        "char_protagonist (older)"           -> char_protagonist
+        "char_protagonist_elderly"           -> char_protagonist
+        "char_investor, char_coworker"       -> char_investor   (erste Person gewinnt)
+        "smartphone"                         -> smartphone      (unverändert, kein Charakter)
+
+    _resolve_entity_ref vergleicht `concrete_entity` als EXAKTEN String. Jede Variante gilt
+    dort als eigene Person — der Protagonist bekäme in fast jeder Szene ein neues Gesicht.
+    Deshalb wird hier hart normalisiert, statt dem Prompt zu vertrauen.
+
+    Regel: Steht IRGENDWO in der Aufzählung ein `char_`-Token, gewinnt das erste davon —
+    eine Person im Bild braucht ihren Identitäts-Anker dringender als ein Objekt seine ID.
+    Ohne `char_`-Token bleibt der erste Eintrag stehen.
+    """
+    s = str(raw or "").strip()
+    if not s:
+        return ""
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    if not parts:
+        return ""
+
+    def _clean(tok: str) -> str:
+        tok = re.sub(r"\([^)]*\)", "", tok).strip()          # "(older)", "(anonymized)" weg
+        tok = re.sub(r"\s+", "_", tok)                        # "vintage red convertible" -> ..._...
+        return tok.strip("_").lower()
+
+    chars = [_clean(p) for p in parts if _clean(p).startswith("char_")]
+    if chars:
+        winner = chars[0]
+        # Alters-/Zustands-Suffixe zusammenführen: char_protagonist_elderly == char_protagonist
+        for suffix in ("_elderly", "_older", "_young", "_younger", "_old", "_adult", "_child"):
+            if winner.endswith(suffix) and len(winner) > len("char_") + len(suffix):
+                winner = winner[: -len(suffix)]
+                break
+        return winner
+    return _clean(parts[0])
 
 
 def _validate_image_prompt_entry(entry: dict, anonymized_words: "set | frozenset" = frozenset()) -> bool:
@@ -180,10 +223,17 @@ For EACH line in the chunk below, produce an object with ALL of these fields, in
 {{
   "scene": N,
   "core_statement": "What is this line actually claiming/showing? One sentence.",
-  "concrete_entity": "The EXACT entity id from ANALYSIS (locations/characters/recurring_symbols)
-                       relevant here. If none fits, name the new concrete thing from the line
-                       itself (person/place/object/technology). Abstract metaphor ONLY if the
-                       line truly has no concrete referent.",
+  "concrete_entity": "EXACTLY ONE entity id from ANALYSIS (locations/characters/recurring_symbols).
+                       FORMAT IS STRICT: a single id, nothing else. NO commas, NO second entity,
+                       NO parenthetical additions, NO age/state suffixes. Write 'char_01', never
+                       'char_01, smartphone', never 'char_01 (older)', never 'char_01_elderly'.
+                       If a PERSON appears in this scene, that person's character id ALWAYS wins
+                       over any object or location — the character id is what pins their face and
+                       outfit to the reference image, and a scene that names an object instead
+                       loses that anchor and gets a re-invented person.
+                       Only when NO person appears: name the single new concrete thing from the
+                       line (place/object/technology). Abstract metaphor ONLY if the line truly
+                       has no concrete referent.",
   "callback_check": "Does ANALYSIS.callbacks say this scene references an earlier one? If yes,
                       name the recurring element that MUST appear in image_prompt. Else 'none'.",
   "character_consistency": "Since this is a single still with no motion/continuity anchor from
@@ -368,7 +418,7 @@ def visual_prompts(scenes, analysis=None):
                 entry = _image_prompt_single_retry(beats[beat_i], beat_i, total, analysis_ctx)
             prompts.append({
                 "prompt": str(entry.get("image_prompt") or f"Scene illustrating: {beats[beat_i][:80]}."),
-                "concrete_entity": str(entry.get("concrete_entity") or ""),
+                "concrete_entity": _normalize_concrete_entity(entry.get("concrete_entity")),
                 "prompt_error": bool(entry.get("prompt_error", False)),
             })
         offset += len(chunk)
