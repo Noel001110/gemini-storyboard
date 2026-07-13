@@ -572,14 +572,37 @@ Szenen-Prompts mit, erbt aber denselben Stil unverändert. Deshalb darf im Maste
 *„flache, umrandete Haut ohne Schattierung, Ton aus dem Referenzbild"*, den
 tatsächlichen Ton liefert das Charsheet.
 
+### Ursache 4 (galt für JEDES Preset): keine Vorrangregel
+
+Der finale Prompt lautet `scene_prompt + char_hint + master`. Der Szenentext steht also
+**vorne und ist konkret** („pristine, glossy sneakers on reflective asphalt"), der Stil
+steht **hinten und ist allgemein** („NO shading"). Konkrete Beschreibungen schlagen
+allgemeine Regeln — deshalb brach der Stil.
+
+Ein Audit zeigte: **kein einziges der 5 Presets** hatte eine Vorrangregel (alle hatten
+zwar „NO photorealism", aber keines sagte, dass der Stil den Szenentext *schlägt*). Der
+Bug war also nicht kanal-spezifisch, er hätte jeden Kanal getroffen.
+
+**Fix:** `_STYLE_PRECEDENCE` in `engine/presets.py`, per `_with_precedence()` an **alle**
+Presets angehängt (und `IMAGE_MASTER_DEFAULT` daraus abgeleitet, damit es nicht
+auseinanderläuft). Die Klausel ist **stil-agnostisch**: Sie schreibt keinen Look vor,
+sondern nur, dass der jeweils definierte Look gewinnt — ein Kanal mit `charcoal_noir`
+bekommt dadurch keine Strichmännchen. Sie enthält bewusst **keinen** Hautton und keine
+Kleidungsfarbe: das wäre Identität (Charsheet) und würde jeden künftigen Charakter
+zwangsvereinheitlichen.
+
+Bestehende Kanäle sind nicht betroffen — `master_prompt.txt` wird beim Kanal-Anlegen nur
+*einmal* aus dem Preset geschrieben und **nie überschrieben** (`dashboard.py`, Q.4).
+Wer die Klausel in einem bestehenden Kanal will, muss sie dort selbst ergänzen.
+
 ### Nicht behoben (bewusst offen)
 
 Der Prompt-Autor (`_image_prompt_chunk`) sieht den Master-Stil weiterhin **nicht**
 (`engine/prompts.py`: „Style is NOT included in the prompt text") und schreibt
 deshalb weiter Material-/Lichtsprache („glossy", „reflective asphalt", „warm desk
 lamp", „rustic wooden table"), die gegen „NO shading / NO background scenery"
-arbeitet. Die neue Vorrang-Klausel im Master fängt das ab, beseitigt aber nicht die
-Quelle. Sauberer wäre, `visual_prompts()` die Stil-Randbedingungen mitzugeben.
+arbeitet. Die Vorrang-Klausel fängt das jetzt ab, beseitigt aber nicht die Quelle.
+Sauberer wäre, `visual_prompts()` die Stil-Randbedingungen mitzugeben.
 
 ## 8. Relevante Commits (main)
 

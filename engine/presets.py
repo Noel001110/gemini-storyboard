@@ -154,14 +154,45 @@ Keep proportions consistent. Simple bold lines. White background always empty.
 """
 
 
+# ── Stil-Vorrang: gilt für JEDES Preset ──────────────────────────────────────
+# Evaluation Juli 2026 (User-Report "manchmal bricht der Animationsstil komplett"):
+# Der finale Prompt ist `scene_prompt + char_hint + master` — der Szenentext steht also
+# VORNE und ist KONKRET ("pristine, glossy sneakers on reflective asphalt"), der Stil
+# steht HINTEN und ist ALLGEMEIN ("NO shading"). Konkrete Beschreibungen schlagen
+# allgemeine Regeln: eine Szene wurde als hochglänzende, schattierte, spiegelnde
+# Illustration gerendert, mitten in einem Flat-Line-Art-Video.
+#
+# Der Prompt-Autor (_image_prompt_chunk) sieht den Master-Stil bewusst NICHT und schreibt
+# deshalb arglos Material-/Lichtsprache dagegen an. Bis das behoben ist, braucht JEDES
+# Preset eine explizite Vorrangregel — sie ist stil-AGNOSTISCH: sie schreibt keinen
+# bestimmten Look vor, sondern nur, dass der jeweils definierte Look gewinnt.
+#
+# Bewusst KEIN Hautton/keine Kleidungsfarbe hier: das ist Identität (Charsheet), nicht
+# Stil. Ein Preset gilt für alle Videos eines Kanals, ein Charsheet nur für eines —
+# ein Hautton im Preset würde jeden künftigen Charakter zwangsvereinheitlichen.
+_STYLE_PRECEDENCE = """
+PRECEDENCE (this STYLE block always wins over the scene description):
+If the scene description asks for glossy, reflective, photorealistic, textured or richly
+rendered detail, ignore that and draw it in THIS style anyway.
+These style rules also hold in close-ups of hands, feet, faces or objects — a close-up is
+never an excuse for realistic rendering.
+A character's colors (skin tone, hair, clothing) come from their reference image / character
+sheet, never invented per scene. Draw them in this style, but do not re-color them.
+"""
+
+
+def _with_precedence(master: str) -> str:
+    return master.rstrip() + "\n" + _STYLE_PRECEDENCE
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 PRESET_MASTERS: dict[str, str] = {
-    "flat_cartoon_doc":  _FLAT_CARTOON_DOC_MASTER,
-    "editorial_minimal": _EDITORIAL_MINIMAL_MASTER,
-    "ink_documentary":   _INK_DOCUMENTARY_MASTER,
-    "charcoal_noir":     _CHARCOAL_NOIR_MASTER,
-    "stick_minimal":     _STICK_MINIMAL_MASTER,
+    "flat_cartoon_doc":  _with_precedence(_FLAT_CARTOON_DOC_MASTER),
+    "editorial_minimal": _with_precedence(_EDITORIAL_MINIMAL_MASTER),
+    "ink_documentary":   _with_precedence(_INK_DOCUMENTARY_MASTER),
+    "charcoal_noir":     _with_precedence(_CHARCOAL_NOIR_MASTER),
+    "stick_minimal":     _with_precedence(_STICK_MINIMAL_MASTER),
 }
 
 PRESET_DESCRIPTIONS: dict[str, str] = {
@@ -173,7 +204,9 @@ PRESET_DESCRIPTIONS: dict[str, str] = {
 }
 
 DEFAULT_PRESET: str = "flat_cartoon_doc"
-IMAGE_MASTER_DEFAULT: str = _FLAT_CARTOON_DOC_MASTER
+# Aus PRESET_MASTERS ableiten, nicht aus dem Rohtext — sonst fehlt hier die
+# Vorrang-Klausel, die jedes Preset bekommt (siehe _with_precedence).
+IMAGE_MASTER_DEFAULT: str = PRESET_MASTERS[DEFAULT_PRESET]
 VIDEO_MASTER_DEFAULT: str = _FLAT_CARTOON_DOC_VIDEO
 
 
