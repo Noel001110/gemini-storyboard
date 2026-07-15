@@ -2910,7 +2910,7 @@ function renderCharList(){
         <button class="sm ghost" style="margin-top:4px;font-size:11px" onclick="editCharDesc('${safeId}','${descEsc}')">Beschreibung bearbeiten</button>
       </div>
       <div style="display:flex;gap:6px;margin-top:6px;flex-direction:column">
-        <button class="sm" onclick="genCharSheet('${escHtml(ch.name).replace(/'/g,"&#39;")}','${descEsc}')">
+        <button class="sm" onclick="genCharSheet('${escHtml(ch.name).replace(/'/g,"&#39;")}','${descEsc}', this)">
           ${ch.has_image?'Neu generieren':'Referenzbild erstellen'}
         </button>
         <label class="sm ghost" style="text-align:center;cursor:pointer">
@@ -2994,20 +2994,48 @@ function addChar(){
   renderCharList();
 }
 
-async function genCharSheet(name, desc){
-  const btn = [...document.querySelectorAll('button')].find(b=>b.textContent.includes('Referenzbild') && b.onclick?.toString().includes(name));
-  if(btn){ btn.disabled=true; btn.textContent='Generiere…'; }
-  const r = await fetch('/api/gen_charsheet',{
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({name, description: desc, channel: ACTIVE_CHANNEL, vid: ACTIVE_VIDEO||''})
-  }).then(r=>r.json());
-  if(r.ok){
-    const ch = CHARS.find(c=>c.name===name);
-    if(ch){ ch.has_image=true; ch.uri=r.uri; }
-    renderCharList();
-  } else {
-    alert('Fehler: '+(r.error||'unbekannt'));
-    if(btn){ btn.disabled=false; btn.textContent='Referenzbild erstellen'; }
+// `btn` wird vom onclick als `this` übergeben. Vorher wurde der Button per Heuristik
+// GESUCHT: textContent.includes('Referenzbild') — das traf nur beim ERSTEN Erstellen zu.
+// Bei einem vorhandenen Charakter heißt der Button "Neu generieren", die Suche fand also
+// nichts, und der Klick blieb komplett ohne Rückmeldung (User-Report). Ein Charsheet
+// braucht 30-60s — ohne Feedback sieht das aus, als sei der Button kaputt.
+async function genCharSheet(name, desc, btn){
+  const row = btn ? btn.closest('div[style*="grid-template-columns"]') : null;
+  const slot = row ? row.querySelector('img, div[style*="aspect-ratio"]') : null;
+  const prevLabel = btn ? btn.textContent.trim() : '';
+  if(btn){ btn.disabled = true; btn.textContent = 'Generiere …'; }
+  // Bildkachel sichtbar als "in Arbeit" markieren — so ist erkennbar, WELCHER Charakter
+  // gerade neu gezeichnet wird, auch wenn mehrere in der Liste stehen.
+  let overlay = null;
+  if(slot && slot.parentNode){
+    overlay = document.createElement('div');
+    overlay.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;'
+      + 'justify-content:center;background:rgba(0,0,0,.55);color:#fff;font-size:12px;'
+      + 'font-weight:600;border-radius:4px;gap:6px';
+    overlay.textContent = '⏳ wird generiert …';
+    slot.parentNode.style.position = 'relative';
+    slot.parentNode.appendChild(overlay);
+  }
+  try{
+    const r = await fetch('/api/gen_charsheet',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name, description: desc, channel: ACTIVE_CHANNEL, vid: ACTIVE_VIDEO||''})
+    }).then(r=>r.json());
+    if(r && r.ok){
+      const ch = CHARS.find(c=>c.name===name);
+      if(ch){ ch.has_image = true; ch.uri = r.uri; }
+      renderCharList();   // rendert neu (inkl. Cache-Bust ?t=), Overlay verschwindet mit
+      return;
+    }
+    alert('Fehler: '+((r && r.error) || 'unbekannt'));
+  }catch(e){
+    alert('Fehler: '+e);
+  }finally{
+    if(overlay) overlay.remove();
+    if(btn && document.body.contains(btn)){
+      btn.disabled = false;
+      btn.textContent = prevLabel || 'Referenzbild erstellen';
+    }
   }
 }
 
