@@ -468,16 +468,22 @@ def _filter_char_refs_for_entity(char_refs, entity=""):
     """
     if not char_refs:
         return []
-    entity_key = entity[5:] if entity.startswith("char_") else entity
-    entity_key = entity_key.strip().lower()
-    if not entity_key:
+    # Juli 2026 (User-Report "ab Szene 90 stimmt die Referenz nicht mehr"): Beim Debuggen
+    # zeigte sich, dass dieser Filter für das char_NN-Schema NIE matchte und der Text-
+    # Steckbrief + die Konfliktregel damit in KEINEN einzigen Prompt kamen (nur das
+    # ReferenzBILD ging über einen anderen Pfad mit). Ursache: entity="char_01" wurde auf
+    # "01" gestrippt, das Charsheet trägt aber safe="char_01" — "01" == "char_01" ist nie
+    # wahr. Deshalb jetzt gegen BEIDE Formen vergleichen: die volle id UND die gestrippte.
+    entity_full = (entity or "").strip().lower()
+    entity_key = entity_full[5:] if entity_full.startswith("char_") else entity_full
+    if not entity_full:
         return []
     out = []
     for cr in char_refs:
         if not _is_valid_char_description(cr.get("description", "")):
             continue
         safe = (cr.get("safe") or "").lower()
-        if safe == entity_key:
+        if safe and (safe == entity_full or safe == entity_key):
             out.append(cr)
     return out
 
@@ -510,10 +516,25 @@ def _build_image_prompt(scene_prompt, master, char_refs, phase="", is_hook=False
         # description can invent conflicting physical traits — e.g. the scene text
         # says "blonde hair" while the actual reference photo/charsheet is brunette —
         # and the model has no instruction on which one to trust.
-        char_hint += ("\n\nIMPORTANT: The character design(s) above, and any attached "
-                      "reference image, define this character's true appearance (hair, "
-                      "face, outfit, build). If the scene description below conflicts "
-                      "with them, the character design / reference image wins.")
+        # Juli 2026 (User-Report "ab Szene 90 stimmt die Referenz nicht mehr"): Das Skript
+        # ließ die Figuren um ~40 Jahre altern (Prompts ab dort: "65-year-old, grey hair").
+        # Die alte, harte Regel ("reference image wins") befahl dem Modell, das JUNGE Charsheet
+        # gegen die AUSDRÜCKLICHE Alters-Beschreibung durchzusetzen — zwei widersprüchliche
+        # Befehle, Ergebnis Matsch. Deshalb jetzt getrennt: die IDENTITÄT (Gesichtszüge, Statur)
+        # bleibt hart an die Referenz gebunden — das war der Jake-Fix gegen STILLE Erfindung.
+        # Aber eine im Szenentext EXPLIZIT genannte Alters-Änderung (Haarfarbe, Alter, Kleidung
+        # eines gealterten/verjüngten Charakters) darf die Referenz überschreiben. Nur was der
+        # Szenentext NICHT erwähnt, wird aus der Referenz übernommen.
+        char_hint += ("\n\nIMPORTANT — how to reconcile this design with the scene text:\n"
+                      "- The character's core FACIAL IDENTITY (face shape, features, ethnicity, "
+                      "build) always comes from the design/reference above. Never silently "
+                      "invent a different-looking person.\n"
+                      "- BUT if the scene description ABOVE explicitly states a different age, "
+                      "hair colour, or outfit for this character (e.g. 'now 65 with grey hair', "
+                      "'a younger version', 'wearing a suit'), FOLLOW THE SCENE — it is the same "
+                      "person shown at a different point in time. Keep the face recognisably the "
+                      "same, but age it / recolour the hair / change the clothes as the scene says.\n"
+                      "- For anything the scene text does NOT mention, use the reference design.")
     return scene_prompt + char_hint + "\n\n" + master
 
 
@@ -670,9 +691,24 @@ def gen_charsheet(cid, name, description, vid=None):
         f"- All 5 poses MUST share identical face shape, head size, hair colour and style, "
         f"skin tone, and clothing design\n"
         f"- Same age, same body proportions across all poses\n"
-        f"- Each pose uses the exact same art style, rendering technique and colour palette "
+        f"- Each pose uses the exact same art style, line weight and rendering technique "
         f"as specified in the style guide below — never deviate from it\n"
-        f"- No text labels, no captions, no annotations on the image — pure visual reference"
+        f"- No text labels, no captions, no annotations on the image — pure visual reference\n\n"
+        # Juli 2026 (User-Report: "Charsheets für zwei verschiedene Charaktere sind 2x identisch
+        # und sehen aus wie die Figur aus dem Style-Ref"): Das Style-Referenzbild des Kanals wird
+        # als BILD-Referenz an KIE geschickt (siehe unten) — und Bildmodelle übernehmen aus einem
+        # Referenzbild vor allem die IDENTITÄT, nicht bloß den Strich. Zeigt der Style-Ref konkrete
+        # Figuren (hier: drei Strichmännchen, das mittlere braunhaarig im blauen Shirt), bekommt
+        # JEDER neu erzeugte Charakter genau dieses Gesicht und diese Kleidung, egal was in seiner
+        # Beschreibung steht. Verschärft wurde das durch "colour palette" in der Zeile oben — das
+        # las das Modell als Aufforderung, auch die Kleidungsfarbe zu übernehmen.
+        f"THE ATTACHED REFERENCE IMAGE IS THE HOUSE STYLE — MATCH IT EXACTLY:\n"
+        f"Same line weight, same limb construction, same flat colours, same absence of shading, "
+        f"same head-to-body proportions, same facial simplification. The new character must look "
+        f"like it was drawn by the same artist and could stand next to those figures.\n"
+        f"It shows a DIFFERENT, unrelated person. Take the STYLE from it, but take the hair "
+        f"colour and clothing colour ONLY from the 'Character design specifications' above — never "
+        f"default to the reference's colours."
     )
     # Pre-33.2 cleanup: backslash inside an f-string expression part is illegal on
     # Python 3.11/3.12 (PEP 701, allowed only in 3.13+). Extracting the regex
