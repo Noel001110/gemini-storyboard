@@ -155,10 +155,22 @@ def _validate_image_prompt_entry(entry: dict, anonymized_words: "set | frozenset
 
 
 def _image_prompt_chunk(chunk_beats: list, chunk_offset: int, total: int,
-                         analysis_ctx: str, chunk_phases: list | None = None) -> list:
+                         analysis_ctx: str, chunk_phases: list | None = None,
+                         valid_entity_ids: list | None = None) -> list:
     """One LLM call for a small chunk of scenes (still images — no story-phase/camera-move
     logic like video; instead forces explicit character-consistency notes, since stills have
     no 'last frame of previous clip' anchor to inherit continuity from).
+
+    `valid_entity_ids` (Juli 2026, A1) — Liste bekannter char_-IDs, beschränkt per `enum`
+    NUR `secondary_entity`, NICHT `concrete_entity`. Das ist bewusst asymmetrisch:
+    `secondary_entity` ist strukturell immer entweder eine bekannte Charakter-ID oder
+    leer (siehe Instruktion unten) — dafür ist ein `enum` eine echte, verlustfreie
+    Absicherung. `concrete_entity` dagegen darf laut eigener Instruktion („name the
+    single new concrete thing from the line") auch ein noch nicht katalogisiertes,
+    neues Objekt benennen — ein `enum` würde diese Freiheit kappen und wäre eine
+    Verschlechterung, kein Fix (verifiziert: `enum` ist bei Gemini eine geschlossene
+    Menge ohne Fluchttür-Wert). Format-Chaos bei `concrete_entity` bleibt Aufgabe von
+    `_normalize_concrete_entity` (bereits verifiziert: 59→10 Varianten).
     """
     # Lazy-imports: LLM bridge functions live in dashboard.py
     from dashboard import post_gemini_native
@@ -183,6 +195,17 @@ def _image_prompt_chunk(chunk_beats: list, chunk_offset: int, total: int,
                 "scene": {"type": "integer"},
                 "core_statement": {"type": "string"},
                 "concrete_entity": {"type": "string"},
+                # Juli 2026 (User-Report, Bilder UI#84/#93: zwei Charaktere im selben Bild,
+                # z.B. Protagonist + Coworker im Restaurant — nur EINE Referenz wurde
+                # angehängt, die zweite Person driftete/wurde neu erfunden). Optional, nur
+                # gefüllt wenn ZWEI Charaktere gemeinsam in der Zeile auftreten. `enum`
+                # NUR hier (siehe Docstring oben, warum concrete_entity keins bekommt):
+                # secondary_entity kann laut Instruktion nur eine bekannte char_-ID oder
+                # leer sein, nie ein neues Objekt — ein enum ist hier verlustfrei sicher.
+                "secondary_entity": (
+                    {"type": "string", "enum": valid_entity_ids + [""]}
+                    if valid_entity_ids else {"type": "string"}
+                ),
                 "callback_check": {"type": "string"},
                 "character_consistency": {"type": "string"},
                 "line_specific_anchor": {"type": "string"},
@@ -234,6 +257,11 @@ For EACH line in the chunk below, produce an object with ALL of these fields, in
                        Only when NO person appears: name the single new concrete thing from the
                        line (place/object/technology). Abstract metaphor ONLY if the line truly
                        has no concrete referent.",
+  "secondary_entity": "Only if a SECOND character (a different char_ id from ANALYSIS) appears
+                       TOGETHER with the one in concrete_entity in this same scene (e.g. two
+                       people talking, sitting across a table, interacting) — name that second
+                       character's id here, same strict single-id format as concrete_entity.
+                       Leave this field empty ('') if only one character appears.",
   "callback_check": "Does ANALYSIS.callbacks say this scene references an earlier one? If yes,
                       name the recurring element that MUST appear in image_prompt. Else 'none'.",
   "character_consistency": "Since this is a single still with no motion/continuity anchor from
@@ -313,7 +341,8 @@ Return a JSON array of {len(chunk_beats)} objects, one per line above, in the sa
     return arr
 
 
-def _image_prompt_single_retry(beat_text: str, beat_i: int, total: int, analysis_ctx: str) -> dict:
+def _image_prompt_single_retry(beat_text: str, beat_i: int, total: int, analysis_ctx: str,
+                                valid_entity_ids: list | None = None) -> dict:
     """Focused single-scene retry for entries that failed validation in the batch call.
 
     Juli 2026 (User-Report: mehrere Szenen landeten mit einem barebones
@@ -329,7 +358,7 @@ def _image_prompt_single_retry(beat_text: str, beat_i: int, total: int, analysis
     last_err: Exception | None = None
     for attempt in range(1, 4):
         try:
-            result = _image_prompt_chunk([beat_text], beat_i, total, analysis_ctx)
+            result = _image_prompt_chunk([beat_text], beat_i, total, analysis_ctx, None, valid_entity_ids)
             return result[0]
         except Exception as e:
             last_err = e
@@ -369,6 +398,9 @@ def visual_prompts(scenes, analysis=None):
         analysis = analyze_script(beats)
     analysis_ctx = json.dumps(analysis, ensure_ascii=False, indent=1) if analysis else "{}"
     anon_words = _anonymized_words(analysis)
+    # A1: bekannte Charakter-IDs für den secondary_entity-enum (siehe _image_prompt_chunk-
+    # Docstring, warum NUR secondary_entity und nicht concrete_entity ein enum bekommt).
+    char_ids = [str(c["id"]) for c in (analysis or {}).get("characters", []) if c.get("id")]
 
     def _fetch_image_chunk(chunk, chunk_offset, chunk_phases=None):
         """Try the chunk; on failure (incl. truncated/malformed JSON on large chunks),
@@ -382,13 +414,13 @@ def visual_prompts(scenes, analysis=None):
         prompt_error=True so it's never mistaken for a normal, fully-formed prompt.
         """
         try:
-            return _image_prompt_chunk(chunk, chunk_offset, total, analysis_ctx, chunk_phases)
+            return _image_prompt_chunk(chunk, chunk_offset, total, analysis_ctx, chunk_phases, char_ids)
         except Exception as e:
             if len(chunk) <= 1:
                 last_err = e
                 for attempt in range(2, 4):
                     try:
-                        return _image_prompt_chunk(chunk, chunk_offset, total, analysis_ctx, chunk_phases)
+                        return _image_prompt_chunk(chunk, chunk_offset, total, analysis_ctx, chunk_phases, char_ids)
                     except Exception as e2:
                         last_err = e2
                         print(f"  [Plan] Bild-Chunk-Fehler (Szene {chunk_offset}) Versuch {attempt}/3: {e2}", flush=True)
@@ -415,10 +447,16 @@ def visual_prompts(scenes, analysis=None):
             beat_i = offset + j
             if not _validate_image_prompt_entry(entry, anon_words):
                 print(f"  [Plan] Szene {beat_i} zu kurz/generisch — Einzel-Retry …", flush=True)
-                entry = _image_prompt_single_retry(beats[beat_i], beat_i, total, analysis_ctx)
+                entry = _image_prompt_single_retry(beats[beat_i], beat_i, total, analysis_ctx, char_ids)
+            secondary_raw = entry.get("secondary_entity")
+            secondary = _normalize_concrete_entity(secondary_raw) if secondary_raw else ""
             prompts.append({
                 "prompt": str(entry.get("image_prompt") or f"Scene illustrating: {beats[beat_i][:80]}."),
                 "concrete_entity": _normalize_concrete_entity(entry.get("concrete_entity")),
+                # Zweiter Charakter in derselben Szene (Fix Ursache 4, siehe Schema oben) —
+                # nur gefüllt wenn secondary_entity eine eigene char_-ID ist, nicht dieselbe
+                # wie concrete_entity (sonst würde dieselbe Person doppelt referenziert).
+                "secondary_entity": secondary if secondary != _normalize_concrete_entity(entry.get("concrete_entity")) else "",
                 "prompt_error": bool(entry.get("prompt_error", False)),
             })
         offset += len(chunk)

@@ -755,10 +755,45 @@ def scene_depicts_people(scene: dict) -> bool:
     return bool(_PEOPLE_IN_PROMPT_RE.search(scene.get("prompt") or ""))
 
 
+_CHAR_NAME_STOPWORDS = {"the", "a", "an", "you", "your"}
+
+
+def _character_text_match(scene_prompt: str, name_or_role: str) -> bool:
+    """True wenn der Szenen-Prompt die Rolle/den Namen des Charakters erwähnt — z.B.
+    "coworker" für name_or_role="Coworker", "protagonist" für "Protagonist (You)".
+    Klammerzusätze ("(You)") und Stoppwörter werden entfernt, bevor verglichen wird:
+    ein Substring-Match auf "Protagonist (You)" wörtlich würde nie treffen (kein Prompt
+    schreibt das so), und ein Match auf das Stoppwort "you" allein würde auf fast jeden
+    Prompt anschlagen."""
+    name = re.sub(r"\([^)]*\)", "", name_or_role).strip().lower()
+    words = [w for w in re.findall(r"[a-z]+", name) if w not in _CHAR_NAME_STOPWORDS]
+    if not words:
+        return False
+    candidates = [" ".join(words)] if len(words) > 1 else []
+    candidates.append(words[-1])
+    return any(re.search(rf"\b{re.escape(c)}\b", scene_prompt, re.I) for c in candidates)
+
+
 def nearest_character_entity(plan: dict, scene: dict) -> str:
-    """concrete_entity des nächstgelegenen Charakters — erst rückwärts (der Kontext, aus
-    dem die Szene kommt), sonst vorwärts. Damit bekommt eine Hand-/Fuß-Nahaufnahme den
-    Hautton und Strich des Charakters, um den es inhaltlich gerade geht."""
+    """Charakter für eine Szene ohne eigenen Charakter-Anker.
+
+    Juli 2026 (User-Report, Bilder UI#72/#101 aus "The Raise Nobody Noticed": eine
+    Szene über den Coworker bzw. den Protagonisten bekam die REFERENZ DES JEWEILS
+    ANDEREN Charakters): reine zeitliche Nähe ("wer kam zuletzt vor") ignoriert den
+    Szeneninhalt komplett — bei UI#101 ("...over the shoulder of the protagonist...")
+    griff der alte Code den Coworker, weil der zufällig der zeitlich letzte Charakter
+    war. Jetzt zuerst ein Textabgleich: nennt der Prompt einen bekannten Charakter beim
+    Namen/bei der Rolle (siehe _character_text_match), gewinnt der — unabhängig von der
+    Position im Skript. Nur wenn kein Name im Text vorkommt (z.B. eine reine
+    Hand-/Fuß-Nahaufnahme ohne Rollen-Nennung), fällt es auf die alte Nähe-Heuristik
+    zurück (erst rückwärts, sonst vorwärts)."""
+    prompt = scene.get("prompt") or ""
+    for ch in plan.get("characters") or []:
+        cid = str(ch.get("id") or "")
+        name = str(ch.get("name_or_role") or "")
+        if cid.startswith("char_") and name and _character_text_match(prompt, name):
+            return cid
+
     i = scene.get("i", 0)
     scenes = plan.get("scenes") or []
     chars = [s for s in scenes if str(s.get("concrete_entity", "")).startswith("char_")]
@@ -806,20 +841,6 @@ def analyze_script(beats):
         '"first_appears_beat": N}],\n'
         '  "characters": [{"id": "char_01", "name_or_role": string, "visual_description": '
         '"string (CRITICAL: You MUST extract the narrator and ALL mentioned people. If no physical description exists, you MUST invent a generic basic look, e.g. \'young man, casual clothes\')", "anonymize": bool, "first_appears_beat": N}],\n'
-        # Juli 2026 (User-Report "es wurden keine Charaktere aus dem Skript generiert"):
-        # Bei einem Skript in der ZWEITEN Person ("Your phone buzzes... You open it") lieferte
-        # das Modell zweimal eine LEERE characters-Liste — es hielt "du" offenbar für keine
-        # Person. Folge: keine Charsheets, und visual_prompts erfand pro Chunk eigene IDs
-        # (114 Szenen -> 59 verschiedene char_-Schreibweisen für vier Personen). Deshalb hier
-        # explizit: unbenannte Rollen und das angesprochene "du" SIND Charaktere.
-        '  # CHARACTERS ARE MANDATORY. A script with any human presence NEVER has an empty '
-        'characters list.\n'
-        '  # Second-person scripts ("you", "your") DO have characters: the addressed person IS '
-        'the protagonist — emit them as char_01 with name_or_role "Protagonist (You)".\n'
-        '  # Unnamed roles are characters too (a coworker, the boss, an investor, a friend). '
-        'Give each ONE stable id and invent a plain generic look for them.\n'
-        '  # Do NOT create separate ids for the same person at different ages or moods '
-        '(no char_protagonist_young / char_protagonist_elderly) — ONE id per person.\n'
         '  "recurring_symbols": [{"id": "sym_01", "object": string, "meaning": string, '
         '"beats": [N, N]}],\n'
         '  "emotional_arc": {"opening": "ONE word", "midpoint": "ONE word", "resolution": "ONE word"},\n'
@@ -837,6 +858,38 @@ def analyze_script(beats):
         '"strength": "strong" | "weak"},\n'
         '  "throughline_question": "one-sentence question that drives the whole video, OR empty string"\n'
         "}\n\n"
+        # Diese Regeln standen zuerst als "# ..."-Zeilen INNERHALB des JSON-Templates oben.
+        # Das Modell ahmte das Muster nach und lieferte JSON MIT Kommentarzeilen zurück —
+        # ungültig, json.loads scheiterte, characters blieb leer. Sie gehören als Prosa
+        # HINTER den JSON-Block, nicht hinein.
+        "CHARACTERS — hard rules:\n"
+        "- CHARACTERS ARE MANDATORY. A script with any human presence NEVER returns an empty "
+        "characters list.\n"
+        '- Second-person scripts ("you", "your") DO have characters: the addressed person IS the '
+        'protagonist. Emit them as char_01 with name_or_role "Protagonist (You)".\n'
+        "- Unnamed roles are characters too (a coworker, the boss, an investor, a friend). Give "
+        "each ONE stable id.\n"
+        "- ONE id per person. Never create separate ids for the same person at different ages or "
+        "moods (no char_protagonist_young plus char_protagonist_elderly).\n"
+        # Juli 2026 (an echten Charsheets verifiziert): Die Beschreibung darf zeichenbar sein,
+        # aber NICHT realistisch klingen. Mit "light grey button-down shirt with rolled sleeves,
+        # athletic build" rendert das Bildmodell einen halb-realistischen, schattierten Mann und
+        # ignoriert den Strichmännchen-Stil des Kanals komplett. Mit "short blonde hair, plain
+        # light grey t-shirt" kommt exakt derselbe Charakter im korrekten Flat-Stil heraus.
+        # Stoff-/Schnitt-/Körperbau-Details sind Realismus-Trigger — sie müssen raus.
+        "- visual_description MUST be SHORT (max ~8 words) and purely about COLOUR: hair colour + "
+        "hair style, and ONE simple garment + its colour. Nothing else.\n"
+        "    GOOD: 'short black hair, plain green t-shirt'\n"
+        "    GOOD: 'long red hair, simple blue dress'\n"
+        "    BAD:  'a young professional who gradually becomes wealthy'  (nothing to draw)\n"
+        "    BAD:  'athletic build, tailored button-down shirt with rolled sleeves'  (fabric, cut "
+        "and physique detail force a realistic rendering and destroy the channel's art style)\n"
+        "- NEVER mention: physique/build, fabric, tailoring, sleeves, accessories, age ranges.\n"
+        "- Describe ONE canonical look per character — their default appearance. Do NOT describe "
+        "how they change over the story; the pipeline draws one consistent design per character.\n"
+        "- Characters MUST be VISUALLY DISTINGUISHABLE: no two characters may share the same hair "
+        "colour AND the same clothing colour. Give each a different combination so a viewer tells "
+        "them apart at a glance.\n\n"
         'Rule: set "anonymize": true for every real, identifiable named person (public '
         "figures, named victims/individuals) — these get depicted later only as a "
         "silhouette or symbolic stand-in, never named or shown photorealistically.\n\n"
@@ -914,7 +967,20 @@ def analyze_script(beats):
     result = {}
     for attempt in (1, 2):
         try:
-            txt = post_gemini_native([{"role": "user", "content": instr}], json_mode=True, temp=0.2)
+            # thinking_level="low" ist hier NICHT Sparsamkeit, sondern Korrektheit.
+            # Juli 2026 (User-Report "es wurden keine Charaktere aus dem Skript generiert"):
+            # Dieser Call lief mit dem "high"-Default — wovor post_gemini_native's eigener
+            # Docstring warnt: "high burns 3000+ reasoning tokens per call on long JSON-array
+            # outputs and frequently pushes past maxOutputTokens mid-response, breaking
+            # json.loads()". Genau das passierte: Die Antwort enthält pro Beat je einen
+            # pacing- UND einen phases-Eintrag, bei 144 Beats also ~288 Objekte. Zusammen mit
+            # den Reasoning-Tokens riss sie das Limit, wurde MITTEN IM STRING abgeschnitten
+            # ("Unterminated string"), json.loads scheiterte — und übrig blieb ein leeres
+            # result, also eine leere characters-Liste. Der Fehler sah wie ein
+            # Verständnisproblem des Modells aus, war aber schlicht eine gekappte Antwort.
+            # Er trifft LANGE Skripte, unabhängig vom Inhalt.
+            txt = post_gemini_native([{"role": "user", "content": instr}], json_mode=True,
+                                      temp=0.2, thinking_level="low")
             result = json.loads(txt)
         except Exception as e:
             print(f"Analyse-Fehler (Versuch {attempt}):", e)
@@ -1304,6 +1370,20 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
                 # Lokale Pfade (aus Charsheets) in öffentliche URLs wandeln
                 if entity_debug.get("is_local"):
                     entity_refs = [get_public_charsheet_url(ref) for ref in entity_refs]
+
+                # A2 (Ursache 4, User-Report Bilder UI#84/#93: zwei Personen im selben Bild
+                # — nur EINE Referenz wurde angehängt, die zweite Person driftete/wurde neu
+                # erfunden). secondary_entity kommt aus visual_prompts() (engine/prompts.py).
+                # Eigenständig zu einer öffentlichen URL konvertiert — entity_debug["is_local"]
+                # oben beschreibt nur die Herkunft der PRIMÄREN Referenz, nicht dieser hier;
+                # _find_charsheet_png liefert immer einen lokalen Pfad, nie eine fertige URL.
+                secondary_entity = str(scene.get("secondary_entity", "") or "")
+                if secondary_entity and secondary_entity != prompt_entity:
+                    sec_png, _sec_dbg = _find_charsheet_png(plan, cid, vid, secondary_entity)
+                    if sec_png:
+                        entity_refs = entity_refs + [get_public_charsheet_url(sec_png)]
+                        print(f"  [BatchGen] Szene {i}: zweiter Charakter "
+                              f"{secondary_entity!r} zusätzlich referenziert", flush=True)
 
                 # Evaluation Juli 2026 (Fund 1, "Grafik-Look driftet in Charakter-Szenen"):
                 # der Style-Ref wurde bisher WEGGELASSEN, sobald eine Szene schon einen
@@ -1966,6 +2046,7 @@ def _plan_generate_worker(cid: str, vid: str, text: str, wpm: float, sec: float)
         # 91 fertigen Bilder als "geplant" markiert.
         for s, pr in zip(scenes, prompts):
             s["prompt"] = pr["prompt"]; s["concrete_entity"] = pr["concrete_entity"]; s["file"] = None
+            s["secondary_entity"] = pr.get("secondary_entity", "")
             s["status"] = "geplant"; s["t"] = fmt_t(s["start"])
             s["video_prompt"] = ""
             # Juli 2026 (User-Report: mehrere Szenen mit barebones "Scene illustrating: ..."
@@ -2909,6 +2990,7 @@ def _transcribe_generate_worker(cid: str, vid: str, sec: float) -> dict:
     prompt_error_scenes = []
     for s, pr in zip(scenes, prompts):
         s["prompt"] = pr["prompt"]; s["concrete_entity"] = pr["concrete_entity"]
+        s["secondary_entity"] = pr.get("secondary_entity", "")
         s["prompt_error"] = pr.get("prompt_error", False)
         if s["prompt_error"]:
             prompt_error_scenes.append(s["i"])
@@ -4141,7 +4223,15 @@ class H(BaseHTTPRequestHandler):
             entity_refs, entity_debug = _resolve_entity_ref(v_plan(cid, vid), scene_for_phase, wait=False)
             if entity_debug.get("is_local"):
                 entity_refs = [get_public_charsheet_url(ref) for ref in entity_refs]
-            
+
+            # A2, gleiche Logik wie im Batch-Worker (_batch_generate_worker) — zweiter
+            # Charakter in derselben Szene bekommt seine eigene Referenz mit angehängt.
+            secondary_entity = str(scene_for_phase.get("secondary_entity", "") or "")
+            if secondary_entity and secondary_entity != prompt_entity:
+                sec_png, _sec_dbg = _find_charsheet_png(plan, cid, vid, secondary_entity)
+                if sec_png:
+                    entity_refs = entity_refs + [get_public_charsheet_url(sec_png)]
+
             if entity_refs:
                 if scene_for_phase.get("seq_id") is not None and scene_for_phase.get("seq_pos", 0) >= 1:
                     full_prompt += (
