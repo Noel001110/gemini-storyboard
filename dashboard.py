@@ -2262,22 +2262,6 @@ class H(BaseHTTPRequestHandler):
                 ],
                 "default": DEFAULT_PRESET,
             })
-        if p == "/api/channels":
-            # UI-Rebuild Phase 33.3 — Sidebar braucht pro Channel einen Video-Counter
-            # und Brand-Color. Wir packen die beiden Felder direkt ins channels-Response.
-            chs = load_channels()
-            for ch in chs:
-                vids = load_videos(ch["id"])
-                ch["video_count"] = len(vids)
-                # Active-Count = Videos mit plan.json ODER voiceover.mp3 (Phase-B-Hint)
-                ch["active_count"] = sum(
-                    1 for v in vids
-                    if os.path.exists(os.path.join(v_dir(ch["id"], v["id"]), "generated", "plan.json"))
-                    or os.path.exists(os.path.join(v_dir(ch["id"], v["id"]), "uploads", "voiceover.mp3"))
-                )
-            return self._send(200, {"channels": chs})
-        if p == "/api/videos":
-            return self._send(200, {"videos": load_videos(cid)})
         if p == "/api/char_ref":
             # Audit Juli 2026 (Bereich 3): style_ref_url.txt kann jetzt mehrzeilig sein
             # (bis zu 3 Refs) -- über get_channel_style_ref() lesen statt raw, sonst
@@ -2570,73 +2554,6 @@ class H(BaseHTTPRequestHandler):
             # (zufällig) oder halt Müll sein. User sieht es im Dropdown.
             save_voice_settings(cid, s)
             return self._send(200, {"ok": True, "tts_provider": new_provider})
-
-        # ── Video management (one video = one script/plan within a channel) ────
-        if p == "/api/videos":
-            name = d.get("name", "Neues Video").strip()
-            entry = create_video(cid, name)
-            return self._send(200, {"ok": True, **entry})
-        if p == "/api/videos/delete":
-            videos = [v for v in load_videos(cid) if v["id"] != vid]
-            save_videos(cid, videos)
-            shutil.rmtree(v_dir(cid, vid), ignore_errors=True)
-            return self._send(200, {"ok": True})
-        if p == "/api/videos/rename":
-            new_name = d.get("name", "").strip()
-            videos = load_videos(cid)
-            for v in videos:
-                if v["id"] == vid and new_name: v["name"] = new_name
-            save_videos(cid, videos)
-            return self._send(200, {"ok": True})
-
-        # ── Channel management ────────────────────────────────────────────────
-        if p == "/api/channels":
-            name = d.get("name", "Neuer Kanal").strip()
-            safe = re.sub(r"[^\w]", "_", name.lower())[:30] or "kanal"
-            chs  = load_channels()
-            ids  = {c["id"] for c in chs}
-            cid_new = safe if safe not in ids else f"{safe}_{int(time.time())%10000}"
-            chs.append({"id": cid_new, "name": name})
-            save_channels(chs)
-            ensure_channel(cid_new)
-            # Phase 38: Stil-Preset-Auswahl. Falls 'preset' mitgegeben wird und gültig
-            # ist, wird das entsprechende Master-Preset nach channels/<cid>/master_prompt.txt
-            # geschrieben. Existierende master_prompt.txt wird NIE überschrieben (Q.4).
-            preset_id = d.get("preset")
-            dst = ch_master(cid_new)
-            if not os.path.exists(dst):
-                from engine.presets import PRESET_MASTERS, DEFAULT_PRESET
-                chosen_preset = preset_id if preset_id in PRESET_MASTERS else DEFAULT_PRESET
-                with open(dst, "w") as f:
-                    f.write(PRESET_MASTERS[chosen_preset])
-            return self._send(200, {"ok": True, "id": cid_new, "name": name,
-                                     "preset": chosen_preset if 'chosen_preset' in dir() else None})
-        if p == "/api/channels/delete":
-            chs = load_channels()
-            if len(chs) <= 1:
-                return self._send(400, {"error": "Letzter Kanal kann nicht gelöscht werden."})
-            save_channels([c for c in chs if c["id"] != cid])
-            return self._send(200, {"ok": True})
-        if p == "/api/channels/rename":
-            new_name = d.get("name", "").strip()
-            chs = load_channels()
-            for c in chs:
-                if c["id"] == cid: c["name"] = new_name
-            save_channels(chs)
-            return self._send(200, {"ok": True})
-        # Phase 33.3.1 Bug-1 — Brand-Color pro Channel persistieren. Wenn der User
-        # im Settings-Modal eine Farbe wählt, wird sie hier gespeichert und beim
-        # nächsten /api/channels-Response ausgelesen (kein Frontend-Only-State).
-        if p == "/api/channels/brand_color":
-            color = (d.get("brand_color") or "").strip()
-            # Validierung: 7-stellige #RRGGBB oder 4-stellige #RGB (input[type=color])
-            if color and not re.fullmatch(r"#(?:[0-9a-fA-F]{3}){1,2}", color):
-                return self._send(400, {"error": f"brand_color invalid: {color!r}"})
-            chs = load_channels()
-            for c in chs:
-                if c["id"] == cid: c["brand_color"] = color
-            save_channels(chs)
-            return self._send(200, {"ok": True, "brand_color": color})
 
         # ── Master prompt ─────────────────────────────────────────────────────
         if p == "/api/master":
@@ -3723,7 +3640,13 @@ def main():
     # Shorts/Upload/Control-Erweiterung: eine Zeile auskommentieren schaltet das
     # gesamte Gebiet ab, ohne den Rest anzufassen (siehe routes/__init__.py).
     import shorts.api, youtube.api, control.api
+    import routes.channels
     import store.db as store_db
+    # Refactor Phase 4 (Teil 1): erste Route-Gruppe (Channel/Video-CRUD) aus
+    # dem dashboard.py-Handler ausgelagert. Reihenfolge unkritisch -- Präfixe
+    # überschneiden sich nicht mit shorts/youtube/control.
+    mount("/api/channels", routes.channels)
+    mount("/api/videos", routes.channels)
     mount("/api/shorts/", shorts.api)
     mount("/api/youtube/", youtube.api)
     mount("/api/control/", control.api)

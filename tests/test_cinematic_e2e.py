@@ -1138,9 +1138,12 @@ def t_stepper_state_machine_canEnter():
 def t_phase33_sidebar_brand_color_in_response():
     """33.3: /api/channels erweitert pro Channel um video_count + active_count
     (brand_color wird Frontend-seitig per nameToHsl aus dem Namen abgeleitet wenn
-    nicht explizit gesetzt)."""
-    py_src = open(os.path.join(ROOT, "dashboard.py")).read()
-    idx = py_src.find('if p == "/api/channels":')
+    nicht explizit gesetzt).
+
+    Refactor Phase 4 (Teil 1): der Endpoint lebt jetzt in routes/channels.py,
+    nicht mehr in dashboard.py (siehe mount("/api/channels", ...) in main())."""
+    py_src = open(os.path.join(ROOT, "routes", "channels.py")).read()
+    idx = py_src.find('path == "/api/channels"')
     body = py_src[idx:idx + 1500]
     assert "video_count" in body, \
         "33.3 missing: /api/channels liefert kein video_count pro Channel"
@@ -1204,8 +1207,10 @@ def t_phase33_sidebar_counter_classes():
 
 def t_phase33_1_brand_color_save_endpoint():
     """33.3.1 Bug-1: Brand-Color-Picker hat Save-Button + persistiert via
-    /api/channels/brand_color (Backend akzeptiert #RGB oder #RRGGBB)."""
-    py_src = open(os.path.join(ROOT, "dashboard.py")).read()
+    /api/channels/brand_color (Backend akzeptiert #RGB oder #RRGGBB).
+
+    Refactor Phase 4 (Teil 1): der Endpoint lebt jetzt in routes/channels.py."""
+    py_src = open(os.path.join(ROOT, "routes", "channels.py")).read()
     html = open(os.path.join(ROOT, "dashboard.html")).read()
     # Backend-Endpoint vorhanden
     assert '"/api/channels/brand_color"' in py_src, \
