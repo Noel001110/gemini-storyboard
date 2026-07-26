@@ -1430,13 +1430,6 @@ def _preserve_rendered_scenes(prev_scenes: dict, scenes: list) -> int:
 from workers.plan import run as _plan_generate_worker  # noqa: F401
 
 
-# Refactor Phase 3: nach workers/thumbnail.py verschoben (lazy `import dashboard`
-# für die verbliebenen God-Modul-Helfer, siehe workers/__init__.py). Re-Export hält
-# den bestehenden threading.Thread(target=_thumbnail_generate_worker, ...)-Call-Site
-# unverändert lauffähig.
-from workers.thumbnail import run as _thumbnail_generate_worker  # noqa: F401
-
-
 # ---------- Phase 4.5: Ein-Knopf-Orchestrator ----------
 # Kein neuer fachlicher Baustein -- verkettet nur die drei bereits einzeln getesteten
 # Jobs (Plan/Transkription -> Bilder -> Rendern) hintereinander in einem einzigen
@@ -2386,45 +2379,6 @@ class H(BaseHTTPRequestHandler):
             return
 
         # ── Thumbnail generator ───────────────────────────────────────────────
-        if p == "/api/generate_thumbnail":
-            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
-            # Versuche das Skript zu lesen
-            full_script = ""
-            try:
-                plan = json.load(open(v_plan(cid, vid)))
-                full_script = " ".join(s.get("text", "") for s in plan["scenes"])
-            except:
-                pass
-            
-            # Falls kein Skript da ist, nimm die Idee aus meta.json
-            if not full_script.strip():
-                meta = load_v_meta(cid, vid)
-                full_script = meta.get("idea", "")
-                # Falls auch Idee leer, nimm ausgewählten Titel
-                if not full_script.strip():
-                    full_script = meta.get("selected_title", "")
-                    
-            if not full_script.strip():
-                return self._send(400, {"error": "Kein Skript, Thema oder Titel vorhanden"})
-            mode = get_video_mode(cid, vid)
-            try:
-                master_style = (open(ch_vid_master(cid)).read().strip() if mode == "video"
-                                 else read_master(cid)) or VIDEO_MASTER_DEFAULT
-            except: master_style = VIDEO_MASTER_DEFAULT
-            chosen_title = load_v_meta(cid, vid).get("selected_title", "")
-            # Off the request thread — used to run inline (30-60s KIE submit+poll+download),
-            # freezing the browser. Client polls /api/thumbnail_status. Same running-flag-set-
-            # under-lock-before-thread-exists race guard as /api/plan.
-            key = (cid, vid)
-            with _THUMB_JOBS_LOCK:
-                if THUMB_JOBS.get(key, {}).get("running"):
-                    return self._send(200, {"ok": True, "already_running": True})
-                THUMB_JOBS[key] = {"running": True, "step": "Startet …", "error": None,
-                                   "done": False, "file": None, "prompt": None, "ts": time.time()}
-            threading.Thread(target=_thumbnail_generate_worker,
-                             args=(cid, vid, full_script, master_style, chosen_title), daemon=True).start()
-            return self._send(200, {"ok": True, "already_running": False})
-
         # ── Scene plan ────────────────────────────────────────────────────────
         if p == "/api/plan":
             wpm = float(d.get("wpm", 150)); sec = float(d.get("sec", 4))
@@ -3349,6 +3303,7 @@ def main():
     import routes.job_status
     import routes.voice
     import routes.script_gen
+    import routes.thumbnail
     import store.db as store_db
     # Refactor Phase 4 (Teil 1-5): Route-Gruppen aus dem dashboard.py-Handler
     # ausgelagert. Reihenfolge unkritisch -- Präfixe überschneiden sich nicht
@@ -3382,6 +3337,7 @@ def main():
     mount("/api/elevenlabs_settings", routes.voice)
     mount("/api/generate_script", routes.script_gen)
     mount("/api/generate_titles", routes.script_gen)
+    mount("/api/generate_thumbnail", routes.thumbnail)
     mount("/api/shorts/", shorts.api)
     mount("/api/youtube/", youtube.api)
     mount("/api/control/", control.api)
