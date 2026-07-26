@@ -1638,7 +1638,7 @@ def t_phase_m_dashboard_re_exports_prompts():
     """M.5+M.6: alle aus engine/prompts.py extrahierten Symbole re-exportiert."""
     import engine.prompts
     assert dashboard._build_image_prompt is engine.prompts._build_image_prompt
-    assert dashboard._build_video_prompt is engine.prompts._build_video_prompt
+    # _build_video_prompt (Veo) wurde 2026-07-26 entfernt (T2V/I2V-Videoerzeugung raus)
     assert dashboard.visual_prompts is engine.prompts.visual_prompts
     assert dashboard._image_prompt_chunk is engine.prompts._image_prompt_chunk
     assert dashboard.generate_script is engine.prompts.generate_script

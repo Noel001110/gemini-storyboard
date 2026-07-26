@@ -5,7 +5,6 @@ Enthält (Phase M.5 + M.6, 2026-07-07):
         IMAGE_PROMPT_CHUNK_SIZE, IMAGE_PROMPT_MIN_LEN
     Funktionen:
         _build_image_prompt          — Bild-Prompt zusammensetzen (Scene + Char-Refs + Master)
-        _build_video_prompt          — Video-Prompt zusammensetzen (Veo)
         load_char_refs               — Char-Sheet-Metadaten aus Dateien laden
         analyze_char_image           — LLM-Aufruf: Character-Design-Spec aus Bild
         gen_charsheet                — 5-Pose-Sheet via Bildmodell generieren
@@ -40,7 +39,7 @@ __all__ = [
     "SCRIPT_SYSTEM", "TITLE_SYSTEM", "THUMBNAIL_PROMPT_SYSTEM",
     "SHORTS_SCRIPT_SYSTEM",
     "HOOK_PROMPT_ADDITION",  # Phase L
-    "_build_image_prompt", "_build_video_prompt",
+    "_build_image_prompt",
     "load_char_refs", "analyze_char_image", "gen_charsheet",
     "_anonymized_words", "_validate_image_prompt_entry",
     "_image_prompt_chunk", "_image_prompt_single_retry",
@@ -601,15 +600,6 @@ def _build_image_prompt(scene_prompt, master, char_refs, phase="", is_hook=False
             "the scene text above does not describe a person, draw no person at all — "
             "the people shown in those reference images are not part of this scene.")
     return scene_prompt + char_hint + "\n\n" + master
-
-
-def _build_video_prompt(scene_prompt: str, vid_master: str) -> str:
-    """Append the literal master prompt to the scene action description.
-    Veo only ever sees the final submitted string — it has no access to the
-    dashboard's master prompt field, so the style must be embedded here every
-    time, not just hinted to the LLM that writes the scene description.
-    """
-    return scene_prompt.strip() + "\n\nVISUAL STYLE (apply exactly):\n" + vid_master.strip()
 
 
 # ── Character-Sheets ─────────────────────────────────────────────────────────
