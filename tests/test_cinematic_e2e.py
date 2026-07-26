@@ -3000,30 +3000,20 @@ def t_phase3_log_text_mode_by_default():
     import os
     # Sicherstellen dass LOG_JSON NICHT gesetzt ist
     os.environ.pop("LOG_JSON", None)
-    # Re-import dashboard mit gelöschter Env-Var
-    import importlib, sys
-    if "dashboard" in sys.modules: del sys.modules["dashboard"]
-    if "engine" in sys.modules:
-        for k in list(sys.modules):
-            if k.startswith("engine."): del sys.modules[k]
-        del sys.modules["engine"]
-    import dashboard
-    assert dashboard._LOG_JSON_MODE is False, \
-        f"LOG_JSON_MODE muss False sein wenn Env nicht gesetzt, war: {dashboard._LOG_JSON_MODE}"
+    # Refactor Phase 1: json_mode() liest die Env-Var pro Aufruf (core/logging.py),
+    # kein Modul-Reload mehr nötig, um auf eine geänderte LOG_JSON zu reagieren.
+    from core.logging import json_mode
+    assert json_mode() is False, "json_mode() muss False sein wenn LOG_JSON nicht gesetzt ist"
 
 
 def t_phase3_log_json_mode_via_env():
     """#40: LOG_JSON=1 → JSON-Modus aktiv (für Docker / Log-Aggregation)."""
-    import os, sys, json
+    import os, json
     os.environ["LOG_JSON"] = "1"
-    if "dashboard" in sys.modules: del sys.modules["dashboard"]
-    for k in list(sys.modules):
-        if k.startswith("engine."): del sys.modules[k]
-    if "engine" in sys.modules: del sys.modules["engine"]
     try:
+        from core.logging import json_mode
+        assert json_mode() is True, "json_mode() muss True sein wenn LOG_JSON=1"
         import dashboard
-        assert dashboard._LOG_JSON_MODE is True, \
-            f"LOG_JSON_MODE muss True sein, war: {dashboard._LOG_JSON_MODE}"
         # JSON-Modus-Output prüfen
         import io
         from contextlib import redirect_stdout
@@ -3067,11 +3057,6 @@ def t_phase3_log_serializes_complex_types():
     """#40: JSON-Modus serialisiert auch Listen/Dicts (über json.dumps)."""
     import os
     os.environ["LOG_JSON"] = "1"
-    import sys
-    if "dashboard" in sys.modules: del sys.modules["dashboard"]
-    for k in list(sys.modules):
-        if k.startswith("engine."): del sys.modules[k]
-    if "engine" in sys.modules: del sys.modules["engine"]
     try:
         import dashboard, json, io
         from contextlib import redirect_stdout

@@ -12,9 +12,17 @@ from urllib.parse import urlparse, parse_qs
 # ── Shorts/Upload/Control-Erweiterung: Prefix-Dispatch (siehe routes/__init__.py) ──
 from routes import dispatch, mount
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-CHANNELS_DIR  = os.path.join(HERE, "channels")
-CHANNELS_FILE = os.path.join(CHANNELS_DIR, "channels.json")
+# ── Refactor Phase 1: core/paths.py ist jetzt die Quelle für HERE/CHANNELS_DIR/
+# CHANNELS_FILE + alle reinen Pfad-Helfer (ch_dir/v_out/...). Re-Export hier hält
+# jeden bestehenden Call-Site (`dashboard.HERE`, `dashboard.v_out(...)`, die lazy
+# `import dashboard` in shorts/api.py etc.) unverändert lauffähig.
+from core.paths import (  # noqa: F401
+    HERE, CHANNELS_DIR, CHANNELS_FILE, SHORTS_EXPORT_DIR,
+    ch_dir, ch_master, ch_vid_master, ch_sheets, ch_videos_file,
+    ch_voice_id, ch_voice_settings, ch_youtube_playlist_id,
+    v_dir, v_out, v_plan, v_uploads, v_audio, v_meta, v_script, v_render_tmp,
+    shorts_export_dir,
+)
 
 # ── Phase 2.1 (Schwachstellenbericht #6/#7/#36/#60/#68): Atomare Schreibvorgänge ──
 # Schreibvorgänge auf channels.json, plan.json, videos.json, audio_meta.json u.a.
@@ -255,32 +263,11 @@ _VOICE_JOBS_LOCK = threading.Lock()
 # polling loop would silently orphan (poll a job_id the server has forgotten about).
 MAX_AGE_JOBS_HOURS = 2.0
 
-# Phase 3.4 (#40): Strukturiertes JSON-Logging.
-# Per default wird die menschenlesbare Form ausgegeben (wie vorher), aber per Env-Var
-# LOG_JSON=1 (oder für Docker: in .env) wird automatisch JSON für Log-Aggregation (ELK, Loki).
-# Ersetzt print() nicht 1:1 — neuer Code sollte log_event() nutzen, alte print-Calls
-# bleiben für Backward-Compat. Die _log()-Helper sorgen für konsistentes Format.
-
-import os as _os_log  # für Env-Var-Read
-import json as _json_log
-_LOG_JSON_MODE = _os_log.environ.get("LOG_JSON", "0") == "1"
-
-def _log(level: str, event: str, **fields) -> None:
-    """Strukturierte Log-Zeile. Im JSON-Modus: kompakte JSON-Zeile. Sonst: key=value-Format.
-    Beispiel-Aufruf: _log("INFO", "render_complete", video_id="v1", duration_s=42.5)"""
-    if _LOG_JSON_MODE:
-        out = {"ts": time.time(), "level": level, "event": event, **fields}
-        try:
-            print(_json_log.dumps(out, ensure_ascii=False), flush=True)
-        except (TypeError, ValueError):
-            # Fallback bei nicht-serialisierbaren Werten
-            print(f'{{"ts":{time.time()},"level":"{level}","event":"{event}"}}', flush=True)
-    else:
-        if fields:
-            kvs = " ".join(f"{k}={v!r}" for k, v in fields.items())
-            print(f"  [{level}] {event} {kvs}", flush=True)
-        else:
-            print(f"  [{level}] {event}", flush=True)
+# Refactor Phase 1: die _log()-Implementierung (Phase 3.4, #40 — strukturiertes
+# JSON-Logging per LOG_JSON=1, sonst menschenlesbares key=value-Format) lebt jetzt
+# in core/logging.py, damit auch engine/routes/workers sie ohne `import dashboard`
+# erreichen können. Re-Export hält die 3 bestehenden _log(...)-Call-Sites unverändert.
+from core.logging import log_event as _log  # noqa: F401
 
 # Phase 3.4: Health-Endpoint braucht Server-Uptime und Git-Commit (für Monitoring)
 _START_TIME = time.time()
@@ -370,30 +357,9 @@ def _start_job_cleanup_daemon():
                 print(f"  [Cleanup] Fehler: {e}", flush=True)
     threading.Thread(target=loop, daemon=True).start()
 
-# ── Per-channel path helpers (channel = brand/style, holds N videos) ──────────
-def ch_dir(cid):        return os.path.join(CHANNELS_DIR, cid)
-def ch_master(cid):     return os.path.join(ch_dir(cid), "master_prompt.txt")
-def ch_vid_master(cid): return os.path.join(ch_dir(cid), "video_master_prompt.txt")
-def ch_sheets(cid, vid=None):
-    # July 2026: charsheets are now per-video. Each video gets its own pool
-    # (channels/<cid>/videos/<vid>/charsheets/) so unrelated videos can't contaminate
-    # each other (e.g. Theranos script seeing Jamal-Khashoggi charsheets).
-    # When vid is given, return the per-video path (callers that need to write
-    # must os.makedirs() the dir themselves). Without vid, fall back to the
-    # channel-global pool for backwards-compat with old data and old call sites.
-    if vid:
-        return os.path.join(v_dir(cid, vid), "charsheets")
-    return os.path.join(ch_dir(cid), "charsheets")
-def ch_videos_file(cid):return os.path.join(ch_dir(cid), "videos.json")
-# ElevenLabs voiceover persistence (Phase 1) — one voice_id and one settings block per
-# channel, applied to every video unless the video carries its own override later
-# (Phase 1 keeps it channel-scoped only).
-def ch_voice_id(cid):       return os.path.join(ch_dir(cid), "voice_id.txt")
-def ch_voice_settings(cid): return os.path.join(ch_dir(cid), "voice_settings.json")
-# Upload-Erweiterung: optionale Ziel-Playlist pro Kanal (rohe Playlist-ID, leere/
-# fehlende Datei = keine Zuordnung) -- gilt für Longform UND alle Shorts-Varianten
-# dieses Kanals, gleiche Text-Datei-Konvention wie ch_voice_id oben.
-def ch_youtube_playlist_id(cid): return os.path.join(ch_dir(cid), "youtube_playlist_id.txt")
+# Reine Pfad-Helfer (ch_dir/ch_master/.../v_dir/v_out/.../shorts_export_dir) leben
+# jetzt in core/paths.py und werden oben re-exportiert (Refactor Phase 1) -- hier
+# bleiben nur die Funktionen mit echter I/O (Datei lesen/schreiben/kopieren).
 def get_channel_style_refs(cid: str) -> list:
     """Style-Reference-Images: defines the global look (line weight, palette, render
     style) for image generation. Bis zu 3 Referenzbilder (Audit Juli 2026, Bereich 3
@@ -414,20 +380,6 @@ def get_channel_style_ref(cid: str) -> str:
     refs = get_channel_style_refs(cid)
     return refs[0] if refs else ""
 
-# ── Per-video path helpers (one video = one script/plan/generated set) ────────
-def v_dir(cid, vid):     return os.path.join(ch_dir(cid), "videos", vid)
-def v_out(cid, vid):     return os.path.join(v_dir(cid, vid), "generated")
-def v_plan(cid, vid):    return os.path.join(v_out(cid, vid), "plan.json")
-def v_uploads(cid, vid): return os.path.join(v_dir(cid, vid), "uploads")
-def v_audio(cid, vid):   return os.path.join(v_uploads(cid, vid), "audio_meta.json")
-
-# Juli 2026 (User-Wunsch "Shorts in einen extra Ordner, nach Video sortiert, zum
-# Weiterleiten"): eigener Top-Level-Ordner (Geschwister von channels/), NICHT unter
-# channels/<cid>/videos/<vid>/generated/ -- dort liegen die fertigen Shorts bisher
-# vermischt mit 70+ Szenenbildern, render_tmp/ etc., unpraktisch zum schnellen Finden.
-SHORTS_EXPORT_DIR = os.path.join(HERE, "shorts_export")
-def shorts_export_dir(cid, vid): return os.path.join(SHORTS_EXPORT_DIR, cid, vid)
-
 
 def export_short_copy(cid: str, vid: str, src_path: str, out_name: str) -> str | None:
     """Kopiert einen fertigen Short nach shorts_export/<cid>/<vid>/<out_name> -- best
@@ -444,12 +396,6 @@ def export_short_copy(cid: str, vid: str, src_path: str, out_name: str) -> str |
     except Exception as e:
         print(f"  [ShortsExport] Kopieren fehlgeschlagen ({src_path} -> {out_name}): {e}", flush=True)
         return None
-def v_meta(cid, vid):    return os.path.join(v_dir(cid, vid), "meta.json")  # titles, thumbnail prompt
-def v_script(cid, vid):  return os.path.join(v_dir(cid, vid), "script.json")  # raw narration, survives sessions
-# Deliberately separate from v_out()/generated/ — the render worker rmtree()s this
-# directory after a successful render, and that must NEVER be able to reach the folder
-# holding the actual generated images/videos.
-def v_render_tmp(cid, vid): return os.path.join(v_dir(cid, vid), "render_tmp")
 
 # Struktur-/Schnitt-Review (Juli 2026): SCRIPT_SYSTEM behauptet "~120-150 wpm", real
 # gemessen an zwei fertigen Videos waren es 164-188 wpm (bis zu 24 wpm Unterschied
