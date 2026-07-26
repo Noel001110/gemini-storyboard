@@ -2,7 +2,7 @@
 """Localhost-Dashboard für die Storyboard-Bildgenerierung.
 Nur Python-Standardlib. Start: python3 dashboard.py [--port 8010]
 """
-import os, re, sys, json, time, base64, zipfile, io, threading, concurrent.futures
+import os, re, sys, json, time, base64, threading
 import urllib.request, urllib.error, subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -2236,59 +2236,6 @@ class H(BaseHTTPRequestHandler):
         # bestehende dashboard.html gemischt, da kanal-/video-übergreifend statt pro-Video.
         if p == "/control":
             return self._send(200, open(os.path.join(HERE, "control.html"), encoding="utf-8").read(), "text/html; charset=utf-8")
-        # Phase 38: Stil-Presets abfragen (für UI-Dropdown)
-        if p == "/api/job_status":
-            job_id = qs.get("job_id", [""])[0]
-            return self._send(200, JOBS.get(job_id, {"status": "unknown"}))
-        # Phase 3.4 (Schwachstellenbericht #38): Health-Endpoint für Docker/LB-Monitoring
-        if p == "/health" or p == "/api/health":
-            uptime_sec = time.time() - _START_TIME
-            active_jobs = sum(1 for v in JOBS.values() if v.get("status") == "running")
-            with _BATCH_JOBS_LOCK:
-                active_batches = sum(1 for v in BATCH_JOBS.values() if v and v.get("running"))
-            with _RENDER_JOBS_LOCK:
-                active_renders = sum(1 for v in RENDER_JOBS.values() if v and v.get("running"))
-            return self._send(200, {
-                "status": "ok" if not _SHUTDOWN_IN_PROGRESS else "shutting_down",
-                "uptime_sec": round(uptime_sec, 1),
-                "active_jobs": active_jobs,
-                "active_batches": active_batches,
-                "active_renders": active_renders,
-                "version": "main/" + (_CURRENT_GIT_COMMIT[:7] if _CURRENT_GIT_COMMIT else "unknown"),
-            })
-        if p == "/api/measure_wpm":
-            # Struktur-/Schnitt-Review Juli 2026: gibt die reale, aus bereits fertigen
-            # Videos DIESES Kanals gemessene Sprechrate zurück (statt der festen 150/160-
-            # Annahme) -- Frontend nutzt das als informierten Default fürs #wpm-Feld.
-            measured = _measure_channel_wpm(cid, fallback=None)
-            return self._send(200, {
-                "wpm": round(measured, 1) if measured is not None else None,
-                "measured": measured is not None,
-            })
-        if p == "/api/download":
-            ts_map = {}
-            try:
-                plan = json.load(open(v_plan(cid, vid)))
-                for s in plan.get("scenes", []):
-                    t = s.get("t", "").replace(":", "-")
-                    ts_map[f"{s['i']:03d}.jpg"] = f"{t}.jpg"
-                    ts_map[f"{s['i']:03d}.png"] = f"{t}.png"
-            except: pass
-            buf = io.BytesIO()
-            with zipfile.ZipFile(buf, "w") as z:
-                for f in sorted(os.listdir(v_out(cid, vid))):
-                    if f.endswith(".png") or f.endswith(".jpg"):
-                        z.write(os.path.join(v_out(cid, vid), f), ts_map.get(f, f))
-            return self._send(200, buf.getvalue(), "application/zip")
-        if p.startswith("/generated/"):
-            fp = os.path.join(v_out(cid, vid), os.path.basename(p))
-            if os.path.exists(fp):
-                b = open(fp, "rb").read()
-                name = os.path.basename(fp)
-                if name.endswith(".mp4"):
-                    return self._send(200, b, "video/mp4")
-                return self._send(200, b, "image/jpeg" if b[:2] == b"\xff\xd8" else "image/png")
-            return self._send(404, {"error": "not found"})
         if p == "/api/charsheets":
             # vid aus Query-String: /api/charsheets?channel=...&vid=...
             qs = parse_qs(urlparse(self.path).query)
@@ -2975,6 +2922,7 @@ def main():
     import routes.render
     import routes.produce
     import routes.voiceover
+    import routes.misc
     import store.db as store_db
     # Refactor Phase 4 (Teil 1-5): Route-Gruppen aus dem dashboard.py-Handler
     # ausgelagert. Reihenfolge unkritisch -- Präfixe überschneiden sich nicht
@@ -3020,6 +2968,12 @@ def main():
     mount("/api/voiceover_delete", routes.voiceover)
     mount("/api/voiceover_preview", routes.voiceover)
     mount("/api/voiceover_generate", routes.voiceover)
+    mount("/api/job_status", routes.misc)
+    mount("/health", routes.misc)
+    mount("/api/health", routes.misc)
+    mount("/api/measure_wpm", routes.misc)
+    mount("/api/download", routes.misc)
+    mount("/generated/", routes.misc)
     mount("/api/shorts/", shorts.api)
     mount("/api/youtube/", youtube.api)
     mount("/api/control/", control.api)
