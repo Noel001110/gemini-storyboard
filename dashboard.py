@@ -2272,19 +2272,6 @@ class H(BaseHTTPRequestHandler):
                 "active_renders": active_renders,
                 "version": "main/" + (_CURRENT_GIT_COMMIT[:7] if _CURRENT_GIT_COMMIT else "unknown"),
             })
-        if p == "/api/generate_all_status":
-            with _BATCH_JOBS_LOCK:
-                state = BATCH_JOBS.get((cid, vid))
-            return self._send(200, state or {"running": False})
-        if p == "/api/render_status":
-            target = qs.get("target", ["longform"])[0]
-            with _RENDER_JOBS_LOCK:
-                state = RENDER_JOBS.get((cid, vid, target))
-            return self._send(200, state or {"running": False})
-        if p == "/api/produce_status":
-            with _PRODUCE_JOBS_LOCK:
-                state = PRODUCE_JOBS.get((cid, vid))
-            return self._send(200, state or {"running": False})
         if p == "/api/measure_wpm":
             # Struktur-/Schnitt-Review Juli 2026: gibt die reale, aus bereits fertigen
             # Videos DIESES Kanals gemessene Sprechrate zurück (statt der festen 150/160-
@@ -2294,13 +2281,7 @@ class H(BaseHTTPRequestHandler):
                 "wpm": round(measured, 1) if measured is not None else None,
                 "measured": measured is not None,
             })
-        if p == "/api/transcribe_status":
-            return self._send(200, dict(TX_STATUS))
         # ElevenLabs voiceover endpoints (Phase 1) --------------------------------
-        if p == "/api/voiceover_status":
-            with _VOICE_JOBS_LOCK:
-                state = VOICE_JOBS.get((cid, vid))
-            return self._send(200, state or {"running": False})
         if p == "/api/elevenlabs_voices":
             # Lists library voices + any cloned voices the account owns (account-only;
             # no env fallback here — without a key the user just gets an empty list,
@@ -2380,14 +2361,6 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send(500, {"error": f"Audio-Serve fehlgeschlagen: {e}"})
 
-        if p == "/api/plan_status":
-            with _PLAN_JOBS_LOCK:
-                state = PLAN_JOBS.get((cid, vid))
-            return self._send(200, state or {"running": False})
-        if p == "/api/thumbnail_status":
-            with _THUMB_JOBS_LOCK:
-                state = THUMB_JOBS.get((cid, vid))
-            return self._send(200, state or {"running": False})
         if p == "/api/download":
             ts_map = {}
             try:
@@ -3492,8 +3465,9 @@ def main():
     import routes.channels
     import routes.video_settings
     import routes.video_meta
+    import routes.job_status
     import store.db as store_db
-    # Refactor Phase 4 (Teil 1-3): Route-Gruppen aus dem dashboard.py-Handler
+    # Refactor Phase 4 (Teil 1-4): Route-Gruppen aus dem dashboard.py-Handler
     # ausgelagert. Reihenfolge unkritisch -- Präfixe überschneiden sich nicht
     # mit shorts/youtube/control.
     mount("/api/channels", routes.channels)
@@ -3513,6 +3487,13 @@ def main():
     mount("/api/select_title", routes.video_meta)
     mount("/api/save_script", routes.video_meta)
     mount("/api/save_idea", routes.video_meta)
+    mount("/api/generate_all_status", routes.job_status)
+    mount("/api/render_status", routes.job_status)
+    mount("/api/produce_status", routes.job_status)
+    mount("/api/plan_status", routes.job_status)
+    mount("/api/thumbnail_status", routes.job_status)
+    mount("/api/voiceover_status", routes.job_status)
+    mount("/api/transcribe_status", routes.job_status)
     mount("/api/shorts/", shorts.api)
     mount("/api/youtube/", youtube.api)
     mount("/api/control/", control.api)
