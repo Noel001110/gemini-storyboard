@@ -1,20 +1,23 @@
 """routes/job_status.py — Prefix /api/generate_all_status, /api/render_status,
-/api/produce_status, /api/plan_status, /api/thumbnail_status,
+/api/produce_status, /api/plan_status(_reset), /api/thumbnail_status,
 /api/voiceover_status, /api/transcribe_status.
 
-Vierte Route-Gruppe aus dem dashboard.py-Handler (Refactor Phase 4, Teil 4).
-Reine Read-Only-Statusabfragen auf die noch nicht migrierten globalen
-Job-Dicts+Locks in dashboard.py (BATCH_JOBS/RENDER_JOBS/PRODUCE_JOBS/
-PLAN_JOBS/THUMB_JOBS/VOICE_JOBS/TX_STATUS, siehe CLAUDE.md "JobRegistry —
-wann einsetzen" fürs bewusste Nicht-Migrieren dieser Dicts) -- kein
-Worker-Thread wird hier gestartet, kein externer API-Call, gleiche
-Risikoklasse wie Teil 1-3.
+Vierte Route-Gruppe aus dem dashboard.py-Handler (Refactor Phase 4, Teil 4;
+/api/plan_status_reset kam in Teil 8 dazu). Reine Read-Only-Statusabfragen auf
+die noch nicht migrierten globalen Job-Dicts+Locks in dashboard.py
+(BATCH_JOBS/RENDER_JOBS/PRODUCE_JOBS/PLAN_JOBS/THUMB_JOBS/VOICE_JOBS/
+TX_STATUS, siehe CLAUDE.md "JobRegistry — wann einsetzen" fürs bewusste
+Nicht-Migrieren dieser Dicts) -- kein Worker-Thread wird hier gestartet, kein
+externer API-Call, gleiche Risikoklasse wie Teil 1-3.
 
-Achtung Präfix-Überschneidung: "/api/plan_status" ist Präfix von
-"/api/plan_status_reset" (bleibt bewusst in dashboard.py, gehört zur
-Plan-Generierung). dispatch() matched trotzdem korrekt, weil handle() unten
-den Pfad exakt vergleicht -- bei "/api/plan_status_reset" liefert das (False,
-None) zurück und dashboard.py's do_POST-Kette greift wie bisher.
+Präfix-Falle: "/api/plan_status" ist ein String-Präfix von
+"/api/plan_status_reset". routes/__init__.py:dispatch() matched den ERSTEN
+registrierten Präfix -- ein Modul, das für einen nicht-exakt-passenden Pfad
+(False, None) zurückgibt, fällt NICHT zum nächsten Mount durch. Deshalb muss
+/api/plan_status_reset HIER (gleiche Präfix-Familie) landen, nicht in
+routes/plan.py (siehe dessen Docstring für die volle Erklärung) -- sonst
+würde entweder GET /api/plan_status oder POST /api/plan_status_reset je nach
+Mount-Reihenfolge ins Leere laufen.
 
 "/api/transcribe_status" existiert im alten Handler doppelt (GET UND POST,
 identischer Body) -- hier wird nur die GET-Variante gezogen; die (bereits vor
@@ -27,6 +30,13 @@ from __future__ import annotations
 
 
 def handle(method, path, handler, qs, cid, vid, body):
+    if method == "POST" and path == "/api/plan_status_reset":
+        import dashboard
+        with dashboard._PLAN_JOBS_LOCK:
+            dashboard.PLAN_JOBS.pop((cid, vid), None)
+        handler._send(200, {"ok": True})
+        return True, None
+
     if method != "GET":
         return False, None
 

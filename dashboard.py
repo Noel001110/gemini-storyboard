@@ -2275,9 +2275,6 @@ class H(BaseHTTPRequestHandler):
                 "measured": measured is not None,
             })
         # ElevenLabs voiceover endpoints (Phase 1) --------------------------------
-        if p == "/api/plan":
-            try:    return self._send(200, json.load(open(v_plan(cid, vid))))
-            except: return self._send(200, {"scenes": []})
         if p == "/api/voiceover_file":
             # Juli 2026 (User-Report: "generiertes Voiceover wird im Frontend nicht
             # angezeigt"): bis jetzt hatte der Server keinen Endpunkt der die
@@ -2377,41 +2374,6 @@ class H(BaseHTTPRequestHandler):
         handled, _ = dispatch("POST", p, self, _qs, cid, vid, d)
         if handled:
             return
-
-        # ── Thumbnail generator ───────────────────────────────────────────────
-        # ── Scene plan ────────────────────────────────────────────────────────
-        if p == "/api/plan":
-            wpm = float(d.get("wpm", 150)); sec = float(d.get("sec", 4))
-            text = clean_script(d.get("script", ""))
-            if not text: return self._send(200, {"scenes": []})
-            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
-            
-            # Script speichern! Wenn der User klickt und sofort reloadet, bricht der Timeout ab
-            try:
-                payload = {
-                    "text": d.get("script", ""),
-                    "language": d.get("language", "de"),
-                    "preset": d.get("preset", "flat_cartoon_doc"),
-                    "updatedAt": int(time.time()),
-                }
-                save_v_script(cid, vid, payload)
-            except Exception as e:
-                print(f"WARNUNG: /api/plan Skript speichern: {e}", flush=True)
-
-            key = (cid, vid)
-            with _PLAN_JOBS_LOCK:
-                if PLAN_JOBS.get(key, {}).get("running"):
-                    return self._send(200, {"ok": True, "already_running": True})
-                # Set running=True atomically with the check, before the worker thread
-                # exists — same fix as the image batch job race (see generate_all_start).
-                PLAN_JOBS[key] = {"running": True, "step": "Startet …", "error": None, "done": False}
-            threading.Thread(target=_plan_generate_worker, args=(cid, vid, text, wpm, sec), daemon=True).start()
-            return self._send(200, {"ok": True, "already_running": False})
-
-        if p == "/api/plan_status_reset":
-            with _PLAN_JOBS_LOCK:
-                PLAN_JOBS.pop((cid, vid), None)
-            return self._send(200, {"ok": True})
 
         # ── Generate T2V scene ────────────────────────────────────────────────
         # ── Preview T2V prompt without generating video ────────────────────────
@@ -3304,6 +3266,7 @@ def main():
     import routes.voice
     import routes.script_gen
     import routes.thumbnail
+    import routes.plan
     import store.db as store_db
     # Refactor Phase 4 (Teil 1-5): Route-Gruppen aus dem dashboard.py-Handler
     # ausgelagert. Reihenfolge unkritisch -- Präfixe überschneiden sich nicht
@@ -3338,6 +3301,7 @@ def main():
     mount("/api/generate_script", routes.script_gen)
     mount("/api/generate_titles", routes.script_gen)
     mount("/api/generate_thumbnail", routes.thumbnail)
+    mount("/api/plan", routes.plan)
     mount("/api/shorts/", shorts.api)
     mount("/api/youtube/", youtube.api)
     mount("/api/control/", control.api)
