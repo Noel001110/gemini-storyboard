@@ -460,7 +460,12 @@
     <!-- Schritt ① — Thema & Idee -->
     <div class="card" data-step-section="1" style="padding:18px 20px">
       <h2>① Thema &amp; Idee</h2>
-      <div class="row" style="align-items:center;gap:16px;margin-bottom:14px;">
+      <!-- T2V/Video-Modus: aus dem sichtbaren Flow entfernt (Frontend-Track, Nutzerentscheid
+           "komplett raus aus der UI"). Backend (genVideo/genT2V/previewPrompt, CURRENT_MODE
+           === 'video'-Zweige) bleibt unangetastet -- CURRENT_MODE wird ausschließlich über
+           setMode() aus diesen zwei Buttons gesetzt (kein anderer Codepfad tut das), ohne
+           den Umschalter ist der Video-Pfad also nicht mehr erreichbar, nicht nur versteckt. -->
+      <div class="row" style="align-items:center;gap:16px;margin-bottom:14px;display:none">
         <strong style="font-size:13px">Modus:</strong>
         <div class="seg">
           <button id="modeBtnImg" class="sel" onclick="setMode('image')">📷 Bild</button>
@@ -468,7 +473,7 @@
         </div>
         <span class="hint" id="modeHint">Bilder werden generiert, Videos optional per I2V</span>
       </div>
-      
+
       <div style="margin-bottom:14px;">
         <label class="block text-xs font-semibold text-app-mut uppercase tracking-wide mb-2">Thema / Roh-Idee</label>
         <textarea id="ideaInput" rows="2" placeholder="Beschreibe kurz die Video-Idee oder das Thema..." style="width:100%;margin-top:6px;" oninput="saveIdea()"></textarea>
@@ -729,9 +734,12 @@
       </div>
     </div>
 
-    <!-- Schritt ④ — Bilder generieren (erscheint erst, sobald ein Szenen-Plan existiert) -->
-    <div id="planArea" data-step-section="4" style="display:none">
-      <h2 style="font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:0 0 12px;font-weight:700">③ Bilder generieren</h2>
+    <!-- Schritt ④ — Bilder generieren (erscheint erst, sobald ein Szenen-Plan existiert).
+         class="card" ergänzt (Frontend-Track, "aus einem Guss"): fehlte vorher als einzige
+         Step-Section -- der Header hatte deshalb einen manuell duplizierten Inline-Style
+         (identisch zur .card h2-Regel), aber Rahmen/Padding/Schatten der Karte fehlten. -->
+    <div id="planArea" data-step-section="4" class="card" style="display:none">
+      <h2>④ Bilder generieren</h2>
       <div id="batchStatusBar" style="display:none;align-items:center;gap:10px;padding:10px 14px;border-radius:var(--radius);margin-bottom:10px;background:var(--acc-soft);border:1px solid var(--acc);font-weight:600;font-size:13px;color:var(--acc)">
         <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--acc);animation:pulse 1.2s ease-in-out infinite"></span>
         <span id="batchStatusText">Generiert gerade …</span>
@@ -817,8 +825,8 @@
          Videos (Strategie A -- neu croppen/schwenken derselben Bilder für 9:16, kein
          eigener Skript-/Bild-Pfad). Braucht deshalb zwingend ein fertiges final.mp4
          (start_aligned pro Szene), siehe updateShortsCardVisibility(). -->
-    <div class="card" id="shortsCard" data-step-section="6" style="display:none">
-      <h2>⑥ Short-Version (9:16)</h2>
+    <div class="card" id="shortsCard" style="display:none">
+      <h2>Klimax-Short (9:16, Legacy)</h2>
       <p class="hint" id="shortsHint" style="margin-bottom:10px">Erst Longform-Video fertig rendern</p>
 
       <div class="steps" id="shortsSteps" style="display:none;flex-wrap:wrap;margin-bottom:10px">
@@ -886,7 +894,7 @@
          Aufhänger pro Short) -- Bilder werden aus dem Longform-Bildpool wiederverwendet.
          Zweistufig, wie ein Review-Gate vor dem teuren Teil: erst Skripte generieren +
          bestätigen (editierbar, exakt wie #titleListStep), DANN erst TTS + Render. -->
-    <div class="card" id="hookShortsCard" style="display:none">
+    <div class="card" id="hookShortsCard" data-step-section="6" style="display:none">
       <h2>⑥ Hook-Shorts (eigenständige Skripte)</h2>
       <p class="hint" id="hookScriptsHint" style="margin-bottom:10px">
         Erzeugt mehrere eigenständige Short-Skripte mit eigenem Hook/Voiceover, die dieses
