@@ -2253,26 +2253,6 @@ class H(BaseHTTPRequestHandler):
         if p == "/control":
             return self._send(200, open(os.path.join(HERE, "control.html"), encoding="utf-8").read(), "text/html; charset=utf-8")
         # Phase 38: Stil-Presets abfragen (für UI-Dropdown)
-        if p == "/api/presets":
-            from engine.presets import PRESET_MASTERS, PRESET_DESCRIPTIONS, DEFAULT_PRESET
-            return self._send(200, {
-                "presets": [
-                    {"id": pid, "description": PRESET_DESCRIPTIONS[pid]}
-                    for pid in PRESET_MASTERS
-                ],
-                "default": DEFAULT_PRESET,
-            })
-        if p == "/api/char_ref":
-            # Audit Juli 2026 (Bereich 3): style_ref_url.txt kann jetzt mehrzeilig sein
-            # (bis zu 3 Refs) -- über get_channel_style_ref() lesen statt raw, sonst
-            # würde diese Legacy-Route eine gejointe Mehrzeilen-URL zurückgeben.
-            return self._send(200, {"url": get_channel_style_ref(cid)})
-        if p == "/api/get_mode":
-            return self._send(200, {"mode": get_video_mode(cid, vid)})
-        if p == "/api/vid_master":
-            try:    txt = open(ch_vid_master(cid)).read()
-            except: txt = VIDEO_MASTER_DEFAULT
-            return self._send(200, {"master": txt})
         if p == "/api/job_status":
             job_id = qs.get("job_id", [""])[0]
             return self._send(200, JOBS.get(job_id, {"status": "unknown"}))
@@ -2413,20 +2393,6 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, {"tts_provider": s.get("tts_provider", "elevenlabs")})
         if p == "/api/elevenlabs_settings":
             return self._send(200, load_voice_settings(cid))
-        if p == "/api/master":
-            return self._send(200, {"master": read_master(cid)})
-        if p == "/api/image_model":
-            return self._send(200, {"model": get_video_image_model(cid, vid), "options": list(VALID_IMAGE_MODELS)})
-        if p == "/api/style_ref":
-            # Channel-level reference image(s). The frontend (openChannelSettings,
-            # loadStyleRefStatus) calls /api/style_ref — the file is owned by the
-            # channel (channels/<cid>/style_ref.png + .txt), not the video. Audit
-            # Juli 2026 (Bereich 3): bis zu 3 Refs -- "urls" ist die Liste (Quelle der
-            # Wahrheit), "url" bleibt für alte Frontend-Versionen als erster Eintrag.
-            urls = get_channel_style_refs(cid)
-            return self._send(200, {"urls": urls, "url": urls[0] if urls else ""})
-        if p == "/api/overlay_opts":
-            return self._send(200, get_video_overlay_opts(cid, vid))
         if p == "/api/plan":
             try:    return self._send(200, json.load(open(v_plan(cid, vid))))
             except: return self._send(200, {"scenes": []})
@@ -2554,19 +2520,6 @@ class H(BaseHTTPRequestHandler):
             # (zufällig) oder halt Müll sein. User sieht es im Dropdown.
             save_voice_settings(cid, s)
             return self._send(200, {"ok": True, "tts_provider": new_provider})
-
-        # ── Master prompt ─────────────────────────────────────────────────────
-        if p == "/api/master":
-            write_master(cid, d.get("master", ""))
-            return self._send(200, {"ok": True})
-        if p == "/api/image_model":
-            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
-            set_video_image_model(cid, vid, d.get("model", "nano-banana-2"))
-            return self._send(200, {"ok": True})
-        if p == "/api/overlay_opts":
-            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
-            set_video_overlay_opts(cid, vid, d.get("opts", {}))
-            return self._send(200, {"ok": True})
 
         # ── Script generator (global, no channel needed) ──────────────────────
         if p == "/api/generate_script":
@@ -2722,19 +2675,6 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/plan_status_reset":
             with _PLAN_JOBS_LOCK:
                 PLAN_JOBS.pop((cid, vid), None)
-            return self._send(200, {"ok": True})
-
-        # ── Mode toggle ───────────────────────────────────────────────────────
-        if p == "/api/set_mode":
-            mode = d.get("mode", "image")
-            if mode not in ("image", "video"): mode = "image"
-            set_video_mode(cid, vid, mode)
-            return self._send(200, {"ok": True, "mode": mode})
-
-        # ── Video master prompt ───────────────────────────────────────────────
-        if p == "/api/vid_master":
-            txt = d.get("master", "").strip()
-            open(ch_vid_master(cid), "w").write(txt)
             return self._send(200, {"ok": True})
 
         # ── Generate T2V scene ────────────────────────────────────────────────
@@ -3641,12 +3581,22 @@ def main():
     # gesamte Gebiet ab, ohne den Rest anzufassen (siehe routes/__init__.py).
     import shorts.api, youtube.api, control.api
     import routes.channels
+    import routes.video_settings
     import store.db as store_db
-    # Refactor Phase 4 (Teil 1): erste Route-Gruppe (Channel/Video-CRUD) aus
-    # dem dashboard.py-Handler ausgelagert. Reihenfolge unkritisch -- Präfixe
-    # überschneiden sich nicht mit shorts/youtube/control.
+    # Refactor Phase 4 (Teil 1+2): Route-Gruppen aus dem dashboard.py-Handler
+    # ausgelagert. Reihenfolge unkritisch -- Präfixe überschneiden sich nicht
+    # mit shorts/youtube/control.
     mount("/api/channels", routes.channels)
     mount("/api/videos", routes.channels)
+    mount("/api/presets", routes.video_settings)
+    mount("/api/char_ref", routes.video_settings)
+    mount("/api/get_mode", routes.video_settings)
+    mount("/api/set_mode", routes.video_settings)
+    mount("/api/vid_master", routes.video_settings)
+    mount("/api/master", routes.video_settings)
+    mount("/api/image_model", routes.video_settings)
+    mount("/api/style_ref", routes.video_settings)
+    mount("/api/overlay_opts", routes.video_settings)
     mount("/api/shorts/", shorts.api)
     mount("/api/youtube/", youtube.api)
     mount("/api/control/", control.api)
