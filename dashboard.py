@@ -208,7 +208,6 @@ from engine.prompts import (  # noqa: F401,F403
     visual_prompts,
     generate_script, generate_titles,
     make_thumbnail_prompt, gen_thumbnail_image,
-    make_thumbnail_text, composite_thumbnail_text,
 )
 
 # ── Phase Q + 38: Stil-Presets nach engine/presets.py ─────────────────────────
@@ -2277,69 +2276,11 @@ def _plan_generate_worker(cid: str, vid: str, text: str, wpm: float, sec: float)
             PLAN_JOBS[key] = {"running": False, "step": "Fehler", "error": str(e), "done": False, "ts": time.time()}
 
 
-def _thumbnail_generate_worker(cid: str, vid: str, full_script: str, master_style: str,
-                                chosen_title: str = ""):
-    """Runs the thumbnail prompt-build + KIE image generation off the request thread.
-    Mirrors _plan_generate_worker: the client polls /api/thumbnail_status. The heavy
-    call (gen_thumbnail_image) does KIE submit+poll+download and can take 30-60s.
-
-    Juli 2026 (User-Report "Thumbnails sehen schlecht aus, brauchen fetten Text +
-    3D-Tiefeneffekt wie [Referenz-Kanal]"): make_thumbnail_text() + composite_thumbnail_text()
-    existierten schon in engine/prompts.py, wurden aber nirgends aufgerufen -- das fertige
-    KI-Bild ging bisher OHNE jeden Text direkt raus. Jetzt Pflichtschritt nach dem Bild."""
-    key = (cid, vid)
-    try:
-        with _THUMB_JOBS_LOCK:
-            THUMB_JOBS[key]["step"] = "Generiere Prompt …"
-        print("  [Thumbnail] Generiere Prompt …", flush=True)
-        prompt = make_thumbnail_prompt(full_script, master_style)
-        print(f"  [Thumbnail] Prompt: {prompt[:120]} …", flush=True)
-        with _THUMB_JOBS_LOCK:
-            THUMB_JOBS[key]["step"] = "Warte auf Bild-Slot …"
-        IMAGE_GEN_SEMAPHORE.acquire()
-        print("  [Thumbnail] Semaphore erhalten, submitte an KIE …", flush=True)
-        with _THUMB_JOBS_LOCK:
-            THUMB_JOBS[key]["step"] = "Erzeuge Bild bei KIE …"
-        style_ref_urls = get_channel_style_refs(cid)
-        try:
-            res = gen_thumbnail_image(prompt, master_style, os.path.join(v_out(cid, vid), "thumbnail.jpg"),
-                                       model=get_video_image_model(cid, vid),
-                                       ref_urls=style_ref_urls or None)
-        finally:
-            IMAGE_GEN_SEMAPHORE.release()
-        if not res["ok"]:
-            print(f"  [Thumbnail] Fehler: {res['error']}", flush=True)
-            with _THUMB_JOBS_LOCK:
-                THUMB_JOBS[key] = {"running": False, "step": "Fehler", "error": res["error"],
-                                   "done": False, "file": None, "prompt": None, "ts": time.time()}
-            return
-        print(f"  [Thumbnail] Bild fertig → {res['file']}", flush=True)
-
-        thumb_text = ""
-        with _THUMB_JOBS_LOCK:
-            THUMB_JOBS[key]["step"] = "Komponiere Text …"
-        try:
-            thumb_text = make_thumbnail_text(full_script, chosen_title)
-            composite_thumbnail_text(os.path.join(v_out(cid, vid), "thumbnail.jpg"), thumb_text)
-            print(f"  [Thumbnail] Text komponiert: \"{thumb_text}\"", flush=True)
-        except Exception as e:
-            # Text-Compositing ist ein Nice-to-have obendrauf -- ein Fehler hier darf das
-            # bereits fertige, gültige KI-Bild nicht verwerfen (graceful degradation).
-            import traceback; traceback.print_exc()
-            print(f"  [Thumbnail] Text-Compositing fehlgeschlagen (Bild bleibt ohne Text): {e}", flush=True)
-
-        meta = load_v_meta(cid, vid)
-        meta["thumbnail_prompt"] = prompt
-        meta["thumbnail_text"] = thumb_text
-        save_v_meta(cid, vid, meta)
-        with _THUMB_JOBS_LOCK:
-            THUMB_JOBS[key] = {"running": False, "step": "Fertig", "error": None, "done": True,
-                               "file": res["file"], "prompt": prompt, "ts": time.time()}
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        with _THUMB_JOBS_LOCK:
-            THUMB_JOBS[key] = {"running": False, "step": "Fehler", "error": str(e),
-                               "done": False, "file": None, "prompt": None, "ts": time.time()}
+# Refactor Phase 3: nach workers/thumbnail.py verschoben (lazy `import dashboard`
+# für die verbliebenen God-Modul-Helfer, siehe workers/__init__.py). Re-Export hält
+# den bestehenden threading.Thread(target=_thumbnail_generate_worker, ...)-Call-Site
+# unverändert lauffähig.
+from workers.thumbnail import run as _thumbnail_generate_worker  # noqa: F401
 
 
 # ---------- Phase 4.5: Ein-Knopf-Orchestrator ----------
