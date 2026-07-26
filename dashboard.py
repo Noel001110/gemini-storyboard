@@ -2385,47 +2385,6 @@ class H(BaseHTTPRequestHandler):
         if handled:
             return
 
-        # ── Script generator (global, no channel needed) ──────────────────────
-        if p == "/api/generate_script":
-            raw = d.get("text", "").strip()
-            lang = d.get("lang", "de")
-            if not raw:
-                return self._send(400, {"error": "Kein Text eingegeben."})
-            try:
-                print(f"  [Script] {lang.upper()} ({len(raw)} Zeichen) …", flush=True)
-                return self._send(200, {"ok": True, "script": generate_script(raw, lang)})
-            except Exception as e:
-                import traceback; traceback.print_exc()
-                return self._send(500, {"error": str(e)})
-
-        # ── Title generator ──────────────────────────────────────────────────
-        if p == "/api/generate_titles":
-            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
-            # Versuche das Skript zu lesen
-            full_script = ""
-            try:
-                plan = json.load(open(v_plan(cid, vid)))
-                full_script = " ".join(s.get("text", "") for s in plan["scenes"])
-            except:
-                pass
-            
-            # Falls kein Skript da ist, nimm die Idee aus meta.json
-            if not full_script.strip():
-                meta = load_v_meta(cid, vid)
-                full_script = meta.get("idea", "")
-                
-            if not full_script.strip():
-                return self._send(400, {"error": "Kein Skript und kein Thema vorhanden"})
-            
-            print(f"  [Title] Generiere Titel-Optionen …", flush=True)
-            titles = generate_titles(full_script, n=5)
-            if not titles:
-                return self._send(500, {"error": "Titel-Generierung fehlgeschlagen"})
-            meta = load_v_meta(cid, vid)
-            meta["titles"] = titles
-            save_v_meta(cid, vid, meta)
-            return self._send(200, {"ok": True, "titles": titles})
-
         # ── Thumbnail generator ───────────────────────────────────────────────
         if p == "/api/generate_thumbnail":
             if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
@@ -3389,6 +3348,7 @@ def main():
     import routes.video_meta
     import routes.job_status
     import routes.voice
+    import routes.script_gen
     import store.db as store_db
     # Refactor Phase 4 (Teil 1-5): Route-Gruppen aus dem dashboard.py-Handler
     # ausgelagert. Reihenfolge unkritisch -- Präfixe überschneiden sich nicht
@@ -3420,6 +3380,8 @@ def main():
     mount("/api/elevenlabs_voices", routes.voice)
     mount("/api/tts_provider", routes.voice)
     mount("/api/elevenlabs_settings", routes.voice)
+    mount("/api/generate_script", routes.script_gen)
+    mount("/api/generate_titles", routes.script_gen)
     mount("/api/shorts/", shorts.api)
     mount("/api/youtube/", youtube.api)
     mount("/api/control/", control.api)
