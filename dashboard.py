@@ -67,15 +67,75 @@ import signal   # für SIGTERM-Handler (Phase 2.1 #68)
 # Schwachstelle #68: ohne SIGTERM-Handler werden Hintergrund-Worker bei Container-Stop
 # mitten im Render abgebrochen — plan.json kann korrupt sein.
 _SHUTDOWN_IN_PROGRESS = False
+_SERVER_REF = None  # von main() gesetzt, sobald der ThreadingHTTPServer existiert
+_SHUTDOWN_GRACE_PERIOD_S = 8.0
+
+def _request_stop_all_running_jobs() -> list:
+    """Setzt stop_requested=True auf jedem laufenden BATCH_/RENDER_/PRODUCE_JOBS-Eintrag
+    -- exakt derselbe kooperative Abbruch-Mechanismus wie der bestehende "Stoppen"-Button
+    (siehe stop_requested-Checks in _batch_generate_worker/_render_worker/_produce_worker).
+    Gibt die betroffenen (kind, key)-Paare zurück, damit der Aufrufer auf ihr Ende warten kann."""
+    affected = []
+    with _BATCH_JOBS_LOCK:
+        for key, entry in BATCH_JOBS.items():
+            if entry.get("running"):
+                entry["stop_requested"] = True
+                affected.append(("batch", key))
+    with _RENDER_JOBS_LOCK:
+        for key, entry in RENDER_JOBS.items():
+            if entry.get("running"):
+                entry["stop_requested"] = True
+                affected.append(("render", key))
+    with _PRODUCE_JOBS_LOCK:
+        for key, entry in PRODUCE_JOBS.items():
+            if entry.get("running"):
+                entry["stop_requested"] = True
+                affected.append(("produce", key))
+    return affected
+
+def _shutdown_worker() -> None:
+    """Läuft in einem eigenen Thread (NIE im Signal-Handler selbst, sonst deadlockt
+    srv.shutdown() -- es muss aus einem ANDEREN Thread als dem serve_forever()-Loop
+    aufgerufen werden). Gibt laufenden Batch-/Render-/Produce-Jobs eine begrenzte
+    Gnadenfrist, ihren stop_requested-Checkpoint zu erreichen, bevor der Prozess
+    endet -- die Worker-Threads sind daemon=True und würden beim Prozessende sonst
+    ohne jede Rücksicht mitten in ihrer aktuellen Iteration abgewürgt."""
+    affected = _request_stop_all_running_jobs()
+    if affected:
+        _log("INFO", "shutdown_waiting_for_jobs", count=len(affected))
+        deadline = time.time() + _SHUTDOWN_GRACE_PERIOD_S
+        registries = {"batch": (BATCH_JOBS, _BATCH_JOBS_LOCK),
+                      "render": (RENDER_JOBS, _RENDER_JOBS_LOCK),
+                      "produce": (PRODUCE_JOBS, _PRODUCE_JOBS_LOCK)}
+        still_running = affected
+        while time.time() < deadline:
+            still_running = []
+            for kind, key in affected:
+                jobs, lock = registries[kind]
+                with lock:
+                    if jobs.get(key, {}).get("running"):
+                        still_running.append((kind, key))
+            if not still_running:
+                break
+            time.sleep(0.3)
+        else:
+            _log("WARN", "shutdown_grace_period_exceeded", still_running=len(still_running))
+    if _SERVER_REF is not None:
+        _SERVER_REF.shutdown()
+
 def _graceful_shutdown(signum, frame):
-    """SIGTERM/SIGINT-Handler: setzt Flag, lässt laufende Worker natürlich enden.
-    Render-Worker prüfen dieses Flag an Render-Pausenpunkten (Phase 2.1 Follow-up).
+    """SIGTERM/SIGINT-Handler: setzt das Flag (für /api/health), stößt einen
+    begrenzten kooperativen Stop laufender Jobs an und beendet danach wirklich den
+    Server -- vorher setzte dieser Handler NUR das Flag, srv.serve_forever() lief
+    unbegrenzt weiter (empirisch verifiziert: SIGTERM/Ctrl-C beendete den Prozess
+    NIE). Der eigentliche Stop läuft in einem eigenen Thread, siehe _shutdown_worker().
     """
     global _SHUTDOWN_IN_PROGRESS
     if _SHUTDOWN_IN_PROGRESS:  # Doppelte Signale ignorieren
         return
     _SHUTDOWN_IN_PROGRESS = True
     _log("INFO", "shutdown_signal", signal=signum)
+    threading.Thread(target=_shutdown_worker, daemon=True).start()
 
 try:
     signal.signal(signal.SIGTERM, _graceful_shutdown)  # Container-Stop
@@ -4669,9 +4729,13 @@ def main():
         print("  [Upload] ~/.youtube_oauth_client.json fehlt — Upload-Feature bleibt inaktiv "
               "(Shorts/Packaging funktionieren unabhängig davon).")
     _start_job_cleanup_daemon()
+    global _SERVER_REF
     srv = ThreadingHTTPServer(("127.0.0.1", port), H)
+    _SERVER_REF = srv  # muss VOR serve_forever() gesetzt sein, siehe _shutdown_worker()
     print(f"Dashboard läuft: http://localhost:{port}  (Strg+C zum Beenden)")
     srv.serve_forever()
+    srv.server_close()
+    _log("INFO", "shutdown_complete")
 
 if __name__ == "__main__":
     # `python3 dashboard.py` lädt dieses Modul als "__main__", nicht als "dashboard" --

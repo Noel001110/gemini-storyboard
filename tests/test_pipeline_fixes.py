@@ -1787,6 +1787,81 @@ def t_keyword_overlap_match_ignores_scenes_without_file():
     assert idx == 1, f"Fallback darf nur fileless-Szenen NIE wählen, war: {idx}"
 
 
+def t_graceful_shutdown_requests_stop_on_running_jobs():
+    """Refactor Phase 2b: _request_stop_all_running_jobs() setzt stop_requested=True
+    auf jedem laufenden BATCH_/RENDER_/PRODUCE_JOBS-Eintrag (kooperativer Abbruch,
+    identisch zum bestehenden "Stoppen"-Button), lässt nicht-laufende Einträge unberührt."""
+    import dashboard
+    running_key = ("ct_shutdown", "vt_running")
+    idle_key = ("ct_shutdown", "vt_idle")
+    dashboard.BATCH_JOBS[running_key] = {"running": True, "stop_requested": False}
+    dashboard.RENDER_JOBS[idle_key] = {"running": False, "stop_requested": False}
+    try:
+        affected = dashboard._request_stop_all_running_jobs()
+        assert ("batch", running_key) in affected, "laufender Batch-Job muss erfasst werden"
+        assert dashboard.BATCH_JOBS[running_key]["stop_requested"] is True
+        assert dashboard.RENDER_JOBS[idle_key]["stop_requested"] is False, \
+            "nicht-laufender Job darf nicht angefasst werden"
+    finally:
+        dashboard.BATCH_JOBS.pop(running_key, None)
+        dashboard.RENDER_JOBS.pop(idle_key, None)
+
+
+def t_graceful_shutdown_worker_returns_fast_once_job_stops_cleanly():
+    """#68: _shutdown_worker() darf nicht die volle Gnadenfrist aussitzen, wenn der
+    betroffene Job sein stop_requested rechtzeitig sieht und running=False setzt --
+    genau das Verhalten, das der reale Batch-/Render-Worker-Loop schon für den
+    "Stoppen"-Button implementiert (gleicher Checkpoint, hier nur simuliert)."""
+    import dashboard
+    import threading
+    import time
+    key = ("ct_shutdown", "vt_clean")
+    dashboard.BATCH_JOBS[key] = {"running": True, "stop_requested": False}
+
+    def fake_worker():
+        for _ in range(50):
+            with dashboard._BATCH_JOBS_LOCK:
+                if dashboard.BATCH_JOBS[key]["stop_requested"]:
+                    dashboard.BATCH_JOBS[key]["running"] = False
+                    return
+            time.sleep(0.05)
+
+    t = threading.Thread(target=fake_worker, daemon=True)
+    t.start()
+    try:
+        start = time.time()
+        dashboard._shutdown_worker()
+        elapsed = time.time() - start
+        assert elapsed < dashboard._SHUTDOWN_GRACE_PERIOD_S, \
+            f"sollte NICHT die volle Gnadenfrist ({dashboard._SHUTDOWN_GRACE_PERIOD_S}s) " \
+            f"ausschöpfen, wenn der Job rechtzeitig sauber endet, war: {elapsed:.2f}s"
+        assert dashboard.BATCH_JOBS[key]["running"] is False
+    finally:
+        t.join(timeout=2)
+        dashboard.BATCH_JOBS.pop(key, None)
+
+
+def t_graceful_shutdown_worker_respects_timeout_without_hanging():
+    """#68: hält ein Job stop_requested einfach nicht ein (hängender/langsamer Job),
+    darf _shutdown_worker() trotzdem nicht ewig blockieren -- Gnadenfrist statt Hang."""
+    import dashboard
+    import time
+    key = ("ct_shutdown", "vt_stuck")
+    dashboard.RENDER_JOBS[key] = {"running": True, "stop_requested": False}
+    orig_grace = dashboard._SHUTDOWN_GRACE_PERIOD_S
+    dashboard._SHUTDOWN_GRACE_PERIOD_S = 0.5  # kurz halten, kein 8s-Warten im Testlauf
+    try:
+        start = time.time()
+        dashboard._shutdown_worker()
+        elapsed = time.time() - start
+        assert elapsed < 2.0, f"darf nicht hängen, war: {elapsed:.2f}s"
+        assert dashboard.RENDER_JOBS[key]["running"] is True, \
+            "Job blieb absichtlich running=True -- Gnadenfrist muss trotzdem enden"
+    finally:
+        dashboard._SHUTDOWN_GRACE_PERIOD_S = orig_grace
+        dashboard.RENDER_JOBS.pop(key, None)
+
+
 def main():
     tmp_home = setup()
     try:
@@ -1989,6 +2064,14 @@ def main():
             "assign_short_scene_images: Keyword-Fallback nie ein Crash")
         run(t_keyword_overlap_match_ignores_scenes_without_file,
             "_keyword_overlap_match ignoriert Szenen ohne file")
+
+        summary_section("Refactor Phase 2b: Graceful Shutdown (#68)")
+        run(t_graceful_shutdown_requests_stop_on_running_jobs,
+            "stop_requested nur auf laufenden Batch-/Render-/Produce-Jobs")
+        run(t_graceful_shutdown_worker_returns_fast_once_job_stops_cleanly,
+            "kein unnötiges Warten bis zur Gnadenfrist bei sauberem Job-Ende")
+        run(t_graceful_shutdown_worker_respects_timeout_without_hanging,
+            "Gnadenfrist statt Hang bei hängendem Job")
     finally:
         teardown(tmp_home)
 
