@@ -1915,55 +1915,6 @@ class H(BaseHTTPRequestHandler):
         if handled:
             return
 
-        # ── Audio upload ──────────────────────────────────────────────────────
-        if p == "/api/upload_audio":
-            try:    raw = base64.b64decode(d["data"])
-            except: return self._send(400, {"error": "Ungültige Base64-Daten"})
-            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
-            ensure_video(cid, vid)
-            ext = (d.get("name", "audio.bin").rsplit(".", 1)[-1].lower()) or "bin"
-            local_path = os.path.join(v_uploads(cid, vid), f"voiceover.{ext}")
-            open(local_path, "wb").write(raw)
-            json.dump({"path": local_path, "mime": d.get("mime", "audio/mpeg"), "name": d.get("name", "")},
-                      open(v_audio(cid, vid), "w"))
-            # A fresh recording invalidates any previously trimmed audio and word-
-            # alignment computed against the OLD file -- both would silently produce
-            # wrong timing/cuts if left in place (the pause-trim + start_aligned/
-            # end_aligned re-derive automatically at the next render, see _render_worker).
-            trimmed_path = os.path.join(v_uploads(cid, vid), "voiceover_trimmed.wav")
-            if os.path.exists(trimmed_path):
-                os.remove(trimmed_path)
-            try:
-                with _PLAN_WRITE_LOCK:
-                    plan = json.load(open(v_plan(cid, vid)))
-                    for s in plan.get("scenes", []):
-                        s.pop("start_aligned", None)
-                        s.pop("end_aligned", None)
-                    _atomic_write_json(v_plan(cid, vid), plan, ensure_ascii=False, indent=1)
-            except Exception:
-                pass
-            print(f"  [Audio] {os.path.basename(local_path)} ({len(raw)//1024} KB)", flush=True)
-            return self._send(200, {"ok": True, "size": len(raw), "name": d.get("name", "")})
-
-        if p == "/api/transcribe_status":
-            return self._send(200, dict(TX_STATUS))
-
-        # ── Transcribe ────────────────────────────────────────────────────────
-        if p == "/api/transcribe":
-            sec = float(d.get("sec", 4))
-            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
-            if not os.path.exists(v_audio(cid, vid)):
-                return self._send(400, {"error": "Keine Audio-Datei hochgeladen."})
-            TX_STATUS["running"] = True; TX_STATUS["error"] = ""
-            try:
-                out = _transcribe_generate_worker(cid, vid, sec)
-            except Exception as e:
-                import traceback; traceback.print_exc()
-                TX_STATUS["running"] = False; TX_STATUS["error"] = str(e)
-                return self._send(500, {"error": f"Transkription fehlgeschlagen: {e}"})
-            TX_STATUS["running"] = False
-            return self._send(200, out)
-
         # ── Set canonical character reference URL ─────────────────────────────
         # Juli 2026 Fix: dashboard.html ruft '/api/set_style_ref' auf (der Endpoint
         # wurde intern längst zu einem reinen Stil-Anker umgebaut, siehe
@@ -2092,6 +2043,7 @@ def main():
     import routes.misc
     import routes.charsheets
     import routes.images
+    import routes.audio
     import store.db as store_db
     # Refactor Phase 4 (Teil 1-5): Route-Gruppen aus dem dashboard.py-Handler
     # ausgelagert. Reihenfolge unkritisch -- Präfixe überschneiden sich nicht
@@ -2150,6 +2102,8 @@ def main():
     mount("/api/charsheet_update", routes.charsheets)
     mount("/api/charsheet_delete", routes.charsheets)
     mount("/api/generate_one", routes.images)
+    mount("/api/upload_audio", routes.audio)
+    mount("/api/transcribe", routes.audio)
     mount("/api/shorts/", shorts.api)
     mount("/api/youtube/", youtube.api)
     mount("/api/control/", control.api)

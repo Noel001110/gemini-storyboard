@@ -20,8 +20,12 @@ würde entweder GET /api/plan_status oder POST /api/plan_status_reset je nach
 Mount-Reihenfolge ins Leere laufen.
 
 "/api/transcribe_status" existiert im alten Handler doppelt (GET UND POST,
-identischer Body) -- hier wird nur die GET-Variante gezogen; die (bereits vor
-diesem Refactor redundante) POST-Variante bleibt unverändert in dashboard.py.
+identischer Body, bereits vor diesem Refactor redundant) -- Refactor Phase 4
+(Teil 16) hat beide Varianten hierher gezogen (gleiche Präfix-Familie wie
+/api/plan_status/_reset oben), da /api/transcribe (Teil 16, routes/audio.py)
+ein String-Präfix von /api/transcribe_status ist und ein Modul, das für
+einen nicht-exakt-passenden Pfad (False, None) zurückgibt, NICHT zum nächsten
+Mount durchfällt.
 
 Import von `dashboard` passiert lazy INNERHALB von handle() (siehe CLAUDE.md
 "Layering/Import-Richtung").
@@ -35,6 +39,11 @@ def handle(method, path, handler, qs, cid, vid, body):
         with dashboard._PLAN_JOBS_LOCK:
             dashboard.PLAN_JOBS.pop((cid, vid), None)
         handler._send(200, {"ok": True})
+        return True, None
+
+    if method == "POST" and path == "/api/transcribe_status":
+        import dashboard
+        handler._send(200, dict(dashboard.TX_STATUS))
         return True, None
 
     if method != "GET":
