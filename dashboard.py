@@ -2236,35 +2236,6 @@ class H(BaseHTTPRequestHandler):
         # bestehende dashboard.html gemischt, da kanal-/video-übergreifend statt pro-Video.
         if p == "/control":
             return self._send(200, open(os.path.join(HERE, "control.html"), encoding="utf-8").read(), "text/html; charset=utf-8")
-        if p == "/api/charsheets":
-            # vid aus Query-String: /api/charsheets?channel=...&vid=...
-            qs = parse_qs(urlparse(self.path).query)
-            vid_param = (qs.get("vid", [None]) or [None])[0]
-            sheet_dir = ch_sheets(cid, vid_param) if vid_param else ch_sheets(cid)
-            sheets = []
-            try:
-                files = os.listdir(sheet_dir)
-            except OSError:
-                files = []
-            for f in sorted(files):
-                if f.endswith(".json"):
-                    try:
-                        meta = json.load(open(os.path.join(sheet_dir, f)))
-                        img = os.path.join(sheet_dir, f.replace(".json", ".png"))
-                        meta["has_image"] = os.path.exists(img)
-                        sheets.append(meta)
-                    except: pass
-            return self._send(200, {"sheets": sheets})
-        if p.startswith("/charsheets/"):
-            # Same: vid-aware lookup with channel-pool fallback
-            qs = parse_qs(urlparse(self.path).query)
-            vid_param = (qs.get("vid", [None]) or [None])[0]
-            sheet_dir = ch_sheets(cid, vid_param) if vid_param else ch_sheets(cid)
-            fp = os.path.join(sheet_dir, os.path.basename(p))
-            if os.path.exists(fp):
-                b = open(fp, "rb").read()
-                return self._send(200, b, "image/jpeg" if b[:2] == b"\xff\xd8" else "image/png")
-            return self._send(404, {"error": "not found"})
         return self._send(404, {"error": "not found"})
 
     def do_POST(self):
@@ -2448,110 +2419,6 @@ class H(BaseHTTPRequestHandler):
                 return self._send(500, {"error": f"Transkription fehlgeschlagen: {e}"})
             TX_STATUS["running"] = False
             return self._send(200, out)
-
-        # ── Character refs ────────────────────────────────────────────────────
-        if p == "/api/upload_charref":
-            name = d.get("name", "Charakter").strip()
-            img_b64 = d.get("image", "")
-            mime = d.get("mime", "image/png")
-            vid = d.get("vid")  # July 2026: charsheets are now per-video
-            if not name:
-                return self._send(400, {"error": "name fehlt"})
-            if not img_b64:
-                return self._send(400, {"error": "image fehlt"})
-            # B-1 Fix: validate=False tolerates fehlendes Padding (häufigster Browser-Bug),
-            # try/except fängt den Rest. Ohne den Fix crasht die HTTP-Verbindung mit
-            # leerem 500er-Body und das Frontend zeigt einen Silent-Fail.
-            try:
-                img_bytes = base64.b64decode(img_b64, validate=False)
-            except Exception as e:
-                return self._send(400, {"error": f"image ist kein gültiges Base64: {e}"})
-            if not img_bytes:
-                return self._send(400, {"error": "image dekodiert zu leer"})
-            safe = re.sub(r"[^\w\-]", "_", name.lower()) or "character"
-            os.makedirs(ch_sheets(cid, vid), exist_ok=True)  # B-1: Auto-Mkdir (frische Kanäle)
-            img_path  = os.path.join(ch_sheets(cid, vid), f"{safe}.png")
-            meta_path = os.path.join(ch_sheets(cid, vid), f"{safe}.json")
-            try:
-                open(img_path, "wb").write(img_bytes)
-            except OSError as e:
-                return self._send(500, {"error": f"Schreiben fehlgeschlagen: {e}"})
-            try:    desc = analyze_char_image(img_bytes, mime)
-            except Exception as e:
-                desc = ""; print(f"  [Char] Analyse-Fehler: {e}", flush=True)
-            # Öffentliche URL erzeugen: das Frontend erwartet `uri` (set_char_ref +
-            # _applyCharRef), und die style_ref_url wird als KIE-Bildreferenz benutzt —
-            # muss also public-http sein (set_char_ref lehnt Nicht-http-URLs ab).
-            # Ohne diesen Upload bekam das Frontend `undefined` → Referenz wurde nie
-            # gesetzt (Kern von Bug B-1: Upload "tat nichts").
-            try:
-                public_uri = upload_image_public(img_path)
-            except Exception as e:
-                return self._send(502, {"error": f"Public-Upload fehlgeschlagen: {e}"})
-            json.dump({"name": name, "description": desc, "safe": safe, "mime": "image/png", "uri": public_uri},
-                      open(meta_path, "w"), ensure_ascii=False)
-            return self._send(200, {"ok": True, "name": name, "safe": safe, "description": desc, "uri": public_uri})
-
-        if p == "/api/gen_charsheet":
-            name = d.get("name", "").strip(); desc = d.get("description", "").strip()
-            vid_param = d.get("vid") or None
-            if not name or not desc: return self._send(400, {"error": "name und description erforderlich"})
-            # Juli 2026 (User-Report "doppelte Charsheets pro Charakter"): ein bestehender
-            # Charakter (z.B. auto-generiert als char_01) hat schon ein "safe". Wurde bisher
-            # IMMER neu aus dem Namen abgeleitet ("Protagonist (You)" -> "protagonist__you_"),
-            # erzeugte "Neu generieren" für einen bereits vorhandenen Charakter eine ZWEITE,
-            # unabhängige Datei statt die bestehende zu überschreiben — zwei KIE-Aufrufe
-            # sehen nie gleich aus (kein Seed). Jetzt: das Frontend schickt das vorhandene
-            # "safe" mit (siehe genCharSheet() in dashboard.html); nur wenn keins mitkommt
-            # (wirklich neuer, manuell angelegter Charakter) wird aus dem Namen abgeleitet.
-            safe = (d.get("safe") or "").strip()
-            safe = re.sub(r"[^\w\-]", "_", safe.lower()) if safe else re.sub(r"[^\w\-]", "_", name.lower())
-            sheet_dir = ch_sheets(cid, vid_param)
-            tmp  = os.path.join(sheet_dir, f"_tmp_{safe}.jpg")
-            try:
-                img_bytes = gen_charsheet(cid, name, desc, vid=vid_param)
-                open(os.path.join(sheet_dir, f"{safe}.png"), "wb").write(img_bytes)
-                json.dump({"name": name, "description": desc, "safe": safe, "mime": "image/jpg"},
-                          open(os.path.join(sheet_dir, f"{safe}.json"), "w"), ensure_ascii=False)
-                return self._send(200, {"ok": True, "name": name, "safe": safe})
-            except Exception as e:
-                import traceback; traceback.print_exc()
-                return self._send(500, {"error": str(e)})
-
-        # ── Char-Sheet: Beschreibung aktualisieren ─────────────────────────────
-        if p == "/api/charsheet_update":
-            safe = re.sub(r"[^\w\-]", "_", (d.get("safe") or "").lower())
-            desc = d.get("description", "").strip()
-            vid_param = d.get("vid") or None
-            if not safe or not desc: return self._send(400, {"error": "safe und description erforderlich"})
-            sheet_dir = ch_sheets(cid, vid_param)
-            meta_path = os.path.join(sheet_dir, f"{safe}.json")
-            if not os.path.exists(meta_path):
-                return self._send(404, {"error": "Charakter existiert nicht in diesem Video"})
-            try:
-                meta = json.load(open(meta_path))
-                meta["description"] = desc
-                meta["updated_at"] = time.time()
-                json.dump(meta, open(meta_path, "w"), ensure_ascii=False, indent=1)
-                return self._send(200, {"ok": True})
-            except Exception as e:
-                return self._send(500, {"error": str(e)})
-
-        # ── Char-Sheet: löschen ────────────────────────────────────────────────
-        if p == "/api/charsheet_delete":
-            safe = re.sub(r"[^\w\-]", "_", (d.get("safe") or "").lower())
-            vid_param = d.get("vid") or None
-            if not safe: return self._send(400, {"error": "safe erforderlich"})
-            sheet_dir = ch_sheets(cid, vid_param)
-            removed = []
-            for ext in (".json", ".png"):
-                fp = os.path.join(sheet_dir, f"{safe}{ext}")
-                if os.path.exists(fp):
-                    try:
-                        os.remove(fp)
-                        removed.append(fp)
-                    except: pass
-            return self._send(200, {"ok": True, "removed": removed})
 
         # ── Generate one image (async) ────────────────────────────────────────
 
@@ -2923,6 +2790,7 @@ def main():
     import routes.produce
     import routes.voiceover
     import routes.misc
+    import routes.charsheets
     import store.db as store_db
     # Refactor Phase 4 (Teil 1-5): Route-Gruppen aus dem dashboard.py-Handler
     # ausgelagert. Reihenfolge unkritisch -- Präfixe überschneiden sich nicht
@@ -2974,6 +2842,12 @@ def main():
     mount("/api/measure_wpm", routes.misc)
     mount("/api/download", routes.misc)
     mount("/generated/", routes.misc)
+    mount("/api/charsheets", routes.charsheets)
+    mount("/charsheets/", routes.charsheets)
+    mount("/api/upload_charref", routes.charsheets)
+    mount("/api/gen_charsheet", routes.charsheets)
+    mount("/api/charsheet_update", routes.charsheets)
+    mount("/api/charsheet_delete", routes.charsheets)
     mount("/api/shorts/", shorts.api)
     mount("/api/youtube/", youtube.api)
     mount("/api/control/", control.api)

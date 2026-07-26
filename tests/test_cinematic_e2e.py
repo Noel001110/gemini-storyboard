@@ -1719,11 +1719,12 @@ def t_bug_b1_charref_upload_validates_base64():
     Regression: Vorher warf base64.b64decode bei Junk-Input binascii.Error,
     die ungefangene Exception schickte einen leeren 500er-Body → Frontend
     zeigte Silent-Fail.
+
+    Refactor Phase 4 (Teil 14): der Endpoint lebt jetzt in routes/charsheets.py.
     """
-    import json
-    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    src = open(os.path.join(ROOT, "routes", "charsheets.py")).read()
     # Finde upload_charref-Handler
-    i = src.find('if p == "/api/upload_charref":')
+    i = src.find('path == "/api/upload_charref"')
     assert i >= 0
     # Suche die nächsten ~50 Zeilen — der try/except-Block muss da sein
     snippet = src[i:i + 2000]
@@ -1733,7 +1734,7 @@ def t_bug_b1_charref_upload_validates_base64():
     assert "validate=False" in snippet, \
         "B-1: b64decode should use validate=False for tolerance against missing padding"
     # Name-Validierung muss da sein (leerer Name war Bug-Quelle)
-    assert 'return self._send(400, {"error": "name fehlt"})' in snippet, \
+    assert 'handler._send(400, {"error": "name fehlt"})' in snippet, \
         "B-1: empty name must be rejected with 400"
     # Auto-mkdir muss da sein (frische Kanäle hatten charsheets/ nicht)
     assert "os.makedirs(ch_sheets" in snippet, \
