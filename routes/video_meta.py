@@ -115,7 +115,7 @@ def handle(method, path, handler, qs, cid, vid, body):
             return True, None
         payload = {
             "text": text,
-            "language": d.get("language", "de"),
+            "language": d.get("language", "en"),
             "preset": d.get("preset", "flat_cartoon_doc"),
             "updatedAt": int(time.time()),
         }

@@ -369,8 +369,8 @@
         <h2>Ausgabe-Sprache</h2>
         <div class="row" style="align-items:center;gap:16px">
           <div class="lang-toggle">
-            <button class="sel" id="langDE" onclick="setLang('de')">🇩🇪 Deutsch</button>
-            <button id="langEN" onclick="setLang('en')">🇬🇧 English</button>
+            <button id="langDE" onclick="setLang('de')">🇩🇪 Deutsch</button>
+            <button class="sel" id="langEN" onclick="setLang('en')">🇬🇧 English</button>
           </div>
           <button onclick="generateScript()" id="genScriptBtn">Skript generieren</button>
           <span class="hint" id="scriptStatus"></span>
@@ -2026,7 +2026,7 @@ let _scriptPending = null;   // {cid, vid, text, language, preset}
 // Sprache DES SPRECHER-SKRIPTS (per Video, aus script.json geladen/gespeichert) --
 // bewusst getrennt von _scriptLang weiter unten, das nur die Ausgabesprache des
 // separaten Rohtranskript-Rewrite-Tools ist. Siehe Kommentar am scriptLangDE/EN-Toggle.
-let CURRENT_SCRIPT_LANG = 'de';
+let CURRENT_SCRIPT_LANG = 'en';
 function setScriptLang(l, skipSave){
   CURRENT_SCRIPT_LANG = l;
   const de = $('scriptLangDE'), en = $('scriptLangEN');
@@ -2151,7 +2151,7 @@ async function restoreScriptLocal(){
   // leer ist) -- sonst würde beim Video-Wechsel die zuvor gesetzte CURRENT_SCRIPT_LANG
   // des VORHERIGEN Videos hier weiterleben und beim ersten Tastendruck falsch gespeichert.
   // skipSave=true: das ist ein Laden vom Server, kein User-Klick, nichts zu speichern.
-  let langFromServer = 'de';
+  let langFromServer = 'en';
   try{
     const r = await ch_get('/api/script');
     if(r && typeof r.text === 'string' && r.text.trim()){
@@ -3590,7 +3590,7 @@ async function deleteCharSheet(safe){
 }
 
 // ---- Skript-Generator ----
-let _scriptLang = 'de';
+let _scriptLang = 'en';
 function setLang(l){
   _scriptLang = l;
   $('langDE').classList.toggle('sel', l==='de');

@@ -57,7 +57,7 @@ def handle(method, path, handler, qs, cid, vid, body):
         try:
             payload = {
                 "text": d.get("script", ""),
-                "language": d.get("language", "de"),
+                "language": d.get("language", "en"),
                 "preset": d.get("preset", "flat_cartoon_doc"),
                 "updatedAt": int(time.time()),
             }
