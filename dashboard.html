@@ -443,6 +443,12 @@
       <div style="margin-bottom:14px;">
         <label class="block text-xs font-semibold text-app-mut uppercase tracking-wide mb-2">Thema / Roh-Idee</label>
         <textarea id="ideaInput" rows="2" placeholder="Beschreibe kurz die Video-Idee oder das Thema..." style="width:100%;margin-top:6px;" oninput="saveIdea()"></textarea>
+        <select id="ideaPillar" class="sm" style="margin-top:6px;" onchange="saveIdea()">
+          <option value="">— kein Säulen-Tag —</option>
+          <option value="pain">😣 Schmerz (Geldfehler)</option>
+          <option value="myth">🤔 Mythos (Contrarian)</option>
+          <option value="aspiration">🚀 Aspiration ($0→$1M)</option>
+        </select>
       </div>
 
       <div style="margin-bottom:14px;">
@@ -1276,6 +1282,7 @@ let VIDEO_META = {titles: [], selected_title: '', thumbnail_prompt: '', has_thum
 async function loadVideoMeta(){
   VIDEO_META = await ch_get('/api/video_meta').catch(() => ({titles:[], selected_title:'', thumbnail_prompt:'', has_thumbnail:false, idea:''}));
   if($('ideaInput')) $('ideaInput').value = VIDEO_META.idea || '';
+  if($('ideaPillar')) $('ideaPillar').value = VIDEO_META.pillar || '';
   renderTitleListStep();
   renderThumbnailStep();
   // Kategorie-Dropdown braucht die Liste, bevor renderPackagingStep() sie befüllen kann --
@@ -1308,8 +1315,10 @@ function renderShortsPackagingPreview(){
 
 async function saveIdea(){
   const idea = ($('ideaInput') || {}).value || '';
+  const pillar = ($('ideaPillar') || {}).value || '';
   VIDEO_META.idea = idea;
-  await ch_api('/api/save_idea', {idea});
+  VIDEO_META.pillar = pillar;
+  await ch_api('/api/save_idea', {idea, pillar});
 }
 
 function renderTitleListStep(){
@@ -3090,7 +3099,7 @@ function renderHookScriptsStep(){
   c.innerHTML = HOOK_SCRIPTS_DRAFT.map((s, i) => `
     <div style="padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:var(--surface-2);opacity:${s.keep ? '1' : '0.45'}">
       <div class="row" style="align-items:center;gap:8px;margin-bottom:6px">
-        <span class="hint" style="font-size:11px;flex:1">Angle: ${escHtml(s.angle || '')}</span>
+        <span class="hint" style="font-size:11px;flex:1">Angle: ${escHtml(s.angle || '')}${s.mechanism ? ' · Mechanismus: ' + escHtml(s.mechanism) : ''}${s.number ? ' · ' + escHtml(s.number) : ''}</span>
         <button class="sm ghost" onclick="_toggleHookKeep(${i})">${s.keep ? '🗑 Verwerfen' : '↩ Zurückholen'}</button>
       </div>
       <input type="text" value="${escHtml(s.title || '')}" oninput="_updateHookField(${i},'title',this.value)"

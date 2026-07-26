@@ -135,6 +135,11 @@ def handle(method, path, handler, qs, cid, vid, body):
         d = body or {}
         meta = dashboard.load_v_meta(cid, vid)
         meta["idea"] = d.get("idea", "").strip()
+        # Content-Säulen-Tag (Schmerz/Mythos/Aspiration, Blueprint-Review 2026-07-26) --
+        # reine Buchhaltung fürs Themen-Balancing, keine Pflichtangabe.
+        pillar = d.get("pillar", "")
+        if pillar in ("pain", "myth", "aspiration", ""):
+            meta["pillar"] = pillar
         dashboard.save_v_meta(cid, vid, meta)
         handler._send(200, {"ok": True})
         return True, None

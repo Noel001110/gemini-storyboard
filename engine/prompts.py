@@ -979,18 +979,28 @@ never seen the long-form video and never will must get a complete, satisfying lo
 ANY ONE of these alone.
 
 STRUCTURE (2026 short-form retention research -- this is a hard constraint, not a style
-suggestion, because the short-form feed swipes away within 1-3 seconds if this fails):
-- HOOK in the very first sentence (the first 1-2 seconds of spoken audio) -- a question,
-  a surprising stat, or a bold claim. Never a greeting, never a setup sentence before the
-  hook lands, never "In this video..." framing.
-- PAYOFF by roughly word 20-30 (about second 6-8 at spoken pace) -- resolve or sharply
-  escalate the hook immediately, never make the viewer wait for it.
+suggestion, because the short-form feed swipes away within 1-3 seconds if this fails).
+Five beats, in this order, every time:
+1. HOOK (first sentence, ~1-3 seconds of spoken audio) -- a question, a surprising stat,
+   or a bold claim. Never a greeting, never a setup sentence before the hook lands, never
+   "In this video..." framing.
+2. PROBLEM / AGITATION (next 1-2 sentences) -- deepen the pain the hook opened: show the
+   hidden cost, the trap, why it's worse than it first sounds.
+3. TWIST / INSIGHT -- name the actual psychological mechanism that explains WHY this
+   happens (e.g. lifestyle creep, hedonic adaptation, Parkinson's Law, loss aversion,
+   present bias). Say it in natural spoken language, not a textbook definition dump --
+   but the real term must be recognizable in the sentence.
+4. PAYOFF -- the concrete fix, framed with a number (the same or a related number to the
+   hook's).
+5. LOOP-BACK CTA -- a closing line that echoes or rhymes with the opening hook line, so
+   the short can replay seamlessly. NEVER a hard CTA card, never "link in bio", never
+   "Part 1 of N", never a sequence number of any kind.
 - ONE clear idea per short. Do not compress the whole long-form video into one short --
   pick ONE angle, moment, or fact from it and build the entire short around just that.
-- 70-110 words total (fits a natural 20-40 second short at documentary spoken pace).
-- End with a SOFT, NATURALLY SPOKEN reference to the full video, e.g. "...and that's just
-  one piece of what actually happened there." NEVER a hard CTA card, never "link in bio",
-  never "Part 1 of N", never a sequence number of any kind.
+- MUST include at least one concrete, specific dollar amount or percentage (never a vague
+  "a lot of money" -- always the actual figure).
+- 55-80 words total (fits the 20-28 second retention sweet spot at documentary spoken
+  pace -- tighter than a full explainer, every sentence has to earn its place).
 - The N shorts must each use a genuinely DIFFERENT angle/moment/fact from the long-form
   script -- never sequential, never overlapping in what they reveal, never referencing
   "part" or a fixed viewing order relative to each other.
@@ -1010,7 +1020,12 @@ def generate_short_scripts(full_script: str, chosen_title: str, n: int = 5,
     pattern as generate_titles). Returns [] on any failure -- caller must degrade
     gracefully exactly like generate_titles()'s empty-list contract.
 
-    Each item: {"angle", "hook", "script_text", "title", "description"}.
+    Five-beat structure (Hook/Problem-Agitation/Twist-Insight/Payoff/Loop-CTA) per the
+    content-blueprint review (2026-07-26) -- `mechanism`/`number` are separate required
+    schema fields (not just prompt instructions) so the beats are enforceable/inspectable
+    the same way analyze_script's hook{beat,type,strength} object already is.
+
+    Each item: {"angle", "hook", "mechanism", "number", "script_text", "title", "description"}.
     """
     from dashboard import post_gemini_native  # lazy
     lang_instr = ("Write in German (natural spoken German, not formal)."
@@ -1024,11 +1039,18 @@ def generate_short_scripts(full_script: str, chosen_title: str, n: int = 5,
                 "angle": {"type": "string", "description": "1-5 words naming which "
                           "distinct moment/fact of the long-form script this short is built around."},
                 "hook": {"type": "string"},
+                "mechanism": {"type": "string", "description": "The named psychological "
+                              "mechanism used in the Twist/Insight beat (e.g. 'lifestyle "
+                              "creep', 'hedonic adaptation', 'Parkinson's Law', 'loss "
+                              "aversion')."},
+                "number": {"type": "string", "description": "The concrete dollar amount "
+                           "or percentage this short is built around."},
                 "script_text": {"type": "string"},
                 "title": {"type": "string"},
                 "description": {"type": "string"},
             },
-            "required": ["angle", "hook", "script_text", "title", "description"],
+            "required": ["angle", "hook", "mechanism", "number", "script_text", "title",
+                         "description"],
         },
     }
     user_msg = (
@@ -1184,17 +1206,22 @@ non-negotiable rules:
    image in this channel's style — see STYLE CONTEXT). No busy scenery.
 3. EXAGGERATED, READABLE EMOTION on the subject if it's a character — shock, alarm,
    intense focus, fear, urgency. Subtle/neutral expressions do not work for thumbnails.
-4. RULE OF THIRDS: subject placed off-center with clear headroom in the top third of
+4. MANDATORY PROP: the subject must be holding, looking at, or reacting to ONE concrete
+   prop or symbol that visually encodes the video's actual number/core fact — a price
+   tag, an oversized receipt, a stack of bills, a shrinking piggy bank, a bank statement.
+   A generic shocked face with nothing in the frame to react TO is the single most common
+   thumbnail mistake in this niche — never generate that.
+5. RULE OF THIRDS: subject placed off-center with clear headroom in the top third of
    the frame — that headroom is where bold title text gets added afterward, so keep it
    free of important detail (no face, no key prop, up there).
-5. MUST include one or two bold, bright RED graphic annotations (a directional arrow
+6. MUST include one or two bold, bright RED graphic annotations (a directional arrow
    and/or a circle/ring) — simple drawn shapes, not text — pointing at or circling the
    subject or the single most concrete detail/symbol of the hook. This is the classic
    clickbait attention-director, non-negotiable.
-6. Do not describe on-image text here — text is composited separately (AI-rendered
+7. Do not describe on-image text here — text is composited separately (AI-rendered
    text inside images is unreliable/garbled; drawn arrow/circle shapes are not, which is
    why they belong in the image itself but the text does not).
-7. Keep the established character/art style exactly as given in STYLE CONTEXT, but push
+8. Keep the established character/art style exactly as given in STYLE CONTEXT, but push
    the POSE, EXPRESSION, and LIGHTING to thumbnail-appropriate extremes — a thumbnail
    is the most exaggerated, highest-contrast frame of the whole video, not a typical one.
 
@@ -1224,13 +1251,15 @@ def make_thumbnail_prompt(full_script: str, master_style: str) -> str:
 
 
 THUMBNAIL_TEXT_SYSTEM = """\
-You write the on-image CLICKBAIT TEXT for a YouTube thumbnail -- 2-4 words, punchy,
-provocative, grounded only in what the script actually supports (never invent a claim).
-This is NOT the video title (that's written separately) -- it's a short, shouted
-fragment that works alongside the image, e.g. a number, a verdict, a single loaded
-word or short phrase. Examples of the RIGHT length/energy: "$1,000,000?!", "HE QUIT",
-"BIG MISTAKE", "NEVER AGAIN". Return ONLY the text itself, no quotes, no punctuation
-beyond what belongs in the phrase itself.
+You write the on-image CLICKBAIT TEXT for a YouTube thumbnail -- 1-3 words MAXIMUM, hard
+limit, punchy, provocative, grounded only in what the script actually supports (never
+invent a claim). This is NOT the video title (that's written separately) -- it's a short,
+shouted fragment that works alongside the image, e.g. a number, a verdict, a single loaded
+word or short phrase. PREFER the video's concrete dollar amount or percentage as the text
+when it reads well large (e.g. "$1,042,000"), since a specific figure outperforms a vague
+verdict word. Examples of the RIGHT length/energy: "$1,000,000?!", "HE QUIT", "BROKE".
+Return ONLY the text itself, no quotes, no punctuation beyond what belongs in the phrase
+itself.
 """
 
 
