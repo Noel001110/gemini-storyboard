@@ -2794,55 +2794,6 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True, "removed": removed})
 
         # ── Generate one image (async) ────────────────────────────────────────
-        # ── Auto-rendering (Ken Burns clips -> concat -> audio mux) ─────────────
-        if p == "/api/render_start":
-            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
-            force = bool(d.get("force", False))
-            target = d.get("target", "longform")
-            if target not in RENDER_TARGETS:
-                return self._send(400, {"error": f"Unbekanntes render target: {target}"})
-            key = (cid, vid, target)
-            with _RENDER_JOBS_LOCK:
-                if RENDER_JOBS.get(key, {}).get("running"):
-                    return self._send(200, {"ok": True, "already_running": True})
-                # Juli 2026 Fix (Audit 4.2): _apply_sync_invariant stretches whatever
-                # scenes DO have a generated file across the FULL audio duration — a
-                # render with e.g. 20/96 rendered scenes silently produces a full-length
-                # video where each of those 20 images is shown ~5x longer than intended,
-                # no warning anywhere. Surface the partial-render fact BEFORE starting so
-                # the frontend can confirm() with the user; `force: true` skips this once
-                # confirmed (same pattern as /api/generate_all_start's `force`).
-                if not force:
-                    try:
-                        plan_for_check = json.load(open(v_plan(cid, vid)))
-                        total_scenes = len(plan_for_check.get("scenes", []))
-                        rendered_scenes = sum(1 for s in plan_for_check.get("scenes", []) if s.get("file"))
-                    except Exception:
-                        total_scenes = rendered_scenes = 0
-                    if total_scenes and rendered_scenes < total_scenes:
-                        return self._send(200, {
-                            "ok": False, "partial": True,
-                            "rendered": rendered_scenes, "total": total_scenes,
-                        })
-                # Same atomic "set running=True before the thread exists" fix as
-                # generate_all_start above — avoids two rapid start calls each
-                # spinning up their own render worker on the same video.
-                # started_ts: für die ETA-Berechnung im Frontend (Fortschrittsbalken).
-                # stage() unten aktualisiert den Job-Dict nur per .update(), started_ts
-                # bleibt also über die gesamte Render-Laufzeit erhalten.
-                RENDER_JOBS[key] = {"running": True, "stop_requested": False, "stage": "startet",
-                                     "done": 0, "total": 0, "error": None, "file": None,
-                                     "started_ts": time.time()}
-            threading.Thread(target=_render_worker, args=(cid, vid, target), daemon=True).start()
-            return self._send(200, {"ok": True, "already_running": False})
-
-        if p == "/api/render_stop":
-            target = d.get("target", "longform")
-            key = (cid, vid, target)
-            with _RENDER_JOBS_LOCK:
-                if key in RENDER_JOBS:
-                    RENDER_JOBS[key]["stop_requested"] = True
-            return self._send(200, {"ok": True})
 
         if p == "/api/produce_start":
             if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
@@ -3241,6 +3192,7 @@ def main():
     import routes.thumbnail
     import routes.plan
     import routes.batch
+    import routes.render
     import store.db as store_db
     # Refactor Phase 4 (Teil 1-5): Route-Gruppen aus dem dashboard.py-Handler
     # ausgelagert. Reihenfolge unkritisch -- Präfixe überschneiden sich nicht
@@ -3278,6 +3230,8 @@ def main():
     mount("/api/plan", routes.plan)
     mount("/api/generate_all_start", routes.batch)
     mount("/api/generate_all_stop", routes.batch)
+    mount("/api/render_start", routes.render)
+    mount("/api/render_stop", routes.render)
     mount("/api/shorts/", shorts.api)
     mount("/api/youtube/", youtube.api)
     mount("/api/control/", control.api)

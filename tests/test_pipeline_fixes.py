@@ -368,9 +368,11 @@ def t_a3_resolve_entity_ref_stage_1b_local_file_fallback():
 
 def t_42_render_start_warns_on_partial_scenes():
     """Source-check: /api/render_start must detect rendered < total scenes and return
-    a partial-warning response instead of silently starting a stretched-out render."""
-    src = open(os.path.join(ROOT, "dashboard.py")).read()
-    idx = src.find('if p == "/api/render_start"')
+    a partial-warning response instead of silently starting a stretched-out render.
+
+    Refactor Phase 4 (Teil 10): die Route lebt jetzt in routes/render.py."""
+    src = open(os.path.join(ROOT, "routes", "render.py")).read()
+    idx = src.find('path == "/api/render_start"')
     assert idx != -1
     body = src[idx:idx + 2200]
     assert '"partial": True' in body, "4.2 fix missing: no partial-render warning response"
