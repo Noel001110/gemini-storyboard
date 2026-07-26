@@ -546,11 +546,12 @@ def t_strip_pause_tokens_fixes_alignment_word_count_mismatch():
 def t_render_worker_calls_strip_before_alignment():
     """Source-check: der Alignment-Block in _render_worker muss _strip_pause_tokens
     VOR _compute_pause_trims/align_scenes_to_whisper aufrufen."""
-    src = open(os.path.join(ROOT, "dashboard.py")).read()
-    idx = src.find("trims = _compute_pause_trims(whisper_words)")
+    # Refactor Phase 3: _render_worker lebt jetzt in workers/render.py.
+    src = open(os.path.join(ROOT, "workers", "render.py")).read()
+    idx = src.find("trims = dashboard._compute_pause_trims(whisper_words)")
     assert idx != -1
     window = src[max(0, idx - 700):idx]
-    assert "_strip_pause_tokens(whisper_words)" in window, \
+    assert "dashboard._strip_pause_tokens(whisper_words)" in window, \
         "Strip-Fix fehlt: _strip_pause_tokens muss vor _compute_pause_trims laufen"
 
 
@@ -779,7 +780,8 @@ def t_render_worker_needs_alignment_also_checks_words():
     """Source-check: ein VOR diesem Feature bereits gerendertes Video hat start_aligned
     schon gesetzt, aber kein `words` -- die Resume-Optimierung darf das Alignment dann
     NICHT überspringen, sonst bleiben alte Bauchbinden-Captions für immer aktiv."""
-    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    # Refactor Phase 3: _render_worker lebt jetzt in workers/render.py.
+    src = open(os.path.join(ROOT, "workers", "render.py")).read()
     idx = src.find("needs_alignment = any(")
     assert idx != -1, "needs_alignment-Zeile nicht gefunden"
     line = src[idx:idx + 200]
@@ -792,7 +794,8 @@ def t_render_worker_persists_words_to_plan_json():
     `words` mitpersistieren -- sonst würde needs_alignment bei JEDEM künftigen
     Resume-Render wieder True liefern und die Ausrichtung sinnlos wiederholen, obwohl
     sie schon einmal korrekt berechnet wurde."""
-    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    # Refactor Phase 3: _render_worker lebt jetzt in workers/render.py.
+    src = open(os.path.join(ROOT, "workers", "render.py")).read()
     idx = src.find('by_i[s["i"]]["start_aligned"] = s["start_aligned"]')
     assert idx != -1
     body = src[idx:idx + 700]
@@ -960,9 +963,10 @@ def t_render_worker_transition_calls_use_position_lookup():
     """Source-check: _render_worker muss die Übergangs-Position (nicht den rohen
     Szenenindex) an _transition_for_scene übergeben -- an beiden Aufrufstellen
     (Frame-Kompensation + Crossfade-Merge)."""
-    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    # Refactor Phase 3: _render_worker lebt jetzt in workers/render.py.
+    src = open(os.path.join(ROOT, "workers", "render.py")).read()
     assert "transition_seq_idx_by_scene_idx" in src, \
-        "Lookup-Dict für Übergangs-Positionen fehlt in dashboard.py"
+        "Lookup-Dict für Übergangs-Positionen fehlt in workers/render.py"
     calls = [line for line in src.splitlines() if "_transition_for_scene(" in line]
     assert len(calls) >= 2
     for line in calls:
@@ -995,7 +999,8 @@ def t_no_sound_design_layer_render_worker_uses_raw_voice():
     legt er selbst extern drüber. _render_worker darf _build_final_audio nicht mehr
     AUFRUFEN (ein erklärender Kommentar darf die Funktion weiter beim Namen nennen)
     -- _mux_audio muss direkt mit audio_path gefüttert werden."""
-    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    # Refactor Phase 3: _render_worker lebt jetzt in workers/render.py.
+    src = open(os.path.join(ROOT, "workers", "render.py")).read()
     # final_path wird seit der Shorts-Erweiterung (RenderTarget) über einen
     # target-abhängigen Dateinamen gebaut (final.mp4 nur noch für target=="longform"),
     # statt der vorher hartkodierten Konstante -- der eigentliche Testzweck (keine
@@ -1061,7 +1066,8 @@ def t_render_worker_motion_always_recomputed_not_cached():
     mehr haben, sonst würde eine Bibliotheks-Bereinigung (wie diese) bei einem
     Resume-Render unsichtbar bleiben -- die alte, in plan.json gespeicherte Motion
     würde für immer weiterverwendet."""
-    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    # Refactor Phase 3: _render_worker lebt jetzt in workers/render.py.
+    src = open(os.path.join(ROOT, "workers", "render.py")).read()
     idx = src.find('stage("motion")')
     assert idx != -1
     body = src[idx:idx + 900]

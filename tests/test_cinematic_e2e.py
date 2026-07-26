@@ -2889,12 +2889,15 @@ def t_phase4_stale_render_tmp_called_at_init():
 def t_phase4_render_worker_try_finally_cleanup():
     """#69: Render-Worker hat try/finally — Cleanup läuft auch bei Exception."""
     import re
-    src = open(os.path.join(ROOT, "dashboard.py")).read()
-    # Suche die _render_worker-Funktion
-    i = src.find("def _render_worker(")
-    assert i >= 0, "_render_worker nicht gefunden"
+    # Refactor Phase 3: _render_worker lebt jetzt in workers/render.py.
+    src = open(os.path.join(ROOT, "workers", "render.py")).read()
+    # Suche die run()-Funktion (= die ex-_render_worker-Funktion)
+    i = src.find("def run(")
+    assert i >= 0, "_render_worker (jetzt workers/render.py:run) nicht gefunden"
+    # workers/render.py hat nur diese eine Top-Level-Funktion -- kein zweites "\n\ndef "
+    # danach (anders als früher in dashboard.py), also bis Dateiende nehmen.
     end = src.find("\n\ndef ", i + 50)
-    if end < 0: end = i + 5000
+    if end < 0: end = len(src)
     body = src[i:end]
     # try/finally muss innerhalb sein
     assert "try:" in body, "_render_worker braucht try-Block"
