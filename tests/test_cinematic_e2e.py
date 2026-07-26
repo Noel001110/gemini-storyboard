@@ -1314,8 +1314,10 @@ def t_phase34_minimax_constants_and_helpers():
 
 def t_phase34_minimax_endpoints_in_backend():
     """Phase 34: Backend exponiert /api/minimax_voices + /api/tts_provider.
-    GET tts_provider liest aus voice_settings.json, POST schreibt tts_provider dort."""
-    py = open(os.path.join(ROOT, "dashboard.py")).read()
+    GET tts_provider liest aus voice_settings.json, POST schreibt tts_provider dort.
+
+    Refactor Phase 4 (Teil 5): beide Endpoints leben jetzt in routes/voice.py."""
+    py = open(os.path.join(ROOT, "routes", "voice.py")).read()
     assert '"/api/minimax_voices"' in py, \
         "Phase 34 missing: backend /api/minimax_voices endpoint"
     assert '"/api/tts_provider"' in py, \

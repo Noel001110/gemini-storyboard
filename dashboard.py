@@ -2282,52 +2282,6 @@ class H(BaseHTTPRequestHandler):
                 "measured": measured is not None,
             })
         # ElevenLabs voiceover endpoints (Phase 1) --------------------------------
-        if p == "/api/elevenlabs_voices":
-            # Lists library voices + any cloned voices the account owns (account-only;
-            # no env fallback here — without a key the user just gets an empty list,
-            # which the dropdown renders as "configure voice first").
-            try:
-                req = urllib.request.Request(f"{ELEVENLABS_API}/voices",
-                    headers={"xi-api-key": elevenlabs_key(), "Accept": "application/json"})
-                with urllib.request.urlopen(req, timeout=15) as r:
-                    data = json.load(r)
-                voices = data.get("voices", [])
-                return self._send(200, {"voices": [{
-                    "voice_id": v.get("voice_id"),
-                    "name": v.get("name"),
-                    "category": v.get("category"),
-                    "preview_url": v.get("preview_url"),
-                } for v in voices]})
-            except Exception as e:
-                return self._send(200, {"voices": [], "error": str(e)})
-        # MiniMax-Provider: Voice-Liste vom Account holen. MiniMax-System-Voices
-        # sind nach Geschlecht + Sprache+ID kategorisiert (z.B. 'alloy', 'onyx' für
-        # tiefe männliche Erzähler; siehe ARCHITECTURE §34 für die Alex-Empfehlung).
-        if p == "/api/minimax_voices":
-            try:
-                req = urllib.request.Request(f"{MINIMAX_API}/get_voice",
-                    headers={"Authorization": f"Bearer {_minimax_key()}",
-                             "Accept": "application/json"})
-                with urllib.request.urlopen(req, timeout=15) as r:
-                    data = json.load(r)
-                # MiniMax-Response-Format: data.system_voice (Liste) + data.voice_cloning
-                # + data.voice_generation. Wir flattenen in ein einheitliches Format.
-                sys_voices = (data.get("system_voice") or [])
-                return self._send(200, {"voices": [{
-                    "voice_id": v.get("voice_id"),
-                    "name": v.get("voice_name") or v.get("voice_id"),
-                    "category": "system",
-                    "description": v.get("voice_description", ""),
-                } for v in sys_voices]})
-            except Exception as e:
-                return self._send(200, {"voices": [], "error": str(e)})
-        if p == "/api/tts_provider":
-            # Phase 34: GET gibt aktuelle Provider-Config zurück. Das Setzen läuft
-            # über POST /api/tts_provider (siehe do_POST) — do_GET hat keinen Body-`d`.
-            s = load_voice_settings(cid)
-            return self._send(200, {"tts_provider": s.get("tts_provider", "elevenlabs")})
-        if p == "/api/elevenlabs_settings":
-            return self._send(200, load_voice_settings(cid))
         if p == "/api/plan":
             try:    return self._send(200, json.load(open(v_plan(cid, vid))))
             except: return self._send(200, {"scenes": []})
@@ -2430,19 +2384,6 @@ class H(BaseHTTPRequestHandler):
         handled, _ = dispatch("POST", p, self, _qs, cid, vid, d)
         if handled:
             return
-
-        # ── Phase 34: TTS-Provider setzen (GET-Pendant liegt in do_GET) ────────
-        if p == "/api/tts_provider":
-            new_provider = d.get("tts_provider", "").strip()
-            if new_provider not in ("elevenlabs", "minimax", ""):
-                return self._send(400, {"error": f"Unknown tts_provider: {new_provider}"})
-            s = load_voice_settings(cid)
-            s["tts_provider"] = new_provider
-            # Bei Provider-Wechsel voice_id NICHT automatisch zurücksetzen —
-            # gleicher voice_id-String kann bei beiden Providern identisch sein
-            # (zufällig) oder halt Müll sein. User sieht es im Dropdown.
-            save_voice_settings(cid, s)
-            return self._send(200, {"ok": True, "tts_provider": new_provider})
 
         # ── Script generator (global, no channel needed) ──────────────────────
         if p == "/api/generate_script":
@@ -2715,25 +2656,6 @@ class H(BaseHTTPRequestHandler):
         # before /api/voiceover_generate so they don't fall through. Preview is its own
         # route because it returns raw audio bytes, NOT JSON — _send() handles bytes via
         # the `else` branch (dict/list/str only trigger the json/str->encode path).
-        if p == "/api/elevenlabs_settings":
-            # Per-field defaults — _callers may POST just one slider, everything else
-            # should keep its persisted value rather than silently regressing (an empty
-            # string for use_speaker_boost would turn into False via bool()).
-            save_voice_settings(cid, {
-                "voice_id": d.get("voice_id", ""),
-                "model_id": d.get("model_id") or ELEVENLABS_DEFAULT_MODEL,
-                "stability": d.get("stability") if d.get("stability") is not None else ELEVENLABS_VOICE_SETTINGS_DEFAULT["stability"],
-                "similarity_boost": d.get("similarity_boost") if d.get("similarity_boost") is not None else ELEVENLABS_VOICE_SETTINGS_DEFAULT["similarity_boost"],
-                "style": d.get("style") if d.get("style") is not None else ELEVENLABS_VOICE_SETTINGS_DEFAULT["style"],
-                # ElevenLabs-API: speed default 1.0. Range praxisüblich 0.7–1.2.
-                # Werte >1.0 sprechen schneller, <1.0 langsamer.
-                "speed": d.get("speed") if d.get("speed") is not None else ELEVENLABS_VOICE_SETTINGS_DEFAULT["speed"],
-                # bool fields: explicit false string is OK, missing key means "leave alone"
-                "use_speaker_boost": bool(d["use_speaker_boost"]) if "use_speaker_boost" in d else ELEVENLABS_VOICE_SETTINGS_DEFAULT["use_speaker_boost"],
-                "output_format": d.get("output_format") or ELEVENLABS_VOICE_SETTINGS_DEFAULT["output_format"],
-            })
-            return self._send(200, load_voice_settings(cid))
-
         if p == "/api/voiceover_delete":
             # User-Aktion "Voiceover löschen" — entfernt MP3 + audio_meta.json.
             # Der nächste /api/voiceover_generate läuft dann als echter Fresh-Call
@@ -3466,8 +3388,9 @@ def main():
     import routes.video_settings
     import routes.video_meta
     import routes.job_status
+    import routes.voice
     import store.db as store_db
-    # Refactor Phase 4 (Teil 1-4): Route-Gruppen aus dem dashboard.py-Handler
+    # Refactor Phase 4 (Teil 1-5): Route-Gruppen aus dem dashboard.py-Handler
     # ausgelagert. Reihenfolge unkritisch -- Präfixe überschneiden sich nicht
     # mit shorts/youtube/control.
     mount("/api/channels", routes.channels)
@@ -3494,6 +3417,10 @@ def main():
     mount("/api/thumbnail_status", routes.job_status)
     mount("/api/voiceover_status", routes.job_status)
     mount("/api/transcribe_status", routes.job_status)
+    mount("/api/elevenlabs_voices", routes.voice)
+    mount("/api/minimax_voices", routes.voice)
+    mount("/api/tts_provider", routes.voice)
+    mount("/api/elevenlabs_settings", routes.voice)
     mount("/api/shorts/", shorts.api)
     mount("/api/youtube/", youtube.api)
     mount("/api/control/", control.api)
