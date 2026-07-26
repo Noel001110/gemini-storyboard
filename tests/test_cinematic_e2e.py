@@ -884,10 +884,12 @@ def main():
 def t_round5_elevenlabs_double_click_guard():
     """Round-5 Fix-1: VOICE_JOBS[...]['running'] is checked atomically before setting.
     Without this guard, two rapid clicks each spawn their own ElevenLabs API call,
-    double-billing the user and racing the voiceover.mp3 file write."""
+    double-billing the user and racing the voiceover.mp3 file write.
+
+    Refactor Phase 4 (Teil 12): der Guard lebt jetzt in routes/voiceover.py."""
     import dashboard
     # Read the actual handler code to confirm the guard pattern is present.
-    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    src = open(os.path.join(ROOT, "routes", "voiceover.py")).read()
     # The guard must be inside the `with _VOICE_JOBS_LOCK:` block, BEFORE the running=True assignment
     assert "if existing.get(\"running\"):" in src, \
         "Round-5 Fix-1 missing: no existing-running-check inside _VOICE_JOBS_LOCK block before assignment"
