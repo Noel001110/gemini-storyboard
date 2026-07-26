@@ -2730,7 +2730,7 @@ class H(BaseHTTPRequestHandler):
             # audio_meta.json + der Audio-Pfad existierten, auch ohne brauchbare
             # Timestamps oder überhaupt einen Plan.
             if (bool(meta)
-                and meta.get("voiceover_source") in ("elevenlabs", "minimax")
+                and meta.get("voiceover_source") == "elevenlabs"
                 and os.path.exists(meta.get("path", ""))
                 and meta.get("voiceover_word_timestamps")
                 and os.path.exists(plan_p)):
@@ -3418,7 +3418,6 @@ def main():
     mount("/api/voiceover_status", routes.job_status)
     mount("/api/transcribe_status", routes.job_status)
     mount("/api/elevenlabs_voices", routes.voice)
-    mount("/api/minimax_voices", routes.voice)
     mount("/api/tts_provider", routes.voice)
     mount("/api/elevenlabs_settings", routes.voice)
     mount("/api/shorts/", shorts.api)

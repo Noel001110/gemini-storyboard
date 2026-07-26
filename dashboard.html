@@ -613,22 +613,15 @@
     </div>
 
     
-    <!-- Phase 33.4.1 — Schritt ③ — Audio (TTS-Provider, ElevenLabs / MiniMax) -->
-    <!-- Aus dem ehemaligen Option-C-Block innerhalb von ② Skript extrahiert. Der
-         User wählt hier zwischen ElevenLabs (default) und MiniMax als TTS-Provider.
-         ElevenLabs hat feinere Voice-Library (3000+) und English-Fidelity, MiniMax
-         ist preiswerter und gut für asiatische Sprachen. -->
+    <!-- Phase 33.4.1 — Schritt ③ — Audio (ElevenLabs) -->
+    <!-- Aus dem ehemaligen Option-C-Block innerhalb von ② Skript extrahiert.
+         MiniMax war bis 2026-07-26 ein zweiter, wählbarer TTS-Provider (Phase 34)
+         -- vollständig entfernt auf Nutzer-Wunsch (ungenutzt, nur ElevenLabs). -->
     <div class="card" data-step-section="3" id="cardAudio" style="margin-top:14px">
-      <h2>③ Audio generieren (TTS-Provider)</h2>
-      <p class="hint" style="margin-bottom:14px">Voice direkt generieren. Wähle zwischen <b>ElevenLabs</b> (feinste Voice-Library, 3000+ Stimmen, English-Fidelity) und <b>MiniMax Speech 2.6 HD</b> (günstiger, gut für asiatische Sprachen und Storytelling-Pacing). Beide liefern Word-Timestamps für die Scene-Alignment-Pipeline.</p>
-<div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Option C · TTS-Provider (ElevenLabs / MiniMax)</div>
+      <h2>③ Audio generieren (ElevenLabs)</h2>
+      <p class="hint" style="margin-bottom:14px">Voice direkt generieren mit <b>ElevenLabs</b> (feinste Voice-Library, 3000+ Stimmen, English-Fidelity). Liefert Word-Timestamps für die Scene-Alignment-Pipeline.</p>
+<div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Option C · ElevenLabs-Voice</div>
       <div class="row" style="align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
-        <label style="flex:0 0 200px">Provider
-          <select id="ttsProviderSelect" onchange="onTtsProviderChange()" style="width:100%">
-            <option value="elevenlabs">ElevenLabs</option>
-            <option value="minimax">MiniMax Speech (2.6 HD)</option>
-          </select>
-        </label>
         <label style="flex:1;min-width:240px">Voice auswählen
           <select id="elVoiceSelect" style="width:100%"><option value="">– Voices werden geladen … –</option></select>
         </label>
@@ -659,20 +652,6 @@
         </div>
       </div>
 
-      <div id="minimaxSlidersBlock" style="display:none" class="space-y-1">
-        <!-- Phase 34.1: MiniMax-spezifische Voice-Controls.
-             sichtbar nur wenn tts_provider=minimax. Drei Slider:
-             - Speed: 0.5–2.0 (1.0 = normal). MiniMax-API-Schema: voice_setting.speed.
-             - Volume: 0.0–2.0 (1.0 = normal). Schema: voice_setting.vol.
-             - Pitch: -12 bis +12 (0 = normal, semitones). Schema: voice_setting.pitch. -->
-        <div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:6px">
-          <label style="flex:1;min-width:160px">Speed <span id="mmSpeedVal" class="hint">1.00</span><input type="range" id="mmSpeed" min="0.5" max="2.0" step="0.05" value="1.0" style="width:100%"></label>
-          <label style="flex:1;min-width:160px">Volume <span id="mmVolumeVal" class="hint">1.00</span><input type="range" id="mmVolume" min="0" max="2.0" step="0.05" value="1.0" style="width:100%"></label>
-        </div>
-        <div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:6px">
-          <label style="flex:1;min-width:160px">Pitch <span id="mmPitchVal" class="hint">0</span><input type="range" id="mmPitch" min="-12" max="12" step="1" value="0" style="width:100%"></label>
-        </div>
-      </div>
       <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px">
         <button class="sm ghost" onclick="voiceTestPreview()">🎤 Voice testen</button>
         <button class="sm ghost" onclick="resetVoiceSliders()">↺ Reset</button>
@@ -2000,38 +1979,25 @@ function startPlanPoll(){
 // reports the ElevenLabs-specific state, and /api/plan_status reports the scene-plan
 // worker running next (mirroring how Option A drops into the same _transcribe_generate_worker).
 let _elVoices = [];
-// Phase 34 — Provider-abstrakte Voice-Loader-Funktion. Dispatched auf Basis
-// der TTS-Provider-Auswahl im #ttsProviderSelect-Dropdown. Wird sowohl beim
-// Initial-Load als auch beim Provider-Wechsel aufgerufen.
+// ElevenLabs Voice-Loader. Lädt die Voice-Liste + persistierte Slider-Werte
+// aus voice_settings.json und schreibt sie in die UI-Controls.
+// (Bis 2026-07-26 provider-abstrakt für ElevenLabs/MiniMax; MiniMax auf
+// Nutzer-Wunsch vollständig entfernt, siehe engine_elevenlabs.py.)
 async function loadTtsVoices(){
-  // Beim Initial-Load: Provider aus Backend-Settings holen wenn Dropdown noch
-  // nicht gesetzt ist. Verhindert dass der User "ElevenLabs" sieht obwohl
-  // voice_settings.json:tts_provider = "minimax" ist.
-  const provSel = $('ttsProviderSelect');
-  if (provSel && !provSel.value) {
-    try {
-      const cur = await ch_get('/api/tts_provider');
-      if (cur && cur.tts_provider) provSel.value = cur.tts_provider;
-    } catch (_) {}
-  }
-  const provider = provSel ? provSel.value : 'elevenlabs';
   const sel = $('elVoiceSelect');
   if(!sel) return;
   sel.innerHTML = '<option value="">– lade Voices … –</option>';
-  const endpoint = provider === 'minimax' ? '/api/minimax_voices' : '/api/elevenlabs_voices';
-  const r = await ch_get(endpoint).catch(() => ({voices:[], error:'Netzwerkfehler'}));
+  const r = await ch_get('/api/elevenlabs_voices').catch(() => ({voices:[], error:'Netzwerkfehler'}));
   _elVoices = (r && r.voices) || [];
   sel.innerHTML = '';
   if(!_elVoices.length){
-    const errMsg = provider === 'minimax'
-      ? 'MiniMax-Key in ~/.minimax_key oder $MINIMAX_API_KEY fehlt'
-      : 'ElevenLabs-Key in ~/.elevenlabs_key fehlt';
+    const errMsg = 'ElevenLabs-Key in ~/.elevenlabs_key fehlt';
     sel.innerHTML = `<option value="">– keine Voices verfügbar (${(r&&r.error)||errMsg}) –</option>`;
     return;
   }
   sel.innerHTML = '<option value="">– Voice wählen –</option>' + _elVoices.map(v =>
     `<option value="${escHtml(v.voice_id)}">${escHtml(v.name || v.voice_id)}${escHtml(v.category?' ('+v.category+')':'')}</option>`).join('');
-  // Current voice_id + Slider-Werte vom aktuellen Provider aus den settings holen.
+  // Current voice_id + Slider-Werte aus den settings holen.
   // Vorher (Bug): nur voice_id wurde vorbelegt, alle Slider (Stability/Similarity/
   // Style/Speed/Boost/Modell) blieben immer bei den HTML-Hardcoded-Defaults, egal was
   // in voice_settings.json gespeichert war — ein Server-Neustart oder Browser-Reload
@@ -2040,10 +2006,10 @@ async function loadTtsVoices(){
   // synchron dazu setzen.
   const cur = $('elVoiceSelect');
   const settings = await ch_get('/api/elevenlabs_settings').catch(() => null);
-  if(settings && settings.tts_provider === provider && settings.voice_id){
+  if(settings && settings.voice_id){
     cur.value = settings.voice_id;
   }
-  if(settings && provider === 'elevenlabs'){
+  if(settings){
     if(settings.model_id && $('elModelSel')) $('elModelSel').value = settings.model_id;
     if(settings.stability != null) $('elStab').value = settings.stability;
     if(settings.similarity_boost != null) $('elSim').value = settings.similarity_boost;
@@ -2054,40 +2020,27 @@ async function loadTtsVoices(){
   }
   $('elVoiceSelect').onchange = async () => {
     const v = $('elVoiceSelect').value;
-    if(provider === 'elevenlabs'){
-      // Audit Juli 2026 (Bereich 4): use whatever model_id is currently shown in the
-      // UI select (default eleven_multilingual_v2 -- v3 war zu langsam, siehe
-      // engine_elevenlabs.py ELEVENLABS_DEFAULT_MODEL).
-      const modelSel = $('elModelSel');
-      const model_id = modelSel ? (modelSel.value || 'eleven_multilingual_v2') : 'eleven_multilingual_v2';
-      await ch_api('/api/elevenlabs_settings', {
-        voice_id: v,
-        model_id,
-        stability: +$('elStab').value,
-        similarity_boost: +$('elSim').value,
-        style: +$('elStyle').value,
-        use_speaker_boost: $('elBoost').value === 'true',
-        speed: +$('elSpeed').value,
-        output_format: 'mp3_44100_128',
-        tts_provider: 'elevenlabs',
-      });
-    } else {
-      await ch_api('/api/elevenlabs_settings', {
-        voice_id: v,
-        model_id: 'minimax-speech-2.6-hd',
-        tts_provider: 'minimax',
-        speed:  +$('mmSpeed').value,
-        volume: +$('mmVolume').value,
-        pitch:  parseInt($('mmPitch').value, 10),
-      });
-    }
+    // Audit Juli 2026 (Bereich 4): use whatever model_id is currently shown in the
+    // UI select (default eleven_multilingual_v2 -- v3 war zu langsam, siehe
+    // engine_elevenlabs.py ELEVENLABS_DEFAULT_MODEL).
+    const modelSel = $('elModelSel');
+    const model_id = modelSel ? (modelSel.value || 'eleven_multilingual_v2') : 'eleven_multilingual_v2';
+    await ch_api('/api/elevenlabs_settings', {
+      voice_id: v,
+      model_id,
+      stability: +$('elStab').value,
+      similarity_boost: +$('elSim').value,
+      style: +$('elStyle').value,
+      use_speaker_boost: $('elBoost').value === 'true',
+      speed: +$('elSpeed').value,
+      output_format: 'mp3_44100_128',
+    });
   };
   // elModelSel hat keine eigene voice_id-Änderung, braucht also einen eigenen
   // Persist-Handler (vorher: Modell-Wahl ging beim nächsten Server-Neustart/Reload
   // verloren, weil nur elVoiceSelect.onchange speicherte).
   if($('elModelSel')){
     $('elModelSel').onchange = async () => {
-      if(provider !== 'elevenlabs') return;
       await ch_api('/api/elevenlabs_settings', {
         voice_id: $('elVoiceSelect').value,
         model_id: $('elModelSel').value,
@@ -2097,34 +2050,11 @@ async function loadTtsVoices(){
         use_speaker_boost: $('elBoost').value === 'true',
         speed: +$('elSpeed').value,
         output_format: 'mp3_44100_128',
-        tts_provider: 'elevenlabs',
       });
     };
   }
-  _ttsSlidersVisibility(provider);
   _elWireSliders();
-  _mmWireSliders();
   _elRefreshGenBtn();
-}
-
-// Phase 34 — Provider-Wechsel-Handler. Setzt tts_provider in den settings,
-// lädt die Voice-Liste neu, und schreibt Provider-spezifische Default-Settings.
-async function onTtsProviderChange(){
-  const provider = $('ttsProviderSelect').value;
-  await ch_api('/api/tts_provider', { tts_provider: provider });
-  await loadTtsVoices();
-}
-
-// Phase 34.1 — Slider-Visibility-Controller. Zeigt je nach gewähltem Provider
-// den ElevenLabs-Block (Stability/Similarity/Style/Speaker-Boost) ODER den
-// MiniMax-Block (Speed/Volume/Pitch). Versteckt die jeweils ANDEREN Slider
-// damit User nicht denkt sie wirken auch auf den anderen Provider.
-function _ttsSlidersVisibility(provider){
-  const elBlock = $('elSlidersBlock');
-  const mmBlock = $('minimaxSlidersBlock');
-  if (!elBlock || !mmBlock) return;
-  elBlock.style.display = (provider === 'elevenlabs') ? '' : 'none';
-  mmBlock.style.display = (provider === 'minimax')   ? '' : 'none';
 }
 
 function _elWireSliders(){
@@ -2138,33 +2068,6 @@ function _elWireSliders(){
   };
   s.oninput = i.oninput = st.oninput = sp.oninput = b.onchange = upd;
   upd();
-}
-
-// Phase 34.1 — MiniMax-Slider-Wire-Up. Speed (0.5–2.0), Volume (0–2.0),
-// Pitch (-12..+12 semitones). Änderungen werden via ch_api zu
-// /api/elevenlabs_settings gepersistiert (mit tts_provider='minimax').
-function _mmWireSliders(){
-  const s = $('mmSpeed'), v = $('mmVolume'), p = $('mmPitch');
-  if (!s || !v || !p) return;
-  const upd = () => {
-    $('mmSpeedVal').textContent  = (+s.value).toFixed(2);
-    $('mmVolumeVal').textContent = (+v.value).toFixed(2);
-    $('mmPitchVal').textContent  = String(parseInt(p.value, 10));
-  };
-  s.oninput = v.oninput = p.oninput = upd;
-  upd();
-  // Persist on change — kombiniert mit dem Voice-Settings-Endpoint
-  const persist = async () => {
-    await ch_api('/api/elevenlabs_settings', {
-      voice_id: $('elVoiceSelect').value,
-      model_id: 'minimax-speech-2.6-hd',
-      tts_provider: 'minimax',
-      speed:  +s.value,
-      volume: +v.value,
-      pitch:  parseInt(p.value, 10),
-    });
-  };
-  s.onchange = v.onchange = p.onchange = persist;
 }
 
 // Wenn das Option-B-Skriptfeld leer ist, aber ein Plan mit Szenen existiert

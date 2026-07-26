@@ -1,20 +1,20 @@
-"""routes/voice.py — Prefix /api/elevenlabs_voices, /api/minimax_voices,
-/api/tts_provider, /api/elevenlabs_settings.
+"""routes/voice.py — Prefix /api/elevenlabs_voices, /api/tts_provider,
+/api/elevenlabs_settings.
 
 Fünfte Route-Gruppe aus dem dashboard.py-Handler (Refactor Phase 4, Teil 5).
-Erste Gruppe die einen echten externen API-Call macht (ElevenLabs/MiniMax
-Voice-Listen) -- reiner Read/Write auf Settings + ein synchroner GET-Call
-nach außen, aber kein Worker-Thread.
+Erste Gruppe die einen echten externen API-Call macht (ElevenLabs Voice-Liste)
+-- reiner Read/Write auf Settings + ein synchroner GET-Call nach außen, aber
+kein Worker-Thread.
 
 engine_elevenlabs.py ist bereits ein eigenständiges Modul ohne dashboard.py-
 Abhängigkeit (Phase-J-Extraktion, vor diesem Refactor) -- Top-Level-Import
 hier ist sicher, kein Zyklus-Risiko, kein lazy `import dashboard` nötig.
 
-Hinweis (2026-07-26, Nutzer-Rückmeldung): MiniMax wird nicht genutzt (nur
-ElevenLabs); die Route bleibt hier vorerst unverändert mitgezogen (reine
-Verschiebung, kein Verhaltenswechsel) -- eine vollständige Entfernung von
-MiniMax (Konstanten, Frontend-Dropdown, ~6 zugehörige Tests) ist bewusst ein
-separater Folge-Task, nicht Teil dieses Move-Commits.
+Hinweis (2026-07-26, Nutzer-Rückmeldung): MiniMax (zweiter TTS-Provider,
+Phase 34) war ungenutzt und wurde auf Nutzer-Wunsch restlos entfernt --
+/api/minimax_voices existiert nicht mehr, ElevenLabs ist der einzige
+Provider. /api/tts_provider bleibt als generische Infrastruktur bestehen
+(akzeptiert nur noch "elevenlabs"), falls je ein weiterer Provider dazukommt.
 """
 from __future__ import annotations
 
@@ -25,8 +25,6 @@ from engine_elevenlabs import (
     ELEVENLABS_API,
     ELEVENLABS_DEFAULT_MODEL,
     ELEVENLABS_VOICE_SETTINGS_DEFAULT,
-    MINIMAX_API,
-    _minimax_key,
     elevenlabs_key,
     load_voice_settings,
     save_voice_settings,
@@ -54,31 +52,7 @@ def handle(method, path, handler, qs, cid, vid, body):
             handler._send(200, {"voices": [], "error": str(e)})
         return True, None
 
-    if method == "GET" and path == "/api/minimax_voices":
-        # MiniMax-Provider: Voice-Liste vom Account holen. MiniMax-System-Voices
-        # sind nach Geschlecht + Sprache+ID kategorisiert (z.B. 'alloy', 'onyx' für
-        # tiefe männliche Erzähler; siehe ARCHITECTURE §34 für die Alex-Empfehlung).
-        try:
-            req = urllib.request.Request(f"{MINIMAX_API}/get_voice",
-                headers={"Authorization": f"Bearer {_minimax_key()}",
-                         "Accept": "application/json"})
-            with urllib.request.urlopen(req, timeout=15) as r:
-                data = json.load(r)
-            # MiniMax-Response-Format: data.system_voice (Liste) + data.voice_cloning
-            # + data.voice_generation. Wir flattenen in ein einheitliches Format.
-            sys_voices = (data.get("system_voice") or [])
-            handler._send(200, {"voices": [{
-                "voice_id": v.get("voice_id"),
-                "name": v.get("voice_name") or v.get("voice_id"),
-                "category": "system",
-                "description": v.get("voice_description", ""),
-            } for v in sys_voices]})
-        except Exception as e:
-            handler._send(200, {"voices": [], "error": str(e)})
-        return True, None
-
     if method == "GET" and path == "/api/tts_provider":
-        # Phase 34: GET gibt aktuelle Provider-Config zurück.
         s = load_voice_settings(cid)
         handler._send(200, {"tts_provider": s.get("tts_provider", "elevenlabs")})
         return True, None
@@ -86,14 +60,11 @@ def handle(method, path, handler, qs, cid, vid, body):
     if method == "POST" and path == "/api/tts_provider":
         d = body or {}
         new_provider = d.get("tts_provider", "").strip()
-        if new_provider not in ("elevenlabs", "minimax", ""):
+        if new_provider not in ("elevenlabs", ""):
             handler._send(400, {"error": f"Unknown tts_provider: {new_provider}"})
             return True, None
         s = load_voice_settings(cid)
         s["tts_provider"] = new_provider
-        # Bei Provider-Wechsel voice_id NICHT automatisch zurücksetzen —
-        # gleicher voice_id-String kann bei beiden Providern identisch sein
-        # (zufällig) oder halt Müll sein. User sieht es im Dropdown.
         save_voice_settings(cid, s)
         handler._send(200, {"ok": True, "tts_provider": new_provider})
         return True, None

@@ -223,16 +223,15 @@ def t_k2_speed_clamped_to_official_range():
     assert loaded["speed"] == 0.7, f"speed 0.3 must clamp to 0.7, got {loaded['speed']}"
 
 
-def t_k5_tts_provider_and_minimax_fields_persist():
+def t_k5_tts_provider_field_persists():
+    """MiniMax (zweiter TTS-Provider) wurde 2026-07-26 entfernt (ungenutzt) --
+    tts_provider bleibt als generisches Feld bestehen, akzeptiert aber nur noch
+    'elevenlabs'."""
     import engine_elevenlabs as el
-    el.save_voice_settings(TEST_CID, {
-        "voice_id": "v", "tts_provider": "minimax", "volume": 1.5, "pitch": -3,
-    })
+    el.save_voice_settings(TEST_CID, {"voice_id": "v", "tts_provider": "elevenlabs"})
     loaded = el.load_voice_settings(TEST_CID)
-    assert loaded.get("tts_provider") == "minimax", \
+    assert loaded.get("tts_provider") == "elevenlabs", \
         f"tts_provider must survive save/load roundtrip, got {loaded.get('tts_provider')}"
-    assert loaded.get("volume") == 1.5
-    assert loaded.get("pitch") == -3
 
 
 # --- A5: _preserve_rendered_scenes ---------------------------------------------
@@ -1888,8 +1887,8 @@ def main():
 
         summary_section("K2/K5: save_voice_settings Clamp + Whitelist")
         run(t_k2_speed_clamped_to_official_range, "speed wird auf 0.7-1.2 geclampt")
-        run(t_k5_tts_provider_and_minimax_fields_persist,
-            "tts_provider/volume/pitch überleben save/load-Roundtrip")
+        run(t_k5_tts_provider_field_persists,
+            "tts_provider überlebt save/load-Roundtrip")
 
         summary_section("A5: Preserve-Helper (Voiceover-Regenerate verwaist keine Bilder mehr)")
         run(t_a5_preserve_matches_by_normalized_text, "Preserve matched via normalisierten Text")
