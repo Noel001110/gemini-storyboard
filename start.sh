@@ -9,8 +9,15 @@ PORT="${1:-8010}"
 # evtl. alte Instanz auf dem Port beenden
 lsof -ti tcp:"$PORT" | xargs kill -9 2>/dev/null
 
-echo "Starte Dashboard auf http://localhost:$PORT …"
-python3 dashboard.py --port "$PORT" &
+PYTHON_BIN="python3"
+if [ -f "./.venv_whisper/bin/python" ]; then
+  PYTHON_BIN="./.venv_whisper/bin/python"
+elif [ -f "./.venv/bin/python" ]; then
+  PYTHON_BIN="./.venv/bin/python"
+fi
+
+echo "Starte Dashboard auf http://localhost:$PORT mit $PYTHON_BIN …"
+"$PYTHON_BIN" dashboard.py --port "$PORT" &
 PID=$!
 
 # warten bis der Server antwortet, dann Browser öffnen

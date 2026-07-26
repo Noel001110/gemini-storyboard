@@ -9,6 +9,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import shutil
 from urllib.parse import urlparse, parse_qs
 
+# ── Shorts/Upload/Control-Erweiterung: Prefix-Dispatch (siehe routes/__init__.py) ──
+from routes import dispatch, mount
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 CHANNELS_DIR  = os.path.join(HERE, "channels")
 CHANNELS_FILE = os.path.join(CHANNELS_DIR, "channels.json")
@@ -89,6 +92,7 @@ from engine_elevenlabs import *  # noqa: F401,F403
 # hier hält den alten Code lauffähig, ohne dass ich 200+ Zeilen patchen muss.
 from engine.scenes import (  # noqa: F401,F403
     MAX_SCENE_SEC, PACING_TARGET_SEC, NORMAL_HARD_CAP_SEC, PACING_WARN_THRESHOLD,
+    PacingProfile, PACING_PROFILES,
     ACCENT_PAUSE_THRESHOLD_SEC, ACCENT_MIN_SCENE_DUR_SEC,
     split_units, segment_by_pacing, _renumber_seq_pos, _apply_visual_sequences_direct,
     _wait_for_chain_scene, _resolve_chain_refs,
@@ -101,6 +105,7 @@ from engine.scenes import (  # noqa: F401,F403
 # Handler referenzieren weiterhin `dashboard._render_clip`, `dashboard.RENDER_FPS`, etc.
 from engine.render import (  # noqa: F401,F403
     RENDER_FPS, RENDER_WIDTH, RENDER_HEIGHT, RENDER_SUPERSAMPLE_WIDTH,
+    RenderTarget, RENDER_TARGETS,
     MOTION_LIBRARY, _PACING_MOTION_CANDIDATES, _PHASE_MOTION_CANDIDATES, TRANSITION_LIBRARY,
     _probe_video_encoder, _apply_sync_invariant,
     _build_motion, _normalize_motion, _motion_for_scene, _overlay_specs_for_scene,
@@ -135,6 +140,7 @@ from engine.prompts import (  # noqa: F401,F403
     visual_prompts,
     generate_script, generate_titles,
     make_thumbnail_prompt, gen_thumbnail_image,
+    make_thumbnail_text, composite_thumbnail_text,
 )
 
 # ── Phase Q + 38: Stil-Presets nach engine/presets.py ─────────────────────────
@@ -384,6 +390,10 @@ def ch_videos_file(cid):return os.path.join(ch_dir(cid), "videos.json")
 # (Phase 1 keeps it channel-scoped only).
 def ch_voice_id(cid):       return os.path.join(ch_dir(cid), "voice_id.txt")
 def ch_voice_settings(cid): return os.path.join(ch_dir(cid), "voice_settings.json")
+# Upload-Erweiterung: optionale Ziel-Playlist pro Kanal (rohe Playlist-ID, leere/
+# fehlende Datei = keine Zuordnung) -- gilt für Longform UND alle Shorts-Varianten
+# dieses Kanals, gleiche Text-Datei-Konvention wie ch_voice_id oben.
+def ch_youtube_playlist_id(cid): return os.path.join(ch_dir(cid), "youtube_playlist_id.txt")
 def get_channel_style_refs(cid: str) -> list:
     """Style-Reference-Images: defines the global look (line weight, palette, render
     style) for image generation. Bis zu 3 Referenzbilder (Audit Juli 2026, Bereich 3
@@ -410,12 +420,76 @@ def v_out(cid, vid):     return os.path.join(v_dir(cid, vid), "generated")
 def v_plan(cid, vid):    return os.path.join(v_out(cid, vid), "plan.json")
 def v_uploads(cid, vid): return os.path.join(v_dir(cid, vid), "uploads")
 def v_audio(cid, vid):   return os.path.join(v_uploads(cid, vid), "audio_meta.json")
+
+# Juli 2026 (User-Wunsch "Shorts in einen extra Ordner, nach Video sortiert, zum
+# Weiterleiten"): eigener Top-Level-Ordner (Geschwister von channels/), NICHT unter
+# channels/<cid>/videos/<vid>/generated/ -- dort liegen die fertigen Shorts bisher
+# vermischt mit 70+ Szenenbildern, render_tmp/ etc., unpraktisch zum schnellen Finden.
+SHORTS_EXPORT_DIR = os.path.join(HERE, "shorts_export")
+def shorts_export_dir(cid, vid): return os.path.join(SHORTS_EXPORT_DIR, cid, vid)
+
+
+def export_short_copy(cid: str, vid: str, src_path: str, out_name: str) -> str | None:
+    """Kopiert einen fertigen Short nach shorts_export/<cid>/<vid>/<out_name> -- best
+    effort, ein Fehlschlag hier darf den eigentlichen Render/Queue-Vorgang nicht
+    kaputt machen (gleiches Prinzip wie die Best-effort-Schritte in youtube/upload.py).
+    Gibt den Zielpfad zurück, oder None bei Fehler."""
+    import shutil
+    try:
+        out_dir = shorts_export_dir(cid, vid)
+        os.makedirs(out_dir, exist_ok=True)
+        dst = os.path.join(out_dir, out_name)
+        shutil.copy2(src_path, dst)
+        return dst
+    except Exception as e:
+        print(f"  [ShortsExport] Kopieren fehlgeschlagen ({src_path} -> {out_name}): {e}", flush=True)
+        return None
 def v_meta(cid, vid):    return os.path.join(v_dir(cid, vid), "meta.json")  # titles, thumbnail prompt
 def v_script(cid, vid):  return os.path.join(v_dir(cid, vid), "script.json")  # raw narration, survives sessions
 # Deliberately separate from v_out()/generated/ — the render worker rmtree()s this
 # directory after a successful render, and that must NEVER be able to reach the folder
 # holding the actual generated images/videos.
 def v_render_tmp(cid, vid): return os.path.join(v_dir(cid, vid), "render_tmp")
+
+# Struktur-/Schnitt-Review (Juli 2026): SCRIPT_SYSTEM behauptet "~120-150 wpm", real
+# gemessen an zwei fertigen Videos waren es 164-188 wpm (bis zu 24 wpm Unterschied
+# ZWISCHEN Videos desselben Kanals) -- die Segmentierung plante mit einer falschen
+# Sprechrate, wodurch die beabsichtigten calm/punchy-Dauerkontraste zur Mitte
+# kollabierten (Root Cause des erratischen Schnitt-Rhythmus). Diese Funktion ersetzt
+# die feste Annahme durch die tatsächlich gemessene Rate der zuletzt fertig gerenderten
+# Videos DESSELBEN Kanals -- pro Kanal, nie global hartkodiert (Generalisierungs-Vorgabe).
+DEFAULT_WPM_FALLBACK = 150.0  # nur genutzt, wenn der Kanal noch KEIN aligned Video hat
+
+
+def _measure_channel_wpm(cid: str, fallback: float | None = DEFAULT_WPM_FALLBACK) -> float | None:
+    """Liest alle vorhandenen plan.json-Dateien des Kanals, summiert Wörter und
+    Whisper-ausgerichtete Dauer (start_aligned/end_aligned) über ALLE Videos hinweg,
+    und gibt die reale Sprechrate zurück. Ein Video ohne Alignment (noch nie gerendert)
+    trägt nichts bei. Kein Alignment im ganzen Kanal vorhanden -> `fallback`."""
+    total_words = 0
+    total_dur = 0.0
+    try:
+        videos_dir = os.path.join(ch_dir(cid), "videos")
+        vids = os.listdir(videos_dir) if os.path.isdir(videos_dir) else []
+    except OSError:
+        vids = []
+    for vid in vids:
+        try:
+            plan = json.load(open(v_plan(cid, vid)))
+        except Exception:
+            continue
+        for s in plan.get("scenes", []):
+            if s.get("start_aligned") is None or s.get("end_aligned") is None:
+                continue
+            dur = s["end_aligned"] - s["start_aligned"]
+            if dur <= 0:
+                continue
+            total_words += len(str(s.get("text", "")).split())
+            total_dur += dur
+    if total_dur <= 0:
+        return fallback
+    return total_words / (total_dur / 60.0)
+
 
 def load_v_meta(cid, vid):
     try:    return json.load(open(v_meta(cid, vid)))
@@ -1402,17 +1476,34 @@ def _batch_generate_worker(cid: str, vid: str, force: bool = False):
                 # Referenzbild") erreichten KIE jemals. Siehe charsheet_refs_for_entity().
                 char_refs, entity_key = charsheet_refs_for_entity(plan, cid, vid, prompt_entity)
                 full_prompt = _build_image_prompt(scene.get("prompt", ""), master, char_refs,
-                                                  phase=scene.get("phase", ""), entity=entity_key)
+                                                  phase=scene.get("phase", ""), entity=entity_key,
+                                                  has_style_refs=use_style_ref)
                 if scene.get("seq_id") is not None and scene.get("seq_pos", 0) >= 1:
                     # Positive constraints only — negated instructions ("do NOT redesign")
                     # are weighted weaker by instruction-following image models and can
                     # even be misread as a focus cue ("pink elephant effect").
+                    #
+                    # Juli 2026 (User-Report "#28 einer Rapid-Buzzword-Sequenz bleibt trotz
+                    # 4x Neu-Generieren 1:1 dasselbe Bild"): verifiziert mit echten Dateien
+                    # (jedes Mal andere Bytes/Hash, 4 verschiedene KIE-Task-IDs im Log — kein
+                    # Caching-/Routing-Bug). Ursache: die alte Formulierung erlaubte explizit
+                    # nur "camera angle/framing" und "die beschriebene Aktion" als Änderung —
+                    # welches Wort/welche Zahl auf dem Screen steht, war nirgends genannt, das
+                    # Modell fror es also als Teil des zu erhaltenden "background environment"
+                    # ein. Additiver Fix, NICHTS von den bestehenden Locks (Identität, Outfit,
+                    # Hintergrund-Umgebung, Kamera-Setup, Rendering-Stil) wird gelockert — nur
+                    # eine zusätzliche, eng umrissene Erlaubnis für eingeblendeten Text kommt
+                    # dazu, die nur bei Screens/Schildern/Flächen mit Text überhaupt greift.
                     full_prompt += (
                         "\n\nCONTINUITY (STRICT): This is a continuation of the exact same "
-                        "shot as the reference image(s). You MUST perfectly match the "
-                        "identity, outfit, and background environment shown in the "
-                        "references. Change ONLY the camera angle/framing or the specific "
-                        "action described above.")
+                        "shot as the reference image(s) — same camera setup, same "
+                        "background environment, same overall rendering style. Update the "
+                        "following to match THIS scene's description exactly: the camera "
+                        "angle/framing, the specific action described above, and any "
+                        "on-screen text, word, number or graphic shown on a screen, sign or "
+                        "surface — always render exactly what THIS scene's description "
+                        "names there, even if the reference image shows a different word "
+                        "or graphic in that spot.")
                 elif entity_refs:
                     # Same character, but NOT the same shot — unlike the sequence case
                     # above, background/pose/action must follow the scene description,
@@ -1647,14 +1738,26 @@ def _veo_job_worker(job_id: str, task_id: str, scene: dict,
 # dieser Renderer arbeitet ausschließlich auf bereits fertigen Standbildern.
 
 
-def _render_worker(cid: str, vid: str):
+def _render_worker(cid: str, vid: str, target: str = "longform"):
     """Orchestrates: prepare (sync invariant) -> motion -> clips (one Ken Burns clip per
     scene, resume-safe) -> assemble (concat) -> audio (mux) -> review (ffprobe checks).
     Sequential — one ffmpeg process at a time, no thread pool over rendering (that would
-    oversubscribe the CPU well beyond what the images' 8-way concurrency already does)."""
-    key = (cid, vid)
-    plan_path = v_plan(cid, vid)
-    render_dir = v_render_tmp(cid, vid)
+    oversubscribe the CPU well beyond what the images' 8-way concurrency already does).
+
+    `target` (Shorts-Erweiterung): key wird (cid, vid, target) und render_dir bekommt
+    einen zielspezifischen Unterordner, damit ein Shorts- und ein Longform-Render
+    desselben Videos nie denselben RENDER_JOBS-Eintrag oder dieselben render_tmp/-Dateien
+    teilen. Default hält den einen bestehenden Aufruf ohne target unverändert lauffähig."""
+    key = (cid, vid, target)
+    render_target = RENDER_TARGETS[target]
+    # Nicht-Longform-Targets (Shorts) rendern aus einem eigenen, von shorts/api.py
+    # geschriebenen Plan + einer eigenen (kürzeren, bereits geschnittenen) Audiospur --
+    # siehe shorts/clip_select.py. Longform-Pfade bleiben dadurch komplett unangetastet.
+    if target == "longform":
+        plan_path = v_plan(cid, vid)
+    else:
+        plan_path = os.path.join(v_out(cid, vid), f"{target}_plan.json")
+    render_dir = os.path.join(v_render_tmp(cid, vid), target)
     os.makedirs(render_dir, exist_ok=True)
 
     def stage(name, done=0, total=0):
@@ -1678,7 +1781,10 @@ def _render_worker(cid: str, vid: str):
 
         stage("prepare")
         try:
-            audio_meta = json.load(open(v_audio(cid, vid)))
+            if target == "longform":
+                audio_meta = json.load(open(v_audio(cid, vid)))
+            else:
+                audio_meta = json.load(open(os.path.join(v_uploads(cid, vid), f"{target}_audio_meta.json")))
             audio_path = audio_meta.get("path", "")
         except Exception:
             audio_path = ""
@@ -1695,7 +1801,8 @@ def _render_worker(cid: str, vid: str):
         # render_tmp/, das nach jedem Render gelöscht wird) -- ihre Existenz ist damit
         # selbst der Resume-Marker: schon getrimmt + Szenen schon ausgerichtet heißt
         # kein erneuter Whisper-Lauf bei einem Wiederholungs-Render.
-        trimmed_audio_path = os.path.join(v_uploads(cid, vid), "voiceover_trimmed.wav")
+        trimmed_name = "voiceover_trimmed.wav" if target == "longform" else f"{target}_voiceover_trimmed.wav"
+        trimmed_audio_path = os.path.join(v_uploads(cid, vid), trimmed_name)
         # Cinematic-Mix Juli 2026 (Schritt 3): auch neu alignen, wenn start_aligned
         # zwar schon gesetzt ist, aber `words` (Wort-Slices für die 1-Wort-Captions)
         # fehlt -- z.B. bei einem VOR diesem Feature bereits erfolgreich gerenderten
@@ -1743,23 +1850,14 @@ def _render_worker(cid: str, vid: str):
                       f"(Sprache: {whisper_lang}, p={whisper_prob})",
                       flush=True)
 
-                # Phase O: Wort-Akzent-Puls — pro punchy/CLIMAX-Szene einen Akzent-Zeitpunkt
-                # aus den adjusted_words ableiten. Plan §4.4.
-                n_accents = 0
+                # Phase O: Wort-Akzent-Puls -- User-Feedback (Klimax-Short-Test): der Gauß-
+                # Zoom-Puls (_render_clip, engine/render.py) wirkt in CLIMAX-lastigem
+                # Material wie ein störendes "Herzschlag"-Zittern. Deaktiviert: accent_t
+                # wird nie mehr gesetzt, _render_clip's Puls-Zweig (`if accent_t is not
+                # None`) greift dadurch nie mehr. _is_accent_eligible/_compute_accent_t
+                # bleiben als toter, jederzeit reaktivierbarer Code erhalten.
                 for s in scenes:
-                    if not _is_accent_eligible(s):
-                        s.pop("accent_t", None)
-                        continue
-                    st = s.get("start_aligned") if s.get("start_aligned") is not None else s.get("start", 0.0)
-                    en = s.get("end_aligned") if s.get("end_aligned") is not None else (st + s.get("dur", 0.0))
-                    accent = _compute_accent_t(st, en, adjusted_words)
-                    if accent is not None:
-                        s["accent_t"] = accent
-                        n_accents += 1
-                    else:
-                        s.pop("accent_t", None)
-                if n_accents:
-                    print(f"  [Phase O] Akzent-Puls: {n_accents} Szene(n) mit accent_t gesetzt", flush=True)
+                    s.pop("accent_t", None)
             except Exception as e:
                 # Graceful degradation: scenes keep their estimated start/dur, the
                 # sync invariant and SFX timing simply fall back to those (both
@@ -1820,7 +1918,8 @@ def _render_worker(cid: str, vid: str):
                 raise RuntimeError("Abgebrochen (Stop angefordert)")
             clip_path = os.path.join(render_dir, f"{s['i']:03d}.mp4")
             img_path = os.path.join(v_out(cid, vid), s["file"])
-            _render_clip(img_path, s, clip_path, fps=RENDER_FPS, overlay_opts=overlay_opts)
+            _render_clip(img_path, s, clip_path, fps=RENDER_FPS, overlay_opts=overlay_opts,
+                         target=render_target)
             clip_paths.append(clip_path)
             s["clip_file"] = os.path.basename(clip_path)
             stage("clips", idx + 1, len(scenes))
@@ -1852,7 +1951,10 @@ def _render_worker(cid: str, vid: str):
         _assemble_clips(clip_paths, silent_path)
 
         stage("audio")
-        final_path = os.path.join(v_out(cid, vid), "final.mp4")
+        # target-spezifischer Dateiname: verhindert, dass ein Shorts-Render das
+        # bestehende Longform-final.mp4 desselben Videos überschreibt.
+        final_name = "final.mp4" if target == "longform" else f"final_{target}.mp4"
+        final_path = os.path.join(v_out(cid, vid), final_name)
         # User-Entscheidung Juli 2026: keine Musik/SFX mehr im Render -- der User legt
         # Soundeffekte künftig selbst extern über die fertige Sprecherspur. Nur noch die
         # bereits pausen-gekürzte Sprecherspur (audio_path) wird gemuxt, unverändert.
@@ -1887,7 +1989,14 @@ def _render_worker(cid: str, vid: str):
                     if s.get("words") is not None:
                         by_i[s["i"]]["words"] = s["words"]
             fresh_plan["audio_duration"] = audio_duration
-            fresh_plan["render"] = {"file": "final.mp4", "ts": int(time.time()), "checks": checks}
+            render_record = {"file": final_name, "ts": int(time.time()), "checks": checks}
+            # dashboard.html liest bisher ausschließlich plan.render.file (Longform-Vorschau) --
+            # dieses Feld bleibt deshalb Longform-exklusiv. render_by_target[target] ist das
+            # zusätzliche, kollisionsfreie Feld für jeden Ziel-Typ (auch longform selbst),
+            # das die künftige Shorts-Karte (dashboard.html) liest.
+            fresh_plan.setdefault("render_by_target", {})[target] = render_record
+            if target == "longform":
+                fresh_plan["render"] = render_record
             _atomic_write_json(plan_path, fresh_plan, ensure_ascii=False, indent=1)
 
         #         # Only delete render_tmp after mux + selfcheck succeeded, and only this
@@ -1899,9 +2008,9 @@ def _render_worker(cid: str, vid: str):
 
         with _RENDER_JOBS_LOCK:
             RENDER_JOBS[key] = {"running": False, "stop_requested": False, "stage": "fertig",
-                                  "done": len(scenes), "total": len(scenes), "error": None, "file": "final.mp4",
+                                  "done": len(scenes), "total": len(scenes), "error": None, "file": final_name,
                                   "ts": time.time()}
-        print(f"  [Render] {cid}/{vid}: fertig → final.mp4", flush=True)
+        print(f"  [Render] {cid}/{vid} ({target}): fertig → {final_name}", flush=True)
     except Exception as e:
         import traceback; traceback.print_exc()
         with _RENDER_JOBS_LOCK:
@@ -1909,7 +2018,7 @@ def _render_worker(cid: str, vid: str):
             RENDER_JOBS[key] = {"running": False, "stop_requested": False, "stage": "error",
                                   "done": prev.get("done", 0), "total": prev.get("total", 0),
                                   "error": str(e), "file": None, "ts": time.time()}
-        print(f"  [Render] {cid}/{vid}: Fehler: {e}", flush=True)
+        print(f"  [Render] {cid}/{vid} ({target}): Fehler: {e}", flush=True)
     finally:
         # Schwäche #69: Cleanup läuft IMMER — auch bei Crash, SIGTERM, oder Erfolg.
         if not cleanup_done:
@@ -2162,10 +2271,16 @@ def _plan_generate_worker(cid: str, vid: str, text: str, wpm: float, sec: float)
             PLAN_JOBS[key] = {"running": False, "step": "Fehler", "error": str(e), "done": False, "ts": time.time()}
 
 
-def _thumbnail_generate_worker(cid: str, vid: str, full_script: str, master_style: str):
+def _thumbnail_generate_worker(cid: str, vid: str, full_script: str, master_style: str,
+                                chosen_title: str = ""):
     """Runs the thumbnail prompt-build + KIE image generation off the request thread.
     Mirrors _plan_generate_worker: the client polls /api/thumbnail_status. The heavy
-    call (gen_thumbnail_image) does KIE submit+poll+download and can take 30-60s."""
+    call (gen_thumbnail_image) does KIE submit+poll+download and can take 30-60s.
+
+    Juli 2026 (User-Report "Thumbnails sehen schlecht aus, brauchen fetten Text +
+    3D-Tiefeneffekt wie [Referenz-Kanal]"): make_thumbnail_text() + composite_thumbnail_text()
+    existierten schon in engine/prompts.py, wurden aber nirgends aufgerufen -- das fertige
+    KI-Bild ging bisher OHNE jeden Text direkt raus. Jetzt Pflichtschritt nach dem Bild."""
     key = (cid, vid)
     try:
         with _THUMB_JOBS_LOCK:
@@ -2192,9 +2307,24 @@ def _thumbnail_generate_worker(cid: str, vid: str, full_script: str, master_styl
                 THUMB_JOBS[key] = {"running": False, "step": "Fehler", "error": res["error"],
                                    "done": False, "file": None, "prompt": None, "ts": time.time()}
             return
-        print(f"  [Thumbnail] Fertig → {res['file']}", flush=True)
+        print(f"  [Thumbnail] Bild fertig → {res['file']}", flush=True)
+
+        thumb_text = ""
+        with _THUMB_JOBS_LOCK:
+            THUMB_JOBS[key]["step"] = "Komponiere Text …"
+        try:
+            thumb_text = make_thumbnail_text(full_script, chosen_title)
+            composite_thumbnail_text(os.path.join(v_out(cid, vid), "thumbnail.jpg"), thumb_text)
+            print(f"  [Thumbnail] Text komponiert: \"{thumb_text}\"", flush=True)
+        except Exception as e:
+            # Text-Compositing ist ein Nice-to-have obendrauf -- ein Fehler hier darf das
+            # bereits fertige, gültige KI-Bild nicht verwerfen (graceful degradation).
+            import traceback; traceback.print_exc()
+            print(f"  [Thumbnail] Text-Compositing fehlgeschlagen (Bild bleibt ohne Text): {e}", flush=True)
+
         meta = load_v_meta(cid, vid)
         meta["thumbnail_prompt"] = prompt
+        meta["thumbnail_text"] = thumb_text
         save_v_meta(cid, vid, meta)
         with _THUMB_JOBS_LOCK:
             THUMB_JOBS[key] = {"running": False, "step": "Fertig", "error": None, "done": True,
@@ -2282,13 +2412,18 @@ def _produce_worker(cid: str, vid: str, text: str = "", wpm: float = 130.0, sec:
         if stop_requested():
             return fail("render", "Abgebrochen (Stop angefordert)")
         set_stage("render")
+        # Der One-Button-"Produce"-Flow rendert bewusst nur Longform -- eigener
+        # (cid, vid, "longform")-Schlüssel statt des obigen `key` (cid, vid), damit er
+        # nie denselben RENDER_JOBS-Eintrag wie ein parallel laufender Shorts-Render
+        # desselben Videos trifft (siehe _render_worker-Docstring).
+        render_key = (cid, vid, "longform")
         with _RENDER_JOBS_LOCK:
-            RENDER_JOBS[key] = {"running": True, "stop_requested": False, "stage": "startet",
+            RENDER_JOBS[render_key] = {"running": True, "stop_requested": False, "stage": "startet",
                                  "done": 0, "total": 0, "error": None, "file": None,
                                  "started_ts": time.time()}
-        _render_worker(cid, vid)
+        _render_worker(cid, vid, "longform")
         with _RENDER_JOBS_LOCK:
-            render_state = dict(RENDER_JOBS.get(key, {}))
+            render_state = dict(RENDER_JOBS.get(render_key, {}))
         if render_state.get("error"):
             return fail("render", render_state["error"])
 
@@ -3085,8 +3220,18 @@ class H(BaseHTTPRequestHandler):
         qs = parse_qs(urlparse(self.path).query)
         cid = qs.get("channel", ["default"])[0]
         vid = qs.get("video", [""])[0]
+        # Shorts/Upload/Control-Erweiterung: erster Prefix-Treffer (shorts./youtube./
+        # control.-api.py) sendet selbst per handler._send(...) und liefert (True, None);
+        # ohne Treffer läuft die bestehende Kette unten unverändert weiter.
+        handled, _ = dispatch("GET", p, self, qs, cid, vid, None)
+        if handled:
+            return
         if p == "/":
             return self._send(200, open(os.path.join(HERE, "dashboard.html"), encoding="utf-8").read(), "text/html; charset=utf-8")
+        # Shorts/Upload/Control-Erweiterung: eigene, kleine statische Seite -- NICHT ins
+        # bestehende dashboard.html gemischt, da kanal-/video-übergreifend statt pro-Video.
+        if p == "/control":
+            return self._send(200, open(os.path.join(HERE, "control.html"), encoding="utf-8").read(), "text/html; charset=utf-8")
         # Phase 38: Stil-Presets abfragen (für UI-Dropdown)
         if p == "/api/presets":
             from engine.presets import PRESET_MASTERS, PRESET_DESCRIPTIONS, DEFAULT_PRESET
@@ -3148,8 +3293,9 @@ class H(BaseHTTPRequestHandler):
                 state = BATCH_JOBS.get((cid, vid))
             return self._send(200, state or {"running": False})
         if p == "/api/render_status":
+            target = qs.get("target", ["longform"])[0]
             with _RENDER_JOBS_LOCK:
-                state = RENDER_JOBS.get((cid, vid))
+                state = RENDER_JOBS.get((cid, vid, target))
             return self._send(200, state or {"running": False})
         if p == "/api/produce_status":
             with _PRODUCE_JOBS_LOCK:
@@ -3200,6 +3346,15 @@ class H(BaseHTTPRequestHandler):
                 # raw meta für UI-Sidebars (nicht für Stepper selbst, aber das Backend
                 # hat's geladen — Übertragung vermeidet zweiten Fetch)
                 "meta":        meta,
+            })
+        if p == "/api/measure_wpm":
+            # Struktur-/Schnitt-Review Juli 2026: gibt die reale, aus bereits fertigen
+            # Videos DIESES Kanals gemessene Sprechrate zurück (statt der festen 150/160-
+            # Annahme) -- Frontend nutzt das als informierten Default fürs #wpm-Feld.
+            measured = _measure_channel_wpm(cid, fallback=None)
+            return self._send(200, {
+                "wpm": round(measured, 1) if measured is not None else None,
+                "measured": measured is not None,
             })
         if p == "/api/transcribe_status":
             return self._send(200, dict(TX_STATUS))
@@ -3377,6 +3532,11 @@ class H(BaseHTTPRequestHandler):
         except: return self._send(400, {"error": "bad json"})
         cid = d.get("cid", d.get("channel", _qs.get("channel", ["default"])[0]))
         vid = d.get("vid", d.get("video", _qs.get("video", [""])[0]))
+
+        # Shorts/Upload/Control-Erweiterung: siehe Kommentar in do_GET oben.
+        handled, _ = dispatch("POST", p, self, _qs, cid, vid, d)
+        if handled:
+            return
 
         # ── Phase 34: TTS-Provider setzen (GET-Pendant liegt in do_GET) ────────
         if p == "/api/tts_provider":
@@ -3579,6 +3739,7 @@ class H(BaseHTTPRequestHandler):
                 master_style = (open(ch_vid_master(cid)).read().strip() if mode == "video"
                                  else read_master(cid)) or VIDEO_MASTER_DEFAULT
             except: master_style = VIDEO_MASTER_DEFAULT
+            chosen_title = load_v_meta(cid, vid).get("selected_title", "")
             # Off the request thread — used to run inline (30-60s KIE submit+poll+download),
             # freezing the browser. Client polls /api/thumbnail_status. Same running-flag-set-
             # under-lock-before-thread-exists race guard as /api/plan.
@@ -3589,7 +3750,7 @@ class H(BaseHTTPRequestHandler):
                 THUMB_JOBS[key] = {"running": True, "step": "Startet …", "error": None,
                                    "done": False, "file": None, "prompt": None, "ts": time.time()}
             threading.Thread(target=_thumbnail_generate_worker,
-                             args=(cid, vid, full_script, master_style), daemon=True).start()
+                             args=(cid, vid, full_script, master_style, chosen_title), daemon=True).start()
             return self._send(200, {"ok": True, "already_running": False})
 
         # ── Scene plan ────────────────────────────────────────────────────────
@@ -4019,7 +4180,16 @@ class H(BaseHTTPRequestHandler):
             name = d.get("name", "").strip(); desc = d.get("description", "").strip()
             vid_param = d.get("vid") or None
             if not name or not desc: return self._send(400, {"error": "name und description erforderlich"})
-            safe = re.sub(r"[^\w\-]", "_", name.lower())
+            # Juli 2026 (User-Report "doppelte Charsheets pro Charakter"): ein bestehender
+            # Charakter (z.B. auto-generiert als char_01) hat schon ein "safe". Wurde bisher
+            # IMMER neu aus dem Namen abgeleitet ("Protagonist (You)" -> "protagonist__you_"),
+            # erzeugte "Neu generieren" für einen bereits vorhandenen Charakter eine ZWEITE,
+            # unabhängige Datei statt die bestehende zu überschreiben — zwei KIE-Aufrufe
+            # sehen nie gleich aus (kein Seed). Jetzt: das Frontend schickt das vorhandene
+            # "safe" mit (siehe genCharSheet() in dashboard.html); nur wenn keins mitkommt
+            # (wirklich neuer, manuell angelegter Charakter) wird aus dem Namen abgeleitet.
+            safe = (d.get("safe") or "").strip()
+            safe = re.sub(r"[^\w\-]", "_", safe.lower()) if safe else re.sub(r"[^\w\-]", "_", name.lower())
             sheet_dir = ch_sheets(cid, vid_param)
             tmp  = os.path.join(sheet_dir, f"_tmp_{safe}.jpg")
             try:
@@ -4099,7 +4269,10 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/render_start":
             if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
             force = bool(d.get("force", False))
-            key = (cid, vid)
+            target = d.get("target", "longform")
+            if target not in RENDER_TARGETS:
+                return self._send(400, {"error": f"Unbekanntes render target: {target}"})
+            key = (cid, vid, target)
             with _RENDER_JOBS_LOCK:
                 if RENDER_JOBS.get(key, {}).get("running"):
                     return self._send(200, {"ok": True, "already_running": True})
@@ -4131,11 +4304,12 @@ class H(BaseHTTPRequestHandler):
                 RENDER_JOBS[key] = {"running": True, "stop_requested": False, "stage": "startet",
                                      "done": 0, "total": 0, "error": None, "file": None,
                                      "started_ts": time.time()}
-            threading.Thread(target=_render_worker, args=(cid, vid), daemon=True).start()
+            threading.Thread(target=_render_worker, args=(cid, vid, target), daemon=True).start()
             return self._send(200, {"ok": True, "already_running": False})
 
         if p == "/api/render_stop":
-            key = (cid, vid)
+            target = d.get("target", "longform")
+            key = (cid, vid, target)
             with _RENDER_JOBS_LOCK:
                 if key in RENDER_JOBS:
                     RENDER_JOBS[key]["stop_requested"] = True
@@ -4167,9 +4341,11 @@ class H(BaseHTTPRequestHandler):
             with _BATCH_JOBS_LOCK:
                 if BATCH_JOBS.get(key, {}).get("running"):
                     BATCH_JOBS[key]["stop_requested"] = True
+            # _produce_worker rendert intern immer (cid, vid, "longform") -- siehe dort.
             with _RENDER_JOBS_LOCK:
-                if RENDER_JOBS.get(key, {}).get("running"):
-                    RENDER_JOBS[key]["stop_requested"] = True
+                render_key = (cid, vid, "longform")
+                if RENDER_JOBS.get(render_key, {}).get("running"):
+                    RENDER_JOBS[render_key]["stop_requested"] = True
             return self._send(200, {"ok": True})
 
         if p == "/api/generate_one":
@@ -4210,8 +4386,12 @@ class H(BaseHTTPRequestHandler):
                     and scene_depicts_people(scene_for_phase):
                 prompt_entity = nearest_character_entity(plan, scene_for_phase) or entity
             char_refs, entity_key = charsheet_refs_for_entity(plan, cid, vid, prompt_entity)
+            # Vorgezogen (war vorher erst nach dem Semaphore-Acquire weiter unten): wird
+            # jetzt schon hier für has_style_refs gebraucht (siehe _build_image_prompt).
+            style_ref_urls = get_channel_style_refs(cid)
             full_prompt = _build_image_prompt(prompt, read_master(cid), char_refs,
-                                              phase=scene_phase, entity=entity_key)
+                                              phase=scene_phase, entity=entity_key,
+                                              has_style_refs=bool(style_ref_urls))
             # Juli 2026 Fix (Audit A2 "generate_one hat den Fallback-Fix nicht"): dieser
             # Pfad hatte bisher eine eigene, abgespeckte Inline-Logik, die NUR source_url
             # kannte — ausgerechnet der manuelle "Neu generieren"-Klick (mit dem man
@@ -4251,7 +4431,6 @@ class H(BaseHTTPRequestHandler):
             # firing this KIE submission immediately alongside all the others. Released by
             # _image_job_worker once this scene's generation fully finishes.
             IMAGE_GEN_SEMAPHORE.acquire()
-            style_ref_urls = get_channel_style_refs(cid)
             # Juli 2026 (User-Report: "sobald kein Mensch im Prompt ist, denkt er sich
             # was aus"): Referenzbild jetzt an JEDE Szene (nicht mehr nur char_-Entities)
             # — es ist ein reiner STIL-Anker (siehe Master-Prompt), kein erzwungenes
@@ -4521,10 +4700,38 @@ def main():
         port = int(sys.argv[sys.argv.index("--port") + 1])
     if not os.path.exists(KIE_KEY_FILE):
         print("WARN: ~/.kie_key fehlt — alle KI-Funktionen werden scheitern.")
+    # Shorts/Upload/Control-Erweiterung: eine Zeile auskommentieren schaltet das
+    # gesamte Gebiet ab, ohne den Rest anzufassen (siehe routes/__init__.py).
+    import shorts.api, youtube.api, control.api
+    import store.db as store_db
+    mount("/api/shorts/", shorts.api)
+    mount("/api/youtube/", youtube.api)
+    mount("/api/control/", control.api)
+    store_db.init_db()
+    # Upload-Worker läuft nur, wenn der Nutzer je einen Google-Cloud-OAuth-Client
+    # eingerichtet hat -- ohne diese Datei gibt es serverseitig ohnehin kein Kanal-
+    # Token, gegen das der Worker etwas hochladen könnte (siehe youtube/oauth.py).
+    from youtube.oauth import client_configured
+    if client_configured():
+        from youtube.upload import worker_loop
+        threading.Thread(target=worker_loop, daemon=True).start()
+        print("  [Upload] Worker-Thread gestartet (~/.youtube_oauth_client.json gefunden).")
+    else:
+        print("  [Upload] ~/.youtube_oauth_client.json fehlt — Upload-Feature bleibt inaktiv "
+              "(Shorts/Packaging funktionieren unabhängig davon).")
     _start_job_cleanup_daemon()
     srv = ThreadingHTTPServer(("127.0.0.1", port), H)
     print(f"Dashboard läuft: http://localhost:{port}  (Strg+C zum Beenden)")
     srv.serve_forever()
 
 if __name__ == "__main__":
+    # `python3 dashboard.py` lädt dieses Modul als "__main__", nicht als "dashboard" --
+    # ein `import dashboard` aus shorts/api.py (o.ä.) würde sonst eine ZWEITE, komplett
+    # unabhängige Kopie mit eigenem RENDER_JOBS/RENDER_TARGETS/... importieren, die nie
+    # mit der tatsächlich laufenden Handler-Klasse H in Verbindung steht (leerer
+    # Render-Status trotz laufendem Render war das beobachtbare Symptom). Registriert
+    # das bereits geladene __main__-Modul zusätzlich unter dem Namen "dashboard", BEVOR
+    # main() die Shorts/YouTube/Control-Module mountet -- ihr lazy `import dashboard`
+    # findet dadurch dieselbe Modul-Instanz statt eine neue auszuführen.
+    sys.modules.setdefault("dashboard", sys.modules[__name__])
     main()

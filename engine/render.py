@@ -46,6 +46,8 @@ import base64
 import json
 import os
 import subprocess
+import threading
+from dataclasses import dataclass
 from typing import TypedDict
 
 
@@ -66,10 +68,47 @@ OVERLAY_SCRIPT = os.path.join(HERE, "render_overlay.py")
 _VIDEO_ENCODER = None  # cache for _probe_video_encoder()
 
 
+# ── Render-Targets (Shorts-Erweiterung) ─────────────────────────────────────────
+# Parametrisierung statt Fork: RENDER_WIDTH/RENDER_HEIGHT/RENDER_FPS oben bleiben
+# EXAKT bestehen (werden zu "longform"s Werten) — jeder bestehende Aufruf ohne
+# `target`-Argument verhält sich unverändert. Verifiziert vor dieser Änderung:
+# _assemble_clips, _mux_audio, _crossfade_clips, _render_selfcheck,
+# _probe_video_encoder referenzieren RENDER_WIDTH/RENDER_HEIGHT NICHT — bleiben
+# unangetastet. Nur _render_clip() liest die Konstanten direkt (siehe dort).
+@dataclass(frozen=True)
+class RenderTarget:
+    name: str
+    width: int
+    height: int
+    fps: int
+    supersample_width: int
+    # Nur für Hochkant-Targets (height > width) relevant: die Quellbilder sind 16:9,
+    # ein direktes zoompan auf ein 9:16-`s=` würde stumpf horizontal stauchen (siehe
+    # _render_clip). "blur" füllt oben/unten mit einem unscharfen, formatfüllenden
+    # Copy desselben Bildes, "black" mit einer schwarzen Balkenfläche -- User-Vorgabe,
+    # beide Varianten explizit gewünscht.
+    pad_style: str = "blur"
+
+
+RENDER_TARGETS: dict[str, RenderTarget] = {
+    "longform": RenderTarget("longform", RENDER_WIDTH, RENDER_HEIGHT, RENDER_FPS,
+                              RENDER_SUPERSAMPLE_WIDTH),
+    "short_vertical": RenderTarget("short_vertical", 1080, 1920, RENDER_FPS, 2160,
+                                     pad_style="blur"),
+}
+
+# Ein Render (gleich welches Ziel) systemweit gleichzeitig — schützt den Hardware-
+# Encoder (h264_videotoolbox, siehe _probe_video_encoder) und den CPU-lastigen
+# Whisper-Alignment-Schritt davor, dass ein Shorts- und ein Longform-Render
+# desselben oder verschiedener Videos parallel um dieselben Ressourcen konkurrieren.
+RENDER_SEMAPHORE = threading.Semaphore(1)
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 __all__ = [
     "RENDER_FPS", "RENDER_WIDTH", "RENDER_HEIGHT", "RENDER_SUPERSAMPLE_WIDTH",
+    "RenderTarget", "RENDER_TARGETS", "RENDER_SEMAPHORE",
     "WHISPER_VENV_PY", "OVERLAY_SCRIPT",
     "MOTION_LIBRARY", "_PACING_MOTION_CANDIDATES", "_PHASE_MOTION_CANDIDATES",
     "TRANSITION_LIBRARY",
@@ -545,7 +584,8 @@ def _overlay_specs_for_scene(scene: dict, clip_dur: float, overlay_opts: dict | 
 # ── Render-Funktionen (ffmpeg) ───────────────────────────────────────────────
 
 def _render_clip(img_path: str, scene: dict, out_path: str, fps: int = RENDER_FPS,
-                  overlay_opts: dict | None = None) -> None:
+                  overlay_opts: dict | None = None,
+                  target: "RenderTarget" = RENDER_TARGETS["longform"]) -> None:
     """Renders one scene's still image into a short Ken-Burns clip, optionally with text
     overlays composited on top. Resume-safe: skips if out_path exists and non-empty.
 
@@ -554,7 +594,14 @@ def _render_clip(img_path: str, scene: dict, out_path: str, fps: int = RENDER_FP
     andere, mit ihrem bereits vorhandenen echten Bild (`scene["file"]`) statt einer live
     erzeugten weißen PIL-Titelkarte. `render_title_card_png_via_venv` bleibt im Modul
     erhalten (dormant, reaktivierbar), wird von hier aus nur nicht mehr aufgerufen.
-    """
+
+    `target` (Shorts-Erweiterung): Default ist RENDER_TARGETS["longform"], also exakt
+    RENDER_WIDTH/RENDER_HEIGHT/RENDER_SUPERSAMPLE_WIDTH — jeder bestehende Aufruf ohne
+    dieses Argument verhält sich byte-für-byte wie zuvor. Nur `target.width`/`.height`/
+    `.supersample_width` werden unten verwendet, nie mehr die globalen Konstanten direkt,
+    damit ein zweiter Aufruf mit RENDER_TARGETS["short_vertical"] denselben Code für ein
+    9:16-Ziel nutzt (die Fokus-Mathematik x_expr/y_expr/z_expr ist bereits relativ und
+    braucht dafür keine Änderung)."""
     if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
         return
     # Lazy-import to avoid cycles (engine_elevenlabs is a higher-level module)
@@ -601,12 +648,35 @@ def _render_clip(img_path: str, scene: dict, out_path: str, fps: int = RENDER_FP
         # Vignette nur für CLIMAX, dezent (PI/5 = ~36° Vignette-Winkel)
         color_filter = f"{color_filter},vignette=PI/5" if color_filter else "vignette=PI/5"
     eq_suffix  = f",{color_filter}" if color_filter else ""
-    filter_parts = [
-        f"[0:v]scale={RENDER_SUPERSAMPLE_WIDTH}:-2,"
+    # Hochkant-Targets (Shorts): der Ken-Burns-Ausschnitt bleibt bei der nativen 16:9-
+    # Optik der Quellbilder -- ein zoompan direkt auf ein 9:16-`s=` würde das Bild
+    # sonst stumpf horizontal stauchen (empirisch mit testsrc2 verifiziert: volle
+    # Verzerrung, keine Balken). Stattdessen rendert derselbe zoompan-Ausdruck wie im
+    # 16:9-Fall auf volle Canvas-Breite/16:9-Höhe, und die verbleibende Höhe oben/unten
+    # wird je nach target.pad_style entweder schwarz oder mit einem unscharfen,
+    # formatfüllenden Copy desselben Bildes aufgefüllt (User-Vorgabe) -- kein Fork.
+    is_portrait = target.height > target.width
+    content_h = round(target.width * 9 / 16) if is_portrait else target.height
+    zoompan_core = (
+        f"scale={target.supersample_width}:-2,"
         f"zoompan=z='{z_expr}':d={frames}:x='{x_expr}':y='{y_expr}':"
-        f"s={RENDER_WIDTH}x{RENDER_HEIGHT}:fps={fps},setsar=1"
-        f"{eq_suffix}[base]"
-    ]
+        f"s={target.width}x{content_h}:fps={fps},setsar=1{eq_suffix}"
+    )
+    if not is_portrait:
+        filter_parts = [f"[0:v]{zoompan_core}[base]"]
+    elif target.pad_style == "black":
+        filter_parts = [
+            f"[0:v]{zoompan_core},"
+            f"pad={target.width}:{target.height}:(ow-iw)/2:(oh-ih)/2:color=black[base]"
+        ]
+    else:
+        filter_parts = [
+            "[0:v]split=2[bgsrc][fgsrc]",
+            f"[bgsrc]scale={target.width}:{target.height}:force_original_aspect_ratio=increase,"
+            f"crop={target.width}:{target.height},gblur=sigma=20[bgblur]",
+            f"[fgsrc]{zoompan_core}[fgclip]",
+            "[bgblur][fgclip]overlay=(W-w)/2:(H-h)/2[base]",
+        ]
     overlay_pngs = []
     overlay_seq_dirs = []  # Phase N: temp dirs mit PNG-Sequenzen
     last_label = "base"
@@ -624,7 +694,7 @@ def _render_clip(img_path: str, scene: dict, out_path: str, fps: int = RENDER_FP
                 fmt = str(dv.get("format", "{:.1f}"))
                 label = str(dv.get("label", ""))
                 _render_counter_anim_sequence(
-                    seq_dir, RENDER_WIDTH, RENDER_HEIGHT,
+                    seq_dir, target.width, target.height,
                     from_val, to_val, n_frames, fmt, label,
                 )
                 overlay_seq_dirs.append(seq_dir)
@@ -650,7 +720,7 @@ def _render_clip(img_path: str, scene: dict, out_path: str, fps: int = RENDER_FP
                 # lebt vom harten, instant Wort-Wechsel (Plan-Vorgabe).
                 words = text
                 seq_dir = f"{out_path}.ovseq{idx}"
-                _render_word_caption_sequence(seq_dir, RENDER_WIDTH, RENDER_HEIGHT,
+                _render_word_caption_sequence(seq_dir, target.width, target.height,
                                                words, t1 - t0, fps)
                 overlay_seq_dirs.append(seq_dir)
                 inputs += ["-framerate", str(fps), "-i", f"{seq_dir}/seq_%04d.png"]
@@ -658,7 +728,7 @@ def _render_clip(img_path: str, scene: dict, out_path: str, fps: int = RENDER_FP
                 faded_label = f"ov{idx}f"
                 filter_parts.append(f"[{in_idx}:v]format=rgba[{faded_label}]")
             else:
-                render_text_overlay_png(png_path, RENDER_WIDTH, RENDER_HEIGHT, style, text)
+                render_text_overlay_png(png_path, target.width, target.height, style, text)
                 overlay_pngs.append(png_path)
                 inputs += ["-loop", "1", "-i", png_path]
                 in_idx = idx + 1

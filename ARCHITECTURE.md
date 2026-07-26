@@ -1,8 +1,8 @@
-# ARCHITECTURE — Storyboard Generator (Stand 2026-07-13)
+# ARCHITECTURE — Storyboard Generator (Stand 2026-07-24)
 
 ## Was das System tut (in einem Satz)
 
-**Du gibst ein Script ein → das System generiert für jede Szene ein Bild mit cinematischen Effekten → die Bilder werden mit Ken-Burns-Effekten zu einem Video zusammengeschnitten, bei dem der Schnitt EXAKT auf dem Sprach-Timing (ElevenLabs TTS) liegt → du machst Sound im Nachgang in Logic/DaVinci.**
+**Du gibst ein Script ein → das System generiert für jede Szene ein Bild mit cinematischen Effekten → die Bilder werden mit Ken-Burns-Effekten zu einem Video zusammengeschnitten, bei dem der Schnitt EXAKT auf dem Sprach-Timing (ElevenLabs TTS) liegt → du machst Sound im Nachgang in Logic/DaVinci.** Zusätzlich generiert das System aus demselben Video automatisiert 5 eigenständige Hook-Shorts (eigenes Skript, eigener Hook, eigenes Voiceover — wiederverwendet nur die Longform-Bilder) und kann fertige Videos/Shorts über eine eigene Queue direkt auf YouTube hochladen (immer privat + geplant, nie automatisch öffentlich).
 
 
 
@@ -39,7 +39,12 @@ NACHGANG IN LOGIC/DAVINCI:
       - Szenen mit start_aligned/end_aligned (Whisper-getimed)
       - Phase (OPENING/RISING_ACTION/CLIMAX/RESOLUTION)
       - Hook (Cold-Open) + Throughline-Question
-      - Pacing (calm/normal/punchy)
+      - Pacing (calm/normal/punchy) — Zieldauern pro Format über `PacingProfile`/
+        `PACING_PROFILES` (`engine/scenes.py`, getrennte Profile für longform/short);
+        die zugrunde liegende Sprechrate wird real aus fertigen Videos des Kanals
+        gemessen (`dashboard._measure_channel_wpm`, `GET /api/measure_wpm`) statt
+        angenommen — Audit Juli 2026 zeigte reale 164-188 wpm statt der vorher
+        angenommenen 120-150 wpm, was den Schnittrhythmus verzerrte
       - Visual Sequences (für Style-Konsistenz über Szenen)
       - Charsheets (Char-Referenz-Bilder). Hier greift neuerdings eine Ausnahme zur "invent nothing"-Regel: Fehlt eine optische Beschreibung im Text, MUSS die KI einen Basis-Look (z.B. "young man") erfinden, um den Charakter nicht versehentlich ganz wegzuwerfen.
 
@@ -95,35 +100,97 @@ NACHGANG IN LOGIC/DAVINCI:
    └─ Du legst Musik drunter
    └─ Du fügst SFX hinzu
    └─ Du machst Mix
+
+8. SHORT-SKRIPTE + HOOK-SHORTS (aus demselben Video, eigenes Kapitel im Stepper)
+   └─ generate_short_scripts (engine/prompts.py) — EIN LLM-Call liefert 5
+      eigenständige Short-Skripte (eigener Hook, eigener Winkel, eigenes CTA),
+      70-110 Wörter, Hook in Sek 1-2 — bewusst KEIN Audio-Schnitt aus dem Longform
+   └─ assign_short_scene_images (engine/prompts.py) — EIN batched LLM-Call ordnet
+      allen Short-Szenen bereits vorhandene Longform-Bilder zu (Fallback: Keyword-
+      Overlap, danach gen_image) → Regelfall 0 neue KIE-Bildgenerierungen
+   └─ Segmentierung mit PACING_PROFILES["short"] (deutlich schnellerer Schnitt,
+      ~1.5-2s/Bild statt Longforms ~5-7s)
+   └─ Eigenes ElevenLabs-Voiceover pro Short, eigener Whisper-Align
+   └─ Render über RENDER_TARGETS[f"short_hook_{n}"] (9:16, Blur-Pillarbox,
+      engine/render.py) — Worker: shorts/api.py:_hooks_worker
+   └─ Frontend-Gate: Stepper-Schritt ⑥ zeigt alle 5 Skripte zur Review/Korrektur,
+      BEVOR TTS + 5 Renders laufen (dasselbe Muster wie die Titel-Auswahl)
+
+9. VERÖFFENTLICHEN (optional, separat von der Video-Erzeugung)
+   └─ control/ — kanalübergreifende Queue-UI unter GET /control (Queue-Status,
+      OAuth-Connect, Quota, Playlist/Schedule)
+   └─ youtube/ — eigener OAuth-Flow, Resumable-Upload, Quota-Deckel (100/Tag)
+   └─ Harte Regel, kein Codepfad kann sie umgehen: privacyStatus=private + echtes
+      publishAt — nichts wird automatisch öffentlich
+   └─ Job-Queue liegt in store/pipeline.db (SQLite), nicht im channels/-JSON-Baum
 ```
+
+## Ältere Short-Pfade (Code vorhanden, teils UI-ausgeblendet)
+
+- **Climax-Highlight-Short** (`shorts/clip_select.py:select_scenes`) — wählt eine
+  bestehende Longform-Passage aus, hat kein eigenes Skript/Voiceover. Juli 2026
+  (User-Report "sauberer Flow für die neue Short-Engine"): Karte trug dieselbe
+  Stufennummer wie Hook-Shorts und war beide nur nach Longform-Render sichtbar —
+  jetzt wie Parts per `display:none` ausgeblendet (`updateShortsCardVisibility()`),
+  Backend bleibt erreichbar.
+- **Parts-Pipeline** (`_parts_worker`, `split_into_parts`, `shorts/cta.py`,
+  `/api/shorts/split_parts`) — **deprecated**: sequenzielle „Part N"-Schnitte ohne
+  eigenen Hook waren die Analytics-verifizierte Hauptursache für 4-50 Views bei 10
+  Shorts (vs. 3-14 Views Longform). Code bleibt erhalten (6 Videos liegen bereits
+  live bei YouTube), die UI dazu ist in `dashboard.html` bewusst mit
+  `display:none` ausgeblendet statt gelöscht.
 
 ## Komponenten
 
+Weiterhin ein Ein-Prozess-Dashboard, aber `dashboard.py` ist nicht mehr die einzige
+Codebasis: `routes/` ist ein bewusst minimaler **Prefix-Dispatch-Shim** (kein
+vollständiger Routing-Umzug — siehe „Offene Wunden"), der drei Endpunkt-Familien in
+eigene Pakete auslagert. Der große Rest (Channels, Videos, Plan, Render, Transcribe,
+Voiceover, …) bleibt weiterhin direkt in `dashboard.py`.
+
 ```
-┌─────────────────────────────────────────────────────┐
-│                  DASHBOARD (1 Prozess)               │
-│                                                      │
-│  dashboard.py  ────  HTTP-Server (ThreadingHTTPS)  │
-│       │                                                │
-│       ├── engine/                                    │
-│       │   ├── scenes.py    ── Text→Szenen            │
-│       │   ├── render.py    ── Szenen→Video (ffmpeg)  │
-│       │   ├── audio.py     ── Voice→Sync (dormant:    │
-│       │   │                    Musik/SFX-Mix-Kette)   │
-│       │   ├── prompts.py   ── Prompt-Bau              │
-│       │   ├── presets.py   ── 5 Stil-Presets         │
-│       │   └── imagegen.py  ── Bild-Provider-Interface │
-│       │                        (KIE-Submit/Poll/      │
-│       │                        Upload, generate_image)│
-│       │                                                │
-│       └── engine_elevenlabs.py  ── TTS-Integration    │
-│                                                      │
-│  dashboard.html  ───  Frontend (Alpine + Tailwind)    │
-│                                                      │
-└─────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────┐
+│              DASHBOARD (1 Prozess, weiterhin größter Teil)     │
+│                                                                 │
+│  dashboard.py (~4660 Z.) ── HTTP-Server (ThreadingHTTPS)       │
+│       │  ~75 Routen weiterhin direkt im if/elif-Dispatch        │
+│       │  + routes.dispatch() als Vorstufe (Prefix-Mounts unten) │
+│       │                                                         │
+│       ├── engine/                                               │
+│       │   ├── scenes.py   ── Text→Szenen; PacingProfile         │
+│       │   │                   (longform/short getrennt kalibriert)│
+│       │   ├── render.py   ── Szenen→Video (ffmpeg); RenderTarget │
+│       │   │                   (longform/short_vertical/          │
+│       │   │                   short_hook_N — 9:16 Blur-Pillarbox)│
+│       │   ├── audio.py    ── Voice→Sync (dormant: Musik/SFX-     │
+│       │   │                   Mix-Kette)                         │
+│       │   ├── prompts.py  ── Prompt-Bau; Short-Skript-Generierung│
+│       │   │                   + Longform→Short Bild-Zuordnung    │
+│       │   ├── presets.py  ── 5 Stil-Presets                     │
+│       │   └── imagegen.py ── Bild-Provider-Interface             │
+│       │                                                         │
+│       └── engine_elevenlabs.py  ── TTS-Integration               │
+│                                                                 │
+│  dashboard.html ── Frontend, 8-Schritte-Stepper                 │
+│  control.html   ── separate Upload-Kontroll-UI (GET /control)    │
+└───────────────────────────────────────────────────────────────┘
+        │                     │                       │
+   mount("/api/shorts/")  mount("/api/youtube/")  mount("/api/control/")
+        │                     │                       │
+   shorts/api.py          youtube/                 control/api.py
+   Hook-Shorts (aktiv) +   {oauth,upload,quota,     Queue/Quota/
+   Climax-Short (aktiv) +  metadata,api}.py         Schedule-UI
+   Parts (deprecated,                                (siehe control.html)
+   UI ausgeblendet)
+        │                     │                       │
+        └─────────────────────┴───────────────────────┘
+                              │
+                store/db.py (SQLite, store/pipeline.db)
+                youtube_oauth · quota_usage · upload_queue
         │
-        ├── KIE.ai (REST)  ── Bilder + LLM + Whisper
-        └── ElevenLabs (REST)  ── TTS
+        ├── KIE.ai (REST)        ── Bilder + LLM + Whisper
+        ├── ElevenLabs (REST)    ── TTS
+        └── YouTube Data API v3  ── Upload (immer privat + geplant)
 ```
 
 ## Daten-Persistenz
@@ -141,7 +208,22 @@ channels/
         generated/       ── Finale Bilder
         render_tmp/      ── Working-Dir
         final.mp4        ── Output (nur Voice + Bilder, KEIN Sound)
+
+store/
+  pipeline.db           ── SQLite (-wal/-shm daneben), bewusst getrennt von
+                            channels/-JSON — Cross-Video/Restart-fester State
+    youtube_oauth        ── OAuth-Tokens pro Kanal
+    quota_usage          ── Tages-Ledger Upload-Quota (Pacific-Zeit)
+    upload_queue          ── Job-Queue geplanter YT-Uploads
+                             (CHECK privacy_status='private')
 ```
+
+`channels/` ist pro Video/Kanal und JSON-basiert; `store/pipeline.db` ist
+Cross-Entity und wird nur von `shorts/`, `youtube/`, `control/` angefasst —
+`dashboard.py` selbst initialisiert die DB nur beim Start (`store_db.init_db()`).
+
+`~/.youtube_oauth_client.json` liegt bewusst **außerhalb** des Repos (echte
+OAuth-Zugangsdaten, chmod 600) — weder in `channels/` noch in `store/`.
 
 ## Stil / Identität / Inhalt — die drei Ebenen (Architekturregel)
 
@@ -168,6 +250,10 @@ Details + Fehleranalyse: `docs/PROMPT_PIPELINE.md` §14.
 
 ## Was du im Frontend steuerst
 
+Der Stepper in `dashboard.html` führt Schritt für Schritt (① Thema → ⑧
+Veröffentlichen) durch die volle Kette; die folgenden Punkte sind die Stellen, an
+denen du tatsächlich eingreifst:
+
 1. **Skript-Preset** (Kanal-Anlage): flat_cartoon_doc (default), editorial_minimal, ink_documentary, charcoal_noir, stick_minimal
 2. **Skript** (Skript-Tab): Text eingeben, Sprache wählen
 3. **Style-Referenzen** (Settings-Tab, bis zu 3 Slots): definieren den globalen
@@ -177,6 +263,16 @@ Details + Fehleranalyse: `docs/PROMPT_PIPELINE.md` §14.
 6. **Plan-Generierung**: Button → LLM generiert Szenen
 7. **Bilderzeugung pro Szene**: Button "Generieren" → KIE rendert
 8. **Video-Render**: Button → ffmpeg assembliert (final.mp4 mit Voice + Bildern)
+9. **Short-Skripte generieren + reviewen** (Stepper-Schritt ⑥): Button → 1
+   LLM-Call liefert 5 unabhängige Short-Skripte (eigener Hook/Winkel/CTA); jedes
+   einzeln editier-/verwerfbar, bevor TTS + Render laufen (Review-Gate vor dem
+   teuren Teil, analog zur Titel-Auswahl)
+10. **Shorts bauen** (Stepper-Schritt ⑦): Button → pro bestätigtem Short:
+    Bild-Zuordnung, eigenes Voiceover, Whisper-Align, Render (9:16) — mit
+    Fortschrittsanzeige pro Short
+11. **Veröffentlichen** (Stepper-Schritt ⑧ + eigene Seite `/control`): Datei in
+    die Upload-Queue geben, Zeitpunkt/Playlist setzen — Upload läuft immer
+    privat + geplant
 
 ## Was du NICHT im Frontend steuerst
 
@@ -204,7 +300,8 @@ Du suchst ein konkretes Feature? Schau in:
 
 ## Offene Wunden (ehrlich)
 
-1. **dashboard.py ist ~4260 Z.** — der HTTP-Handler sollte in `routes/` raus. Riskanter Refactor. Empfehlung: kleine, isolierte Commits.
-2. **Visual-Continuity ist ~70-80% zuverlässig** — KIE variiert trotz Char-/Style-Refs. Manuell nachkorrigieren.
-3. **Tests sind teilweise Source-Grep** statt echte E2E.
-4. **Kein Production-Deployment** — kein Dockerfile, keine HTTPS, kein Auth.
+1. **dashboard.py ist ~4660 Z.** (gewachsen von ~4260) — der HTTP-Handler sollte in `routes/` raus. Riskanter Refactor. Empfehlung: kleine, isolierte Commits.
+2. **`routes/` ist ein Dispatch-Shim, keine vollständige Extraktion** — nur `shorts/`, `youtube/`, `control/` sind ausgelagert (über `mount()`/`dispatch()`); der Rest (Channels, Videos, Plan, Render, Transcribe, Voiceover, …) bleibt vollständig in `dashboard.py`. Das Modul dokumentiert selbst, dass ein voller Umzug als zu riskant verworfen wurde.
+3. **Visual-Continuity ist ~70-80% zuverlässig** — KIE variiert trotz Char-/Style-Refs. Manuell nachkorrigieren.
+4. **Tests sind teilweise Source-Grep** statt echte E2E.
+5. **Kein Production-Deployment** — kein Dockerfile, keine HTTPS, kein Auth.

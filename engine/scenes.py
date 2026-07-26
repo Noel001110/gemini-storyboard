@@ -33,19 +33,50 @@ import json
 import os
 import re
 import time
+from dataclasses import dataclass
 
 
 # ── Constants (Phase-Scene-Logic, extracted from dashboard.py Z. 658-666) ──────
 
-MAX_SCENE_SEC = 6.0          # hard cap — no scene may hold longer than this
-PACING_TARGET_SEC = {"calm": 5.0, "punchy": 1.1}
-NORMAL_HARD_CAP_SEC = 5.5     # cap the "normal" target
+# Struktur-/Schnitt-Review (Juli 2026): reale Messung an zwei fertigen Videos zeigte
+# Median-Szenendauer 2.7-3.0s bei einem einzigen, format-unabhängigen Konstanten-Satz
+# -- Longform braucht recherchiert 5-7s/Bild, ein Short-Feed braucht 1.5-2s/Bild. Ein
+# Konstanten-Satz kann unmöglich beide Zielrhythmen bedienen. PacingProfile bündelt
+# alle vier Stellschrauben pro Format, exakt das gleiche "parametrisieren statt forken"-
+# Muster wie RenderTarget (engine/render.py).
+@dataclass(frozen=True)
+class PacingProfile:
+    name: str
+    calm_sec: float
+    normal_sec: float
+    punchy_sec: float
+    max_scene_sec: float  # harte Obergrenze pro Szene (auch für den "normal"-Zielwert)
+
+
+PACING_PROFILES: dict[str, PacingProfile] = {
+    "longform": PacingProfile("longform", calm_sec=6.5, normal_sec=5.0,
+                               punchy_sec=2.2, max_scene_sec=8.0),
+    "short":    PacingProfile("short",    calm_sec=2.2, normal_sec=1.8,
+                               punchy_sec=1.0, max_scene_sec=3.0),
+}
+
+# Rückwärtskompatibel (dashboard.py re-exportiert diese vier Namen 1:1, siehe
+# tests/test_cinematic_e2e.py::t_phase_m_dashboard_re_exports_scenes) -- abgeleitet
+# vom "longform"-Profil, dem bisherigen impliziten Default für jeden alten Aufrufer,
+# der noch kein `profile=` übergibt.
+MAX_SCENE_SEC = PACING_PROFILES["longform"].max_scene_sec
+PACING_TARGET_SEC = {"calm": PACING_PROFILES["longform"].calm_sec,
+                      "punchy": PACING_PROFILES["longform"].punchy_sec}
+NORMAL_HARD_CAP_SEC = 5.5     # legacy, nur noch für Rückwärtskompatibilität exportiert --
+                              # segment_by_pacing selbst nutzt jetzt profile.max_scene_sec
 PACING_WARN_THRESHOLD = 0.30  # >30% punchy → classifier likely over-fired
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
 __all__ = [
+    "PacingProfile",
+    "PACING_PROFILES",
     "MAX_SCENE_SEC",
     "PACING_TARGET_SEC",
     "NORMAL_HARD_CAP_SEC",
@@ -79,18 +110,25 @@ def split_units(text):
 
 
 def segment_by_pacing(units: list, pacing: list, wpm: float, normal_sec: float,
-                       sequences: list | None = None, callouts: list | None = None) -> list:
+                       sequences: list | None = None, callouts: list | None = None,
+                       profile: PacingProfile | None = None) -> list:
     """Group atomic units into scenes using per-unit pacing labels.
 
     Full rationale (kept identical to dashboard.py Z. 670-692):
-    - calm beats can be grouped together and held up to MAX_SCENE_SEC
-    - punchy beats are never merged with neighbors, get compressed to ~1s
-    - normal beats use the user's own sec-per-image dial
+    - calm beats can be grouped together and held up to profile.max_scene_sec
+    - punchy beats are never merged with neighbors, get compressed to ~profile.punchy_sec
+    - normal beats use the user's own sec-per-image dial, capped by the profile
     - A sequence boundary forces a scene cut exactly like a pacing-label change
     - seq_pos is NOT taken from the LLM's per-unit value — it's reassigned 0,1,2...
       per seq_id AFTER grouping, since calm-merge / punchy-split mean raw per-unit
       position no longer lines up with the final scene count.
+
+    `profile` (Juli 2026, Struktur-/Schnitt-Review): PACING_PROFILES["longform"] (Default,
+    rückwärtskompatibel mit jedem alten Aufrufer ohne `profile=`) oder ["short"] -- Shorts
+    brauchen einen komplett anderen Zielrhythmus (1.5-2s/Bild statt 5-7s), siehe
+    PacingProfile-Docstring oben.
     """
+    profile = profile or PACING_PROFILES["longform"]
     label_by_i = {p.get("beat"): p.get("label", "normal") for p in (pacing or []) if isinstance(p, dict)}
     seq_by_i = {}
     reason_by_sid = {}
@@ -105,10 +143,10 @@ def segment_by_pacing(units: list, pacing: list, wpm: float, normal_sec: float,
                 seq_by_i[beat_i] = sid
     callout_by_i = {c.get("beat"): c.get("text") for c in (callouts or [])
                     if isinstance(c, dict) and c.get("text")}
-    targets = {"calm": PACING_TARGET_SEC["calm"],
-               "normal": max(1.5, min(normal_sec, NORMAL_HARD_CAP_SEC)),
-               "punchy": PACING_TARGET_SEC["punchy"]}
-    hard_cap_words = max(3, round(MAX_SCENE_SEC * wpm / 60.0))
+    targets = {"calm": profile.calm_sec,
+               "normal": max(1.5, min(normal_sec, profile.max_scene_sec)),
+               "punchy": profile.punchy_sec}
+    hard_cap_words = max(3, round(profile.max_scene_sec * wpm / 60.0))
 
     n_punchy = sum(1 for i in range(len(units)) if label_by_i.get(i, "normal") == "punchy")
     if units and n_punchy / len(units) > PACING_WARN_THRESHOLD:
@@ -455,55 +493,74 @@ def _resolve_entity_ref(plan_path: str, scene: dict, wait: bool = True) -> tuple
 
 
 def _find_charsheet_png(plan: dict, cid: str, vid: str | None, entity: str) -> tuple:
-    """Sucht ein Charsheet-PNG für `entity` (per-video oder channel-pool als data-URL-
-    Fallback). Sucht zuerst nach <entity>.png (matched wenn safe == concrete_entity id),
-    sonst nach einem Charsheet-JSON mit gleichem 'name' wie der Plan-Generator ihn
-    erwarten würde. Das deckt den Fall ab dass der User manuell Charsheets unter
-    sprechenden Namen (z.B. 'elizabeth_holmes') hochgeladen hat während der Plan
-    'char_01' als concrete_entity vergibt. Rückgabe: (png_path|None, debug_dict).
+    """Sucht ein Charsheet-PNG für `entity` (per-video, mit channel-pool als reinem
+    Rückwärtskompat-Fallback für Alt-Kanäle). Sucht zuerst nach <entity>.png (matched
+    wenn safe == concrete_entity id), sonst nach einem Charsheet-JSON mit gleichem
+    'name' wie der Plan-Generator ihn erwarten würde. Das deckt den Fall ab dass der
+    User manuell Charsheets unter sprechenden Namen (z.B. 'elizabeth_holmes')
+    hochgeladen hat während der Plan 'char_01' als concrete_entity vergibt.
+    Rückgabe: (png_path|None, debug_dict).
 
     Ausgelagert aus _resolve_entity_ref (Evaluation Juli 2026, D2), damit sowohl die
     reine Charsheet-Fallback-Stufe (2+3) als auch die Anchor-Szene-Stufe (1b) dieselbe
     Suche wiederverwenden können, um Charsheet + Anchor-Bild ZUSAMMEN zurückzugeben.
+
+    Juli 2026 (User-Report "neues Video nimmt Charakter-Design vom alten Video"): vorher
+    wurden per-Video-Pool UND kanalweiter globaler Pool immer GEMEINSAM durchsucht, ohne
+    Vorrang. Jedes Video nummeriert seine Charaktere wieder bei char_01 beginnend — ein
+    im globalen Pool liegen gebliebenes Charsheet eines ANDEREN Videos (z.B. aus der Zeit
+    vor der Per-Video-Migration) konnte dadurch zufällig für 'char_01' des neuen Videos
+    matchen. Fix: der per-Video-Pool wird zuerst KOMPLETT durchsucht (Stufe A+B); der
+    globale Pool wird nur noch als Fallback befragt, wenn der per-Video-Pool GAR NICHTS
+    liefert (Alt-Kanäle ohne Migration).
     """
     try:
         from dashboard import ch_sheets
 
-        all_sheets = []  # [(name, safe, json_path, png_path), ...]
-        for sheet_dir in (ch_sheets(cid, vid), ch_sheets(cid)):
-            if not os.path.isdir(sheet_dir):
-                continue
-            for fn in os.listdir(sheet_dir):
-                if not fn.endswith(".json"):
-                    continue
-                json_path = os.path.join(sheet_dir, fn)
-                png_path = os.path.join(sheet_dir, fn.replace(".json", ".png"))
-                try:
-                    meta = json.load(open(json_path))
-                except Exception:
-                    continue
-                all_sheets.append((meta.get("name", ""), meta.get("safe", ""), json_path, png_path))
-
-        # Stufe A: passendes safe == entity (z.B. char_01.png)
-        for _name, safe, _jp, png_path in all_sheets:
-            if safe == entity and os.path.exists(png_path):
-                return png_path, {"entity_anchor_file": png_path, "source": "charsheet-png", "is_local": True}
-
-        # Stufe B: entity -> name via plan["characters"], dann Name-Match im Pool.
-        # analyze_script liefert [{id: "char_01", name_or_role: "Elizabeth Holmes"}, ...]
-        # Wenn der User manuell Charsheets unter 'elizabeth_holmes' hochlädt aber der
-        # Plan 'char_01' als concrete_entity vergibt, finden wir den Match über den
-        # Klarnamen statt über die ID.
         char_name = ""
         for c in plan.get("characters", []) or []:
             if c.get("id") == entity:
                 char_name = (c.get("name_or_role") or "").strip()
                 break
-        if char_name:
-            for name, safe, jp, png_path in all_sheets:
-                if name and name.lower() == char_name.lower() and os.path.exists(png_path):
-                    return png_path, {"entity_anchor_file": png_path, "source": "charsheet-name-match",
-                                       "matched_charsheet": safe, "is_local": True}
+
+        def _search(sheet_dirs):
+            all_sheets = []  # [(name, safe, json_path, png_path), ...]
+            for sheet_dir in sheet_dirs:
+                if not os.path.isdir(sheet_dir):
+                    continue
+                for fn in os.listdir(sheet_dir):
+                    if not fn.endswith(".json"):
+                        continue
+                    json_path = os.path.join(sheet_dir, fn)
+                    png_path = os.path.join(sheet_dir, fn.replace(".json", ".png"))
+                    try:
+                        meta = json.load(open(json_path))
+                    except Exception:
+                        continue
+                    all_sheets.append((meta.get("name", ""), meta.get("safe", ""), json_path, png_path))
+
+            # Stufe A: passendes safe == entity (z.B. char_01.png)
+            for _name, safe, _jp, png_path in all_sheets:
+                if safe == entity and os.path.exists(png_path):
+                    return png_path, {"entity_anchor_file": png_path, "source": "charsheet-png", "is_local": True}
+
+            # Stufe B: entity -> name via plan["characters"], dann Name-Match im Pool.
+            # analyze_script liefert [{id: "char_01", name_or_role: "Elizabeth Holmes"}, ...]
+            # Wenn der User manuell Charsheets unter 'elizabeth_holmes' hochlädt aber der
+            # Plan 'char_01' als concrete_entity vergibt, finden wir den Match über den
+            # Klarnamen statt über die ID.
+            if char_name:
+                for name, safe, jp, png_path in all_sheets:
+                    if name and name.lower() == char_name.lower() and os.path.exists(png_path):
+                        return png_path, {"entity_anchor_file": png_path, "source": "charsheet-name-match",
+                                           "matched_charsheet": safe, "is_local": True}
+            return None, {}
+
+        png_path, dbg = _search([ch_sheets(cid, vid)]) if vid else (None, {})
+        if png_path:
+            return png_path, dbg
+        # Fallback: kanalweiter globaler Pool (Alt-Kanäle ohne Per-Video-Charsheets).
+        return _search([ch_sheets(cid)])
     except Exception:
         pass
     return None, {}

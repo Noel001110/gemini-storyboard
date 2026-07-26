@@ -996,7 +996,11 @@ def t_no_sound_design_layer_render_worker_uses_raw_voice():
     AUFRUFEN (ein erklärender Kommentar darf die Funktion weiter beim Namen nennen)
     -- _mux_audio muss direkt mit audio_path gefüttert werden."""
     src = open(os.path.join(ROOT, "dashboard.py")).read()
-    idx = src.find('final_path = os.path.join(v_out(cid, vid), "final.mp4")')
+    # final_path wird seit der Shorts-Erweiterung (RenderTarget) über einen
+    # target-abhängigen Dateinamen gebaut (final.mp4 nur noch für target=="longform"),
+    # statt der vorher hartkodierten Konstante -- der eigentliche Testzweck (keine
+    # Sound-Design-Kette, _mux_audio bekommt audio_path direkt) bleibt unverändert.
+    idx = src.find('final_name = "final.mp4" if target == "longform"')
     assert idx != -1
     body = src[idx:idx + 900]
     assert "_build_final_audio(" not in body, \
@@ -1658,6 +1662,131 @@ def t_audit2_b5b_open_video_clears_stale_render_slot():
         "openVideo muss renderSlot.innerHTML zurücksetzen, nicht nur die Karte verstecken"
 
 
+# ─── Struktur-/Schnitt-Review Juli 2026: PacingProfile + Hook-Shorts ────────────────
+
+def t_pacing_profile_short_targets_are_tighter_than_longform():
+    """Kern der PacingProfile-Einführung: 'short' muss in JEDER Kategorie ein deutlich
+    kürzeres Ziel haben als 'longform' -- sonst löst das Profil den gemessenen
+    Rhythmus-Bug (calm/punchy kollabieren zur Mitte) nicht."""
+    import engine.scenes as sc
+    lf, sh = sc.PACING_PROFILES["longform"], sc.PACING_PROFILES["short"]
+    assert sh.calm_sec < lf.calm_sec
+    assert sh.normal_sec < lf.normal_sec
+    assert sh.punchy_sec < lf.punchy_sec
+    assert sh.max_scene_sec < lf.max_scene_sec
+
+
+def t_segment_by_pacing_without_profile_matches_explicit_longform():
+    """Rückwärtskompatibilität: der einzige bestehende Aufrufer (dashboard.py) ruft
+    segment_by_pacing() ohne `profile=` auf -- das muss bytegleich zu einem expliziten
+    profile=PACING_PROFILES['longform'] bleiben."""
+    import engine.scenes as sc
+    units = ["This is a calm opening sentence about nothing much.",
+             "Something punchy happens right now!",
+             "A normal closing thought follows here."]
+    pacing = [{"beat": 0, "label": "calm"}, {"beat": 1, "label": "punchy"},
+              {"beat": 2, "label": "normal"}]
+    a = sc.segment_by_pacing(list(units), list(pacing), 150.0, 4.0)
+    b = sc.segment_by_pacing(list(units), list(pacing), 150.0, 4.0,
+                              profile=sc.PACING_PROFILES["longform"])
+    assert a == b, f"Default-Profil weicht vom expliziten longform-Profil ab: {a} != {b}"
+
+
+def t_segment_by_pacing_short_profile_produces_shorter_scenes():
+    """Kernbehauptung des Fixes: dieselben Sätze ergeben mit profile='short' spürbar
+    kürzere Szenen (näher am recherchierten 1.5-2s/Bild-Ziel) als mit 'longform'."""
+    import engine.scenes as sc
+    text = ("The market crashed overnight. Nobody expected it at all. Prices fell "
+            "fast across every sector. Investors panicked everywhere they looked. "
+            "The damage was already done by morning.")
+    units = sc.split_units(text)
+    longform_scenes = sc.segment_by_pacing(units, [], 170.0, 5.0,
+                                            profile=sc.PACING_PROFILES["longform"])
+    short_scenes = sc.segment_by_pacing(units, [], 170.0, 1.8,
+                                         profile=sc.PACING_PROFILES["short"])
+    lf_avg = sum(s["dur"] for s in longform_scenes) / len(longform_scenes)
+    sh_avg = sum(s["dur"] for s in short_scenes) / len(short_scenes)
+    assert sh_avg < lf_avg, f"short-Profil sollte kürzere Szenen liefern: {sh_avg} >= {lf_avg}"
+
+
+def t_measure_channel_wpm_computes_real_speech_rate():
+    """_measure_channel_wpm ersetzt die feste 150/160-Annahme durch die reale, aus
+    plan.json gemessene Rate: 60 Wörter über 20s aligned-Dauer -> exakt 180 wpm."""
+    import dashboard
+    cid = "test_wpm_measure_ch"
+    dashboard.ensure_channel(cid)
+    dashboard.ensure_video(cid, "vwpm")
+    scenes = [
+        {"text": " ".join(["word"] * 30), "start_aligned": 0.0, "end_aligned": 10.0},
+        {"text": " ".join(["word"] * 30), "start_aligned": 10.0, "end_aligned": 20.0},
+    ]
+    dashboard._atomic_write_json(dashboard.v_plan(cid, "vwpm"), {"scenes": scenes},
+                                  ensure_ascii=False, indent=1)
+    wpm = dashboard._measure_channel_wpm(cid)
+    assert wpm is not None
+    assert abs(wpm - 180.0) < 0.01, f"erwartet 180.0 wpm, bekam {wpm}"
+
+
+def t_measure_channel_wpm_falls_back_without_aligned_data():
+    """Ein Kanal ganz ohne fertig gerendertes (aligned) Video muss auf den expliziten
+    Fallback zurückfallen, nie einen falschen Wert erfinden oder crashen."""
+    import dashboard
+    cid = "test_wpm_empty_ch"
+    dashboard.ensure_channel(cid)
+    wpm = dashboard._measure_channel_wpm(cid, fallback=142.0)
+    assert wpm == 142.0
+
+
+def t_generate_short_scripts_degrades_to_empty_list_on_failure():
+    """generate_short_scripts() muss wie das bestehende generate_titles() bei einem
+    LLM-Fehler still auf [] degradieren -- Aufrufer-Vertrag, den shorts/api.py's
+    /api/shorts/generate_hook_scripts direkt darauf abstützt (kein Crash, 500 mit
+    klarer Fehlermeldung stattdessen)."""
+    import engine.prompts as p
+    with patch("dashboard.post_gemini_native", side_effect=RuntimeError("simulated outage")):
+        result = p.generate_short_scripts("some long-form script text", "Some Title", n=5)
+    assert result == []
+
+
+def t_shorts_script_system_forbids_sequential_part_pattern():
+    """Quell-Check: SHORTS_SCRIPT_SYSTEM muss explizit den bestätigten Anti-Pattern
+    (sequenzielles 'Part N', harte CTA-Karte) verbieten -- das ist der ganze Grund,
+    warum die alte Parts-Pipeline durch diese Funktion ersetzt wurde."""
+    import engine.prompts as p
+    txt = p.SHORTS_SCRIPT_SYSTEM.lower()
+    assert "part 1 of n" in txt or "never a sequence number" in txt
+    assert "independent" in txt
+    assert "hard cta card" in txt or "cta card" in txt
+
+
+def t_assign_short_scene_images_keyword_fallback_never_raises():
+    """Ohne funktionierenden LLM-Call muss der deterministische Keyword-Overlap-
+    Fallback greifen und ein plausibles Bild pro Short-Szene liefern -- nie eine
+    Exception, nie ein Renderabbruch."""
+    import engine.prompts as p
+    longform_scenes = [
+        {"text": "The market crashed hard today", "concrete_entity": "char_ceo", "file": "000.jpg"},
+        {"text": "She smiled and walked away calmly", "concrete_entity": "char_woman", "file": "001.jpg"},
+    ]
+    shorts_scenes = [[{"text": "The market crashed hard"}, {"text": "She smiled and walked"}]]
+    with patch("dashboard.post_gemini_native", side_effect=RuntimeError("simulated outage")):
+        result = p.assign_short_scene_images(shorts_scenes, longform_scenes)
+    assert result == [["000.jpg", "001.jpg"]], f"Fallback-Zuordnung unerwartet: {result}"
+
+
+def t_keyword_overlap_match_ignores_scenes_without_file():
+    """_keyword_overlap_match darf nie eine Longform-Szene ohne `file` als Match
+    zurückgeben -- ein solcher Treffer wäre für den Aufrufer wertlos (kein Bild zum
+    Wiederverwenden vorhanden)."""
+    import engine.prompts as p
+    longform_scenes = [
+        {"text": "The market crashed hard today", "concrete_entity": "char_ceo"},  # kein file!
+        {"text": "A totally unrelated sentence about cats", "concrete_entity": "char_x", "file": "005.jpg"},
+    ]
+    idx = p._keyword_overlap_match("The market crashed hard", longform_scenes)
+    assert idx == 1, f"Fallback darf nur fileless-Szenen NIE wählen, war: {idx}"
+
+
 def main():
     tmp_home = setup()
     try:
@@ -1840,6 +1969,26 @@ def main():
             "B4: Default-Settings matchen recherchiertes Doku-Preset")
         run(t_audit2_b5b_open_video_clears_stale_render_slot,
             "B5b: openVideo leert renderSlot beim Video-Wechsel")
+
+        summary_section("Struktur-/Schnitt-Review Juli 2026: PacingProfile + Hook-Shorts")
+        run(t_pacing_profile_short_targets_are_tighter_than_longform,
+            "PacingProfile: 'short' straffer als 'longform' in jeder Kategorie")
+        run(t_segment_by_pacing_without_profile_matches_explicit_longform,
+            "segment_by_pacing() ohne profile= == explizites longform-Profil")
+        run(t_segment_by_pacing_short_profile_produces_shorter_scenes,
+            "short-Profil liefert kuerzere Szenen als longform-Profil")
+        run(t_measure_channel_wpm_computes_real_speech_rate,
+            "_measure_channel_wpm misst reale Sprechrate aus plan.json")
+        run(t_measure_channel_wpm_falls_back_without_aligned_data,
+            "_measure_channel_wpm faellt ohne Daten auf expliziten Fallback zurueck")
+        run(t_generate_short_scripts_degrades_to_empty_list_on_failure,
+            "generate_short_scripts() degradiert bei LLM-Fehler auf []")
+        run(t_shorts_script_system_forbids_sequential_part_pattern,
+            "SHORTS_SCRIPT_SYSTEM verbietet sequenzielles 'Part N'/CTA-Karte")
+        run(t_assign_short_scene_images_keyword_fallback_never_raises,
+            "assign_short_scene_images: Keyword-Fallback nie ein Crash")
+        run(t_keyword_overlap_match_ignores_scenes_without_file,
+            "_keyword_overlap_match ignoriert Szenen ohne file")
     finally:
         teardown(tmp_home)
 

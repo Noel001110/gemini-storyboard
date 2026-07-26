@@ -173,6 +173,12 @@
   .scene-slots{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
   .slot{border-radius:var(--radius-sm);overflow:hidden;position:relative;background:#000;aspect-ratio:16/9}
   .slot img,.slot video{width:100%;height:100%;object-fit:cover;display:block}
+  /* Shorts-Erweiterung: #shortsSlot erbt .slot (border-radius/overflow/background),
+     braucht aber 9:16 statt der für #renderSlot gedachten 16:9-Vorgabe -- sonst
+     zeigt object-fit:cover das tatsächlich 1080x1920-portrait final_short_vertical.mp4
+     hart mittig gecroppt in einer breiten Box an und sieht aus wie Querformat, obwohl
+     die Datei selbst echtes Hochformat ist (per ffprobe verifiziert). */
+  #shortsSlot{aspect-ratio:9/16}
   .slot-empty{width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:var(--mut-2);font-size:12px;cursor:pointer;background:var(--surface-2);transition:background .15s}
   .slot-empty:hover{background:#e8e9eb}
   .slot-empty .slot-icon{font-size:26px;opacity:.6}
@@ -476,6 +482,43 @@
         <div id="titleListStep" class="space-y-2" style="margin-top:10px;display:flex;flex-direction:column;gap:6px;"></div>
       </div>
 
+      <!-- Packaging-Erweiterung: strukturell identisch zur Titel-Karte oben nachgebaut
+           (gleiches sm-Button + hint-Muster) -- Description/Tags/Kategorie fürs Upload,
+           reuse von generate_titles bleibt oben unangetastet. -->
+      <div style="margin-bottom:14px;" id="packagingStep">
+        <div class="row" style="align-items:center;gap:10px;">
+          <button id="genPackagingBtn" onclick="genPackagingStep()" class="sm">📦 Description/Tags/Kategorie generieren</button>
+          <span class="hint" id="packagingHint">Braucht einen ausgewählten Titel.</span>
+        </div>
+        <div id="packagingFields" style="margin-top:10px;display:none;flex-direction:column;gap:8px;">
+          <div>
+            <label class="block text-xs font-semibold text-app-mut uppercase tracking-wide mb-2">Description</label>
+            <textarea id="pkgDescription" rows="5" style="width:100%;margin-top:4px;" oninput="savePackagingDebounced()"></textarea>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-app-mut uppercase tracking-wide mb-2">Tags (Komma-getrennt)</label>
+            <input id="pkgTags" type="text" style="width:100%;margin-top:4px;" oninput="savePackagingDebounced()">
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-app-mut uppercase tracking-wide mb-2">Kategorie</label>
+            <select id="pkgCategory" style="width:100%;margin-top:4px;" onchange="savePackagingDebounced()"></select>
+          </div>
+        </div>
+        <!-- Warteschlangen-Brücke: sichtbar sobald mindestens eine gerenderte Datei
+             existiert (Longform final.mp4 und/oder Short final_short_vertical.mp4).
+             Schreibt einen upload_queue-Eintrag (immer privat + geplant, siehe
+             youtube/upload.py assert_schedulable) und navigiert dann zur eigenen
+             Control-Seite -- Upload selbst läuft NICHT hier im Dashboard. -->
+        <div class="row" id="queueBridgeRow" style="margin-top:14px;display:none;gap:8px;align-items:center;flex-wrap:wrap">
+          <select id="queueBridgeTarget" class="sm">
+            <option value="longform">Longform</option>
+            <option value="short_vertical">Short (9:16)</option>
+          </select>
+          <input type="datetime-local" id="queueBridgeSchedule">
+          <button onclick="addToUploadQueue()" class="sm">📤 Zur Upload-Warteschlange hinzufügen</button>
+        </div>
+      </div>
+
       <div>
         <div class="row" style="align-items:start;gap:16px;">
           <div style="flex:1;">
@@ -512,12 +555,25 @@
         </div>
       </div>
 
-      <div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Sprecher-Skript eingeben</div>
+      <div class="row" style="align-items:center;justify-content:space-between;margin-bottom:8px">
+        <div style="font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em">Sprecher-Skript eingeben</div>
+        <!-- Juli 2026 (User-Report "Hook-Shorts wurden auf Deutsch generiert, obwohl das
+             Skript Englisch ist"): vorher gab's fürs eigentliche Sprecher-Skript GAR
+             KEINEN eigenen Sprach-Schalter -- gespeichert wurde die globale _scriptLang-
+             Variable des VÖLLIG SEPARATEN "Skript generieren"-Rohtranskript-Tools weiter
+             unten, die videounabhängig ist und beim Reinpasten eines Texts nie berührt
+             wird. Jetzt eigener, pro Video geladener/gespeicherter Schalter. -->
+        <div class="lang-toggle" style="flex:0 0 auto">
+          <button class="sm" id="scriptLangDE" onclick="setScriptLang('de')">🇩🇪 DE</button>
+          <button class="sm" id="scriptLangEN" onclick="setScriptLang('en')">🇬🇧 EN</button>
+        </div>
+      </div>
       <textarea id="script" rows="10" placeholder="Füge hier das Skript ein, das für das Video gesprochen wird …" oninput="estimate();_elRefreshGenBtn();saveScriptLocal()"></textarea>
       <div class="row" style="margin-top:10px;align-items:center">
         <label>Wörter / Minute<input type="number" id="wpm" value="160" min="80" max="220" oninput="estimate()"></label>
         <span class="est" id="est">—</span>
       </div>
+      <p class="hint" id="wpmMeasuredHint" style="margin-top:4px"></p>
       <div class="row" style="margin-top:12px;gap:10px;align-items:center">
         <button onclick="makePlan()" id="planBtn">Plan aus Skript erstellen</button>
         <span class="hint">Timing geschätzt via WPM-Formel + Pacing-Analyse</span>
@@ -754,6 +810,112 @@
       </div>
       <div class="row" id="renderDlRow" style="display:none;margin-top:8px">
         <button class="sm ghost" onclick="downloadFinalVideo()">⬇ final.mp4</button>
+      </div>
+    </div>
+
+    <!-- Shorts-Erweiterung: additive Zweitverwertung des bereits gerenderten Longform-
+         Videos (Strategie A -- neu croppen/schwenken derselben Bilder für 9:16, kein
+         eigener Skript-/Bild-Pfad). Braucht deshalb zwingend ein fertiges final.mp4
+         (start_aligned pro Szene), siehe updateShortsCardVisibility(). -->
+    <div class="card" id="shortsCard" data-step-section="6" style="display:none">
+      <h2>⑥ Short-Version (9:16)</h2>
+      <p class="hint" id="shortsHint" style="margin-bottom:10px">Erst Longform-Video fertig rendern</p>
+
+      <div class="steps" id="shortsSteps" style="display:none;flex-wrap:wrap;margin-bottom:10px">
+        <span id="sstage-prepare">Vorbereiten</span>
+        <span style="color:var(--border)">›</span>
+        <span id="sstage-timing">Wort-Timing</span>
+        <span style="color:var(--border)">›</span>
+        <span id="sstage-motion">Kamerabewegung</span>
+        <span style="color:var(--border)">›</span>
+        <span id="sstage-clips">Clips</span>
+        <span style="color:var(--border)">›</span>
+        <span id="sstage-transitions">Übergänge</span>
+        <span style="color:var(--border)">›</span>
+        <span id="sstage-assemble">Zusammenschnitt</span>
+        <span style="color:var(--border)">›</span>
+        <span id="sstage-audio">Ton</span>
+        <span style="color:var(--border)">›</span>
+        <span id="sstage-review">Prüfung</span>
+      </div>
+      <div class="bar" id="shortsBarWrap" style="display:none"><div id="shortsBarFill"></div></div>
+
+      <div class="row" style="margin-top:12px">
+        <button onclick="generateShort()" id="shortsBtn" disabled>📱 Short erzeugen</button>
+        <button onclick="stopShort()" id="stopShortBtn" class="ghost" style="display:none;color:var(--danger);border-color:var(--danger)">⏹ Stoppen</button>
+      </div>
+
+      <div class="slot" id="shortsSlot" style="margin-top:12px;max-width:270px;display:none">
+        <div class="slot-empty"><span class="slot-icon">📱</span><span class="slot-label">Noch keine Short-Version</span></div>
+      </div>
+      <div class="row" id="shortsDlRow" style="display:none;margin-top:8px">
+        <button class="sm ghost" onclick="downloadShortVideo()">⬇ final_short_vertical.mp4</button>
+      </div>
+
+      <!-- Klimax-Short nutzt 1:1 Titel/Description/Tags vom Longform (Packaging-Karte
+           oben, VIDEO_META) -- hier nochmal sichtbar machen, WAS beim Queuen benutzt
+           wird, gleicher Stil + gleiche Position (unterhalb des Videos) wie bei den
+           Part-Karten weiter unten. -->
+      <div id="shortsPackagingPreview" style="display:none;max-width:270px;margin-top:6px">
+        <div id="shortsPreviewTitle" style="font-size:11px;font-weight:600"></div>
+        <div id="shortsPreviewDesc" class="hint" style="font-size:11px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden"></div>
+      </div>
+
+      <!-- Parts-Pipeline: DEPRECATED (Struktur-/Schnitt-Review Juli 2026) -- bestätigter
+           Anti-Pattern (sequenzielles Zerschneiden ohne Hook, "Part N" signalisiert
+           fehlenden Kontext, CTA-Endkarte killt Completion; siehe Plan). Ersetzt durch
+           die Hook-Shorts-Karte unten (eigenständige Skripte mit eigenem Voiceover).
+           Absichtlich NICHT gelöscht, nur ausgeblendet: 6 Parts liegen bereits real bei
+           YouTube, Backend (shorts/api.py _parts_worker) bleibt unangetastet erreichbar. -->
+      <div style="display:none">
+        <div class="row" style="align-items:center;gap:10px">
+          <button onclick="startSplitParts()" id="splitPartsBtn" disabled>🎬 In Parts aufteilen</button>
+        </div>
+        <p class="hint" id="partsHint" style="margin-top:6px">
+          Zerlegt das ganze Video in eine Serie von 60-70s-Teilen (Part 1, 2, 3 …), je mit
+          Endkarte, automatischem Titel/Description und automatischer Warteschlangen-Eintragung.
+        </p>
+        <div class="bar" id="partsBarWrap" style="display:none"><div id="partsBarFill"></div></div>
+        <div id="partsResult" style="display:none;margin-top:8px"></div>
+      </div>
+    </div>
+
+    <!-- Hook-Shorts: ersetzt die Parts-Pipeline (Struktur-/Schnitt-Review Juli 2026).
+         Statt das Longform sequenziell zu zerschneiden, bekommt jeder Short ein EIGENES,
+         eigenständiges Voiceover-Skript (Hook in Sek 1-2, Payoff bis Sek 6-8, andere
+         Aufhänger pro Short) -- Bilder werden aus dem Longform-Bildpool wiederverwendet.
+         Zweistufig, wie ein Review-Gate vor dem teuren Teil: erst Skripte generieren +
+         bestätigen (editierbar, exakt wie #titleListStep), DANN erst TTS + Render. -->
+    <div class="card" id="hookShortsCard" style="display:none">
+      <h2>⑥ Hook-Shorts (eigenständige Skripte)</h2>
+      <p class="hint" id="hookScriptsHint" style="margin-bottom:10px">
+        Erzeugt mehrere eigenständige Short-Skripte mit eigenem Hook/Voiceover, die dieses
+        Video aus verschiedenen Blickwinkeln bewerben (kein sequenzielles Zerschneiden).
+      </p>
+      <div class="row" style="align-items:center;gap:10px">
+        <button onclick="genHookScriptsStep()" id="genHookScriptsBtn" disabled>✍️ Skripte generieren</button>
+        <span class="hint">5 unabhängige Hook-first-Skripte, editierbar vor dem Bauen.</span>
+      </div>
+      <div id="hookScriptsList" style="margin-top:12px;display:flex;flex-direction:column;gap:8px"></div>
+      <div class="row" id="hookScriptsConfirmRow" style="display:none;margin-top:10px;gap:10px;align-items:center">
+        <button onclick="confirmHookScripts()" id="confirmHookScriptsBtn">✅ Bestätigen &amp; Shorts bauen</button>
+        <span class="hint">Baut pro bestätigtem Skript: Voiceover → Bild-Zuordnung → Render.</span>
+      </div>
+      <div class="bar" id="hooksBarWrap" style="display:none"><div id="hooksBarFill"></div></div>
+      <p class="hint" id="hooksBuildHint" style="margin-top:8px;display:none"></p>
+      <div id="hooksResult" style="display:none;margin-top:10px"></div>
+    </div>
+
+    <!-- Publish-Übersichtskarte: User-Wunsch -- letzter Schritt im Flow, zeigt den
+         YouTube-Status DIESES EINEN Videos (Longform + Klimax-Short + alle Parts) auf
+         einen Blick, mit Direktlink sobald hochgeladen. Read-only + der bestehende
+         Queue-Button -- Termin-/Text-Bearbeitung bleibt bewusst in Control. -->
+    <div class="card" id="publishOverviewCard" data-step-section="7" style="display:none">
+      <h2>⑦ Veröffentlichen</h2>
+      <p class="hint" style="margin-bottom:10px">YouTube-Status dieses Videos — Longform, Klimax-Short und alle Parts.</p>
+      <div id="publishOverviewList"></div>
+      <div class="row" style="margin-top:10px">
+        <button class="sm ghost" onclick="window.open('/control','_blank')">→ In Control ansehen/planen</button>
       </div>
     </div>
 
@@ -1089,6 +1251,8 @@ async function openVideo(vid, name){
   loadVideoMeta();
   loadImageModel();
   loadOverlayOpts();
+  loadMeasuredWpm();
+  startPublishOverviewPoll();
 }
 
 // Extracted out of openVideo() so both a page (re)load AND the one-button orchestrator's
@@ -1100,7 +1264,7 @@ async function refreshPlanAndStatus(){
     SCENES = r.scenes;
     renderScenes(r.source||'text');
     $('planArea').style.display = 'block';
-    if(r.characters) suggestCharsFromPlan(r.characters);
+    if(r.characters){ await loadCharsheets(); suggestCharsFromPlan(r.characters); }
     const batchSt = await ch_get('/api/generate_all_status').catch(() => null);
     if(batchSt && batchSt.running){
       startBatchPoll();
@@ -1117,6 +1281,59 @@ async function refreshPlanAndStatus(){
     } else if(r.render && r.render.file){
       showRenderedVideo(r.render.file);
     }
+
+    // Shorts-Erweiterung: braucht ein fertiges Longform-final.mp4 (start_aligned pro
+    // Szene) -- derselbe r.render.file-Check wie oben ist das verlässlichste Signal.
+    LONGFORM_RENDERED = !!(r.render && r.render.file);
+    updateShortsCardVisibility();
+    updateQueueBridgeVisibility();
+    const shortSt = await ch_get(`/api/render_status?target=${SHORT_TARGET}`).catch(() => null);
+    if(shortSt && shortSt.running){
+      startShortPoll();
+    } else {
+      // Kein Live-Job-Status übersteht einen Server-Neustart (RENDER_JOBS ist reines
+      // In-Memory-Dict) -- ob eine Short-Datei aus einer früheren Session existiert,
+      // probiert der <video>-Tag einfach spekulativ; onerror blendet den Slot bei 404
+      // wieder aus, damit kein kaputtes Player-Icon stehen bleibt.
+      const slot = $('shortsSlot');
+      if(slot){
+        slot.style.display = '';
+        slot.innerHTML = `<video controls src="/generated/final_short_vertical.mp4?channel=${ACTIVE_CHANNEL}&video=${ACTIVE_VIDEO}&t=${Date.now()}" onerror="this.closest('.slot').style.display='none'"></video>`;
+        slot.querySelector('video').addEventListener('loadedmetadata', () => {
+          $('shortsDlRow').style.display = '';
+          SHORT_RENDERED = true;
+          updateQueueBridgeVisibility();
+        }, {once:true});
+      }
+    }
+
+    // Parts-Pipeline: gleiches Resume-Prinzip wie der Klimax-Short oben -- ein vor
+    // einem Reload gestarteter Lauf läuft server-seitig weiter, Poll wieder aufnehmen
+    // statt einen scheinbar untätigen Knopf zu zeigen.
+    const partsSt = await ch_get('/api/shorts/parts_status').catch(() => null);
+    if(partsSt && partsSt.running){
+      startPartsPoll();
+    } else {
+      // PARTS_JOBS ist In-Memory und verliert seinen Stand bei jedem Server-Neustart --
+      // ohne diesen Check verschwinden bereits fertige Parts aus dem Dashboard, sobald
+      // der Server neu startet. /api/shorts/parts_list liest stattdessen aus der
+      // Upload-Queue (SQLite), die einen Neustart übersteht.
+      const partsList = await ch_get('/api/shorts/parts_list').catch(() => null);
+      if(partsList && partsList.parts && partsList.parts.length){
+        _renderCompletedParts(partsList.parts);
+      }
+    }
+
+    // Hook-Shorts: gleiches Resume-Prinzip wie Parts oben.
+    const hooksSt = await ch_get('/api/shorts/hooks_status').catch(() => null);
+    if(hooksSt && hooksSt.running){
+      startHooksPoll();
+    } else {
+      const hooksList = await ch_get('/api/shorts/hooks_list').catch(() => null);
+      if(hooksList && hooksList.hooks && hooksList.hooks.length){
+        _renderCompletedHooks(hooksList.hooks);
+      }
+    }
   }
 }
 
@@ -1128,6 +1345,32 @@ async function loadVideoMeta(){
   if($('ideaInput')) $('ideaInput').value = VIDEO_META.idea || '';
   renderTitleListStep();
   renderThumbnailStep();
+  // Kategorie-Dropdown braucht die Liste, bevor renderPackagingStep() sie befüllen kann --
+  // nur relevant, wenn dieses Video schon einmal Packaging generiert hatte (hasAny-Check
+  // dort blendet die Felder sonst ohnehin aus).
+  if(VIDEO_META.description || (VIDEO_META.tags && VIDEO_META.tags.length) || VIDEO_META.category_id){
+    await loadPackagingCategories();
+  }
+  renderPackagingStep();
+  renderShortsPackagingPreview();
+  renderHookScriptsStep();
+  // updateShortsCardVisibility() lief evtl. schon VOR diesem Load (refreshPlanAndStatus
+  // wird zuerst awaited) und hatte da noch VIDEO_META.selected_title == '' -- erneut
+  // aufrufen, jetzt wo VIDEO_META wirklich befüllt ist (sonst bleibt der Hook-Skripte-
+  // Knopf fälschlich disabled, obwohl längst ein Titel gewählt ist).
+  updateShortsCardVisibility();
+}
+
+// Klimax-Short nutzt 1:1 VIDEO_META.selected_title/.description (siehe queue_add in
+// youtube/api.py) -- diese Vorschau macht im Shorts-Bereich sichtbar, WAS das ist,
+// ohne extra hochzuscrollen (User-Feedback: "seh weder Titel noch Beschreibung").
+function renderShortsPackagingPreview(){
+  const box = $('shortsPackagingPreview'); if(!box) return;
+  const hasTitle = !!VIDEO_META.selected_title;
+  box.style.display = hasTitle ? '' : 'none';
+  if(!hasTitle) return;
+  $('shortsPreviewTitle').textContent = VIDEO_META.selected_title;
+  $('shortsPreviewDesc').textContent = VIDEO_META.description || '(noch keine Description generiert)';
 }
 
 async function saveIdea(){
@@ -1166,8 +1409,78 @@ async function genTitleStep(){
 async function selectTitleStep(t){
   VIDEO_META.selected_title = t;
   renderTitleListStep();
+  renderShortsPackagingPreview();
   await ch_api('/api/select_title', {title: t});
   stepperState().invalidate(); // update stepper complete state
+}
+
+// ---- Packaging (Description/Tags/Kategorie) --------------------------------------
+let PACKAGING_CATEGORIES = [];
+
+async function loadPackagingCategories(){
+  if(PACKAGING_CATEGORIES.length) return;
+  const r = await ch_get('/api/youtube/categories').catch(() => null);
+  PACKAGING_CATEGORIES = (r && r.categories) || [];
+}
+
+function renderPackagingStep(){
+  const fields = $('packagingFields'); if(!fields) return;
+  const hasAny = !!(VIDEO_META.description || (VIDEO_META.tags && VIDEO_META.tags.length) || VIDEO_META.category_id);
+  fields.style.display = hasAny ? 'flex' : 'none';
+  if(!hasAny) return;
+  $('pkgDescription').value = VIDEO_META.description || '';
+  $('pkgTags').value = (VIDEO_META.tags || []).join(', ');
+  const sel = $('pkgCategory');
+  sel.innerHTML = PACKAGING_CATEGORIES.map(c =>
+    `<option value="${c.id}"${c.id === VIDEO_META.category_id ? ' selected' : ''}>${escHtml(c.title)}</option>`
+  ).join('');
+}
+
+async function genPackagingStep(){
+  if(!VIDEO_META.selected_title){
+    alert('Erst einen Titel auswählen.');
+    return;
+  }
+  await loadPackagingCategories();
+  const btn = $('genPackagingBtn'); btn.disabled = true; btn.textContent = '⏳ Generiere …';
+  const r = await ch_api('/api/youtube/generate_packaging', {});
+  btn.disabled = false; btn.textContent = '📦 Description/Tags/Kategorie generieren';
+  if(!r.ok){ alert('Fehler: '+(r.error||'unbekannt')); return; }
+  VIDEO_META.description = r.description;
+  VIDEO_META.tags = r.tags;
+  VIDEO_META.category_id = r.category_id;
+  renderPackagingStep();
+  renderShortsPackagingPreview();
+  stepperState().invalidate();
+}
+
+// Debounce nach demselben Snapshot-Muster wie saveScriptLocal()/_flushScriptToServer()
+// (siehe dort): cid/vid werden BEIM TIPPEN eingefroren, nicht erst beim Timer-Ablauf --
+// sonst würde ein Video-Wechsel mitten im Debounce-Fenster den Text am FALSCHEN Video
+// abspeichern (genau der Bug, den das Skript-Snapshot-Muster dort schon einmal behoben hat).
+let _pkgSaveTimer = null;
+let _pkgPending = null;
+function savePackagingDebounced(){
+  if(!ACTIVE_VIDEO) return;
+  _pkgPending = {
+    cid: ACTIVE_CHANNEL, vid: ACTIVE_VIDEO,
+    description: ($('pkgDescription')||{}).value || '',
+    tags: (($('pkgTags')||{}).value || '').split(',').map(s => s.trim()).filter(Boolean),
+    category_id: ($('pkgCategory')||{}).value || '',
+  };
+  if(_pkgSaveTimer) clearTimeout(_pkgSaveTimer);
+  _pkgSaveTimer = setTimeout(_flushPackagingToServer, 2500);
+}
+
+async function _flushPackagingToServer(){
+  if(_pkgSaveTimer){ clearTimeout(_pkgSaveTimer); _pkgSaveTimer = null; }
+  const snap = _pkgPending;
+  if(!snap) return;
+  _pkgPending = null;
+  await api('/api/youtube/save_packaging', 'POST', {
+    description: snap.description, tags: snap.tags, category_id: snap.category_id,
+    channel: snap.cid, video: snap.vid,
+  });
 }
 
 function renderThumbnailStep(){
@@ -1575,6 +1888,27 @@ function estimate(){
   $('est').innerHTML=`${w} Wörter · ~${total.toFixed(0)}s Audio · <b>${n} ${label}</b>`;
 }
 
+// Struktur-/Schnitt-Review Juli 2026: die feste "160 wpm"-Annahme im Feld oben stimmt
+// selten mit der echten, gemessenen Sprechrate dieses Kanals überein (das war die Root
+// Cause des erratischen Schnitt-Rhythmus, siehe engine/scenes.py PacingProfile). Zeigt
+// die reale, aus bereits fertigen Videos gemessene Rate an und übernimmt sie automatisch
+// in #wpm, SOLANGE der Nutzer den Wert noch nicht selbst von der Werkseinstellung (160)
+// weg verändert hat -- ein bewusst gesetzter eigener Wert wird nie überschrieben.
+async function loadMeasuredWpm(){
+  const r = await ch_get('/api/measure_wpm').catch(() => null);
+  const hint = $('wpmMeasuredHint');
+  if(!r || !r.measured){
+    if(hint) hint.textContent = 'Noch keine gemessene Sprechrate (erst nach dem ersten fertigen Render dieses Kanals).';
+    return;
+  }
+  if(hint) hint.textContent = `Gemessen an bereits fertigen Videos dieses Kanals: ${r.wpm} wpm.`;
+  const input = $('wpm');
+  if(input && +input.value === 160){
+    input.value = r.wpm;
+    estimate();
+  }
+}
+
 // ---- Manual plan ----
 // Plan generation runs server-side (see _plan_generate_worker) for the same reason as
 // batch image generation: it survives closing the tab, and the server itself refuses a
@@ -1644,7 +1978,7 @@ function startPlanPoll(){
       $('planArea').style.display = SCENES.length ? 'block' : 'none';
       updateStepVisibility();  // Single-page-Flow: Render-Step mit einblenden, sobald Szenen da
       fillScriptFromScenesIfEmpty(); _elRefreshGenBtn();  // Voiceover-Button aktivieren
-      if(r.characters) suggestCharsFromPlan(r.characters);
+      if(r.characters){ await loadCharsheets(); suggestCharsFromPlan(r.characters); }
     }
   };
   poll();
@@ -1868,13 +2202,25 @@ const _SCRIPT_DEBOUNCE_MS = 800;
 // stand in den kaputten script.json-Dateien: {"text": ""}.
 let _scriptPending = null;   // {cid, vid, text, language, preset}
 
+// Sprache DES SPRECHER-SKRIPTS (per Video, aus script.json geladen/gespeichert) --
+// bewusst getrennt von _scriptLang weiter unten, das nur die Ausgabesprache des
+// separaten Rohtranskript-Rewrite-Tools ist. Siehe Kommentar am scriptLangDE/EN-Toggle.
+let CURRENT_SCRIPT_LANG = 'de';
+function setScriptLang(l, skipSave){
+  CURRENT_SCRIPT_LANG = l;
+  const de = $('scriptLangDE'), en = $('scriptLangEN');
+  if(de) de.classList.toggle('sel', l==='de');
+  if(en) en.classList.toggle('sel', l==='en');
+  if(!skipSave) saveScriptLocal();
+}
+
 function _scriptSnapshot(){
   const presetEl = $('scriptPreset');
   return {
     cid: ACTIVE_CHANNEL,
     vid: ACTIVE_VIDEO,
     text: $('script').value,
-    language: (typeof _scriptLang !== 'undefined') ? _scriptLang : 'de',
+    language: CURRENT_SCRIPT_LANG,
     preset: presetEl ? presetEl.value : 'flat_cartoon_doc',
   };
 }
@@ -1980,13 +2326,20 @@ async function restoreScriptLocal(){
   //    unrettbar gemacht, obwohl der Browser es noch hatte.
   const cid = ACTIVE_CHANNEL, vid = ACTIVE_VIDEO;
   let serverText = null;
+  // Sprache dieses Videos IMMER aus der Server-Antwort übernehmen (auch wenn der Text
+  // leer ist) -- sonst würde beim Video-Wechsel die zuvor gesetzte CURRENT_SCRIPT_LANG
+  // des VORHERIGEN Videos hier weiterleben und beim ersten Tastendruck falsch gespeichert.
+  // skipSave=true: das ist ein Laden vom Server, kein User-Klick, nichts zu speichern.
+  let langFromServer = 'de';
   try{
     const r = await ch_get('/api/script');
     if(r && typeof r.text === 'string' && r.text.trim()){
       serverText = r.text;
       _scriptLastSavedAt = r.updatedAt || 0;
     }
+    if(r && typeof r.language === 'string') langFromServer = r.language;
   }catch(e){ /* Server nicht erreichbar — Fallback auf localStorage */ }
+  if(cid === ACTIVE_CHANNEL && vid === ACTIVE_VIDEO) setScriptLang(langFromServer, true);
 
   // 2) localStorage als Fallback / Offline-Stand
   let localText = null;
@@ -2013,7 +2366,7 @@ async function restoreScriptLocal(){
     // Self-Heal: der Server hat nichts (oder einen Leer-Write), der Browser schon.
     // Zurückschreiben, damit der Stand den nächsten Cache-Clear/Geräte-Wechsel überlebt.
     _scriptPending = {cid, vid, text: chosen,
-                      language: (typeof _scriptLang !== 'undefined') ? _scriptLang : 'de',
+                      language: CURRENT_SCRIPT_LANG,
                       preset: $('scriptPreset') ? $('scriptPreset').value : 'flat_cartoon_doc'};
     _flushScriptToServer().catch(()=>{});
   }
@@ -2179,7 +2532,7 @@ function startVoiceoverPoll(){
         $('planArea').style.display = SCENES.length ? 'block' : 'none';
         updateStepVisibility();  // Single-page-Flow: Render-Step mit einblenden, sobald Szenen da
         fillScriptFromScenesIfEmpty(); _elRefreshGenBtn();  // Voiceover-Button aktivieren
-        if(plan.characters) suggestCharsFromPlan(plan.characters);
+        if(plan.characters){ await loadCharsheets(); suggestCharsFromPlan(plan.characters); }
       }
       $('elGenBtn').disabled = false;
     }
@@ -2781,6 +3134,11 @@ function startRenderPoll(){
       } else if(st.file){
         showRenderedVideo(st.file);
         $('renderHint').textContent = 'Fertig ✓';
+        // Shorts braucht ein fertiges Longform-Video (start_aligned pro Szene) --
+        // sobald der Longform-Render hier fertig wird, direkt freischalten, ohne
+        // dass ein Page-Reload nötig ist.
+        LONGFORM_RENDERED = true;
+        updateShortsCardVisibility();
       } else {
         updateRenderCardVisibility();
       }
@@ -2801,6 +3159,473 @@ function downloadFinalVideo(){
   const a = document.createElement('a');
   a.href = `/generated/final.mp4?channel=${ACTIVE_CHANNEL}&video=${ACTIVE_VIDEO}`;
   a.download = 'final.mp4'; a.click();
+}
+
+// ---- Shorts-Erweiterung (9:16, Strategie A) ----------------------------------
+// Teilt sich /api/render_status und /api/render_stop mit dem Longform-Render (nur
+// mit target=short_vertical abgefragt/gestoppt -- dieselbe RENDER_JOBS-Instanz,
+// eigener Job-Key server-seitig) und dieselben Stage-Labels/-Reihenfolge. Nur der
+// Start-Endpoint (/api/shorts/generate) und die DOM-IDs sind eigenständig, damit ein
+// Longform- und ein Short-Render/-Poll parallel laufen können, ohne sich gegenseitig
+// die UI wegzuklappen.
+const SHORT_TARGET = 'short_vertical';
+let LONGFORM_RENDERED = false;
+
+function updateShortsCardVisibility(){
+  const card = $('shortsCard');
+  if(!card) return;
+  const isVideo = CURRENT_MODE === 'video';
+  // Juli 2026 (User-Report "sauberer, einfacher Flow für die neue Short-Engine"): die
+  // alte Klimax-Short-Karte (⑥ Short-Version 9:16) trug dieselbe Stufennummer wie die
+  // neue Hook-Shorts-Karte darunter -- zwei "⑥"s gleichzeitig, dazu beide erst sichtbar
+  // sobald LONGFORM_RENDERED, was wie ein fehlender Schritt aussah. Absichtlich NICHT
+  // gelöscht (gleiches Muster wie die Parts-Pipeline weiter unten im selben Markup) --
+  // Backend (generateShort()/shorts/api.py) bleibt erreichbar, nur der Standard-Flow
+  // zeigt sie nicht mehr. Hook-Shorts ist jetzt die einzige sichtbare ⑥.
+  card.style.display = 'none';
+  const hookCard = $('hookShortsCard');
+  if(hookCard) hookCard.style.display = (isVideo || !LONGFORM_RENDERED) ? 'none' : '';
+  if(isVideo || !LONGFORM_RENDERED) return;
+  // Klimax-Short und Hook-Shorts sind zwei unabhängige Knöpfe/Prozesse -- je eigener
+  // Poll-Timer-Guard, blockieren sich nicht gegenseitig.
+  if(!_shortPollTimer){
+    $('shortsBtn').disabled = false;
+    $('shortsHint').textContent = 'Bereit — nutzt HOOK/CLIMAX-Szenen des fertigen Longform-Videos';
+  }
+  if(!_partsPollTimer && $('splitPartsBtn')){
+    $('splitPartsBtn').disabled = false;
+  }
+  // Hook-Skripte brauchen einen ausgewählten Titel (generate_short_scripts-Kontext) --
+  // gleiche Voraussetzung wie die bestehende Warteschlangen-Brücke.
+  if(!_hooksPollTimer && $('genHookScriptsBtn')){
+    $('genHookScriptsBtn').disabled = !VIDEO_META.selected_title;
+    $('hookScriptsHint').textContent = VIDEO_META.selected_title
+      ? 'Erzeugt mehrere eigenständige Short-Skripte mit eigenem Hook/Voiceover, die dieses Video aus verschiedenen Blickwinkeln bewerben.'
+      : 'Erst einen Titel auswählen (Schritt ①), bevor Short-Skripte erzeugt werden können.';
+  }
+}
+
+async function generateShort(){
+  const r = await ch_api('/api/shorts/generate', {target: SHORT_TARGET});
+  if(!r.ok){ alert('Fehler: '+(r.error||'unbekannt')); return; }
+  startShortPoll();
+}
+
+async function stopShort(){
+  const btn = $('stopShortBtn');
+  btn.disabled = true; btn.textContent = '⏳ Stoppt nach aktuellem Clip …';
+  await ch_api('/api/render_stop', {target: SHORT_TARGET});
+}
+
+function _setShortStageUI(stage){
+  RENDER_STAGE_ORDER.forEach((s, idx) => {
+    const el = $('sstage-'+s);
+    if(!el) return;
+    const curIdx = RENDER_STAGE_ORDER.indexOf(stage);
+    el.className = idx < curIdx ? 'done' : idx === curIdx ? 'active' : '';
+  });
+}
+
+let _shortPollTimer = null;
+function startShortPoll(){
+  if(_shortPollTimer) return;
+  $('shortsBtn').style.display = 'none';
+  $('stopShortBtn').style.display = '';
+  $('stopShortBtn').disabled = false; $('stopShortBtn').textContent = '⏹ Stoppen';
+  $('shortsSteps').style.display = 'flex';
+  $('shortsHint').textContent = 'Rendert …';
+  const poll = async () => {
+    const st = await ch_get(`/api/render_status?target=${SHORT_TARGET}`).catch(() => null);
+    if(!st) return;
+    if(st.running){
+      _setShortStageUI(st.stage);
+      if(st.stage === 'clips' || st.stage === 'transitions'){
+        $('shortsBarWrap').style.display = '';
+        $('shortsBarFill').style.width = (st.total ? st.done/st.total*100 : 0) + '%';
+        const label = st.stage === 'clips' ? 'Clips' : 'Übergänge';
+        const pct = st.total ? Math.round(st.done/st.total*100) : 0;
+        $('shortsHint').textContent = `${label}: ${st.done} / ${st.total} (${pct}%)${_etaLabel(st)}`;
+      } else {
+        $('shortsBarWrap').style.display = 'none';
+        $('shortsHint').textContent = RENDER_STAGE_LABELS[st.stage] || 'Rendert …';
+      }
+    } else {
+      clearInterval(_shortPollTimer); _shortPollTimer = null;
+      $('shortsBtn').style.display = ''; $('stopShortBtn').style.display = 'none';
+      $('shortsSteps').style.display = 'none'; $('shortsBarWrap').style.display = 'none';
+      if(st.error){
+        alert('Short-Rendern fehlgeschlagen: ' + st.error);
+        updateShortsCardVisibility();
+      } else if(st.file){
+        showShortVideo(st.file);
+        $('shortsHint').textContent = 'Fertig ✓';
+      } else {
+        updateShortsCardVisibility();
+      }
+    }
+  };
+  poll();
+  _shortPollTimer = setInterval(poll, 2000);
+}
+
+function showShortVideo(file){
+  const slot = $('shortsSlot');
+  slot.style.display = '';
+  slot.innerHTML = `<video controls src="/generated/${file}?channel=${ACTIVE_CHANNEL}&video=${ACTIVE_VIDEO}&t=${Date.now()}"></video>`;
+  $('shortsDlRow').style.display = '';
+  SHORT_RENDERED = true;
+  updateQueueBridgeVisibility();
+}
+
+// ---- Warteschlangen-Brücke (Upload-Erweiterung) -----------------------------
+let SHORT_RENDERED = false;
+
+function updateQueueBridgeVisibility(){
+  const row = $('queueBridgeRow');
+  if(!row) return;
+  const opts = $('queueBridgeTarget');
+  const optLongform = opts.querySelector('option[value=longform]');
+  const optShort = opts.querySelector('option[value=short_vertical]');
+  if(optLongform) optLongform.disabled = !LONGFORM_RENDERED;
+  if(optShort) optShort.disabled = !SHORT_RENDERED;
+  if(optLongform && optLongform.disabled && optShort && !optShort.disabled) opts.value = 'short_vertical';
+  row.style.display = (LONGFORM_RENDERED || SHORT_RENDERED) ? '' : 'none';
+  if(!$('queueBridgeSchedule').value){
+    // Default: morgen zur selben Uhrzeit -- weit über der 15-Minuten-Mindestvorlaufzeit
+    // (assert_schedulable, youtube/upload.py), aber jederzeit vom Nutzer änderbar.
+    const d = new Date(Date.now() + 24 * 3600 * 1000);
+    const pad = n => String(n).padStart(2, '0');
+    $('queueBridgeSchedule').value = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+}
+
+async function addToUploadQueue(){
+  const target = $('queueBridgeTarget').value;
+  const scheduleVal = $('queueBridgeSchedule').value;
+  if(!scheduleVal){ alert('Bitte einen Zeitpunkt wählen.'); return; }
+  const scheduled_at = new Date(scheduleVal).getTime() / 1000;
+  const r = await ch_api('/api/youtube/queue_add', {render_target: target, scheduled_at});
+  if(!r.ok){ alert('Fehler: ' + (r.error || 'unbekannt')); return; }
+  window.location.href = '/control';
+}
+
+function downloadShortVideo(){
+  const a = document.createElement('a');
+  a.href = `/generated/final_short_vertical.mp4?channel=${ACTIVE_CHANNEL}&video=${ACTIVE_VIDEO}`;
+  a.download = 'final_short_vertical.mp4'; a.click();
+}
+
+// ---- Parts-Pipeline (ganzes Video als Serie 60-70s-Shorts) -------------------------
+// Eigenständig vom Klimax-Short (SHORT_TARGET) -- eigener Knopf, eigener Prozess, eigener
+// Poll-Timer (User-Vorgabe: "mit einem anderen Knopf die Pipeline starten"). Teilt sich
+// /api/render_status mit dem Klimax-Short (nur mit dem jeweils AKTUELLEN Part-Target
+// abgefragt, siehe current_target unten) -- kein Duplikat-Render-Status-Endpoint nötig.
+const PARTS_STAGE_LABELS = {
+  startet: 'Startet …', rendert: 'Rendert Clips …', cta: 'CTA-Karte anhängen …',
+  packaging: 'Titel/Description generieren …', queueing: 'In Warteschlange legen …',
+};
+
+async function startSplitParts(){
+  const r = await ch_api('/api/shorts/split_parts', {});
+  if(!r.ok){ alert('Fehler: '+(r.error||'unbekannt')); return; }
+  startPartsPoll();
+}
+
+let _partsPollTimer = null;
+// Zeigt jeden fertigen Part SOFORT an, sobald er in completed_parts auftaucht -- die
+// Datei liegt bereits fertig auf der Platte (CTA schon angehängt), lange bevor der
+// gesamte Batch durch ist (User-Wunsch: nicht auf alle 6 Parts warten müssen).
+let _partsShownCount = 0;
+function _renderCompletedParts(list){
+  if(!list || !list.length) return;
+  const result = $('partsResult');
+  result.style.cssText = 'display:flex;flex-wrap:wrap;gap:10px;align-items:flex-start';
+  if(list.length === _partsShownCount) return; // nichts Neues -- kein Re-Render/Flackern
+  _partsShownCount = list.length;
+  // Nebeneinander als kleine Video-Karten (gleiches .slot-Muster wie die Short-
+  // Vorschau oben), nicht als Text-Zeilen -- User-Feedback: "wie das 1. Video oben
+  // daneben gelistet". preload="metadata" statt "auto", damit nicht alle Videos beim
+  // Laden komplett heruntergeladen werden -- der Browser zeigt trotzdem automatisch
+  // das erste Frame als Vorschau.
+  // Titel sichtbar als Text unter der Karte (nicht nur als Tooltip, siehe User-
+  // Feedback "ich seh weder Titel noch Beschreibungen") -- volle Description bleibt
+  // in Control (editierbar), hier reicht der Titel zur Wiedererkennung.
+  result.innerHTML = list.map(p => `
+    <div style="width:150px;flex-shrink:0">
+      <div class="slot" style="aspect-ratio:9/16;width:100%">
+        <video controls preload="metadata" src="/generated/${p.file}?channel=${ACTIVE_CHANNEL}&video=${ACTIVE_VIDEO}"></video>
+      </div>
+      <div style="margin-top:4px;font-size:11px;font-weight:600">Part ${p.part}</div>
+      <div class="hint" style="font-size:11px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden" title="${escHtml(p.title)}">${escHtml(p.title)}</div>
+    </div>
+  `).join('');
+}
+
+function startPartsPoll(){
+  if(_partsPollTimer) return;
+  $('splitPartsBtn').disabled = true;
+  $('partsResult').style.display = 'none';
+  $('partsResult').innerHTML = '';
+  _partsShownCount = 0;
+  const poll = async () => {
+    const st = await ch_get('/api/shorts/parts_status').catch(() => null);
+    if(!st) return;
+    _renderCompletedParts(st.completed_parts);
+    if(st.running){
+      let label = `Part ${st.current_part}/${st.total_parts}: ${PARTS_STAGE_LABELS[st.stage] || st.stage}`;
+      $('partsBarWrap').style.display = 'none';
+      if(st.stage === 'rendert' && st.current_target){
+        const renderSt = await ch_get(`/api/render_status?target=${st.current_target}`).catch(() => null);
+        if(renderSt && renderSt.running && (renderSt.stage === 'clips' || renderSt.stage === 'transitions')){
+          $('partsBarWrap').style.display = '';
+          $('partsBarFill').style.width = (renderSt.total ? renderSt.done/renderSt.total*100 : 0) + '%';
+          const stageLabel = renderSt.stage === 'clips' ? 'Clips' : 'Übergänge';
+          label = `Part ${st.current_part}/${st.total_parts}: ${stageLabel} ${renderSt.done}/${renderSt.total}`;
+        }
+      }
+      $('partsHint').textContent = label;
+    } else {
+      clearInterval(_partsPollTimer); _partsPollTimer = null;
+      $('splitPartsBtn').disabled = false;
+      $('partsBarWrap').style.display = 'none';
+      if(st.error){
+        alert('Parts-Pipeline fehlgeschlagen: ' + st.error
+          + (st.completed_parts && st.completed_parts.length
+             ? ` (${st.completed_parts.length} Part(s) vorher erfolgreich erzeugt, siehe Liste oben)`
+             : ''));
+        _resetPartsHint();
+      } else if(st.total_parts){
+        $('partsHint').textContent = `${st.total_parts} Parts erzeugt und in die Warteschlange gelegt.`;
+        const result = $('partsResult');
+        result.insertAdjacentHTML('beforeend', `<div style="flex-basis:100%;margin-top:8px"><a href="/control" target="_blank">→ In Control ansehen/planen</a></div>`);
+      }
+    }
+  };
+  poll();
+  _partsPollTimer = setInterval(poll, 2000);
+}
+
+function _resetPartsHint(){
+  $('partsHint').textContent = 'Zerlegt das ganze Video in eine Serie von 60-70s-Teilen '
+    + '(Part 1, 2, 3 …), je mit Endkarte, automatischem Titel/Description und '
+    + 'automatischer Warteschlangen-Eintragung.';
+}
+
+// ---- Hook-Shorts (Struktur-/Schnitt-Review Juli 2026) ------------------------------
+// Ersetzt die Parts-Pipeline oben: jeder Short ist ein EIGENSTÄNDIGES Mini-Skript mit
+// eigenem Hook/Voiceover statt eines Ausschnitts des Longforms. Zweistufig: erst
+// generieren + review/editieren (Schutz vor dem teuren Teil, exakt wie #titleListStep),
+// dann erst TTS+Bild-Zuordnung+Render pro bestätigtem Skript.
+let HOOK_SCRIPTS_DRAFT = [];  // lokaler Bearbeitungs-State, aus VIDEO_META.hook_scripts befüllt
+
+function renderHookScriptsStep(){
+  const c = $('hookScriptsList'); if(!c) return;
+  if((!VIDEO_META.hook_scripts || !VIDEO_META.hook_scripts.length) && !HOOK_SCRIPTS_DRAFT.length){
+    c.innerHTML = '<p class="hint" style="margin:0">Noch keine Short-Skripte generiert.</p>';
+    $('hookScriptsConfirmRow').style.display = 'none';
+    return;
+  }
+  if(!HOOK_SCRIPTS_DRAFT.length && VIDEO_META.hook_scripts){
+    HOOK_SCRIPTS_DRAFT = VIDEO_META.hook_scripts.map(s => ({...s, keep: true}));
+  }
+  c.innerHTML = HOOK_SCRIPTS_DRAFT.map((s, i) => `
+    <div style="padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:var(--surface-2);opacity:${s.keep ? '1' : '0.45'}">
+      <div class="row" style="align-items:center;gap:8px;margin-bottom:6px">
+        <span class="hint" style="font-size:11px;flex:1">Angle: ${escHtml(s.angle || '')}</span>
+        <button class="sm ghost" onclick="_toggleHookKeep(${i})">${s.keep ? '🗑 Verwerfen' : '↩ Zurückholen'}</button>
+      </div>
+      <input type="text" value="${escHtml(s.title || '')}" oninput="_updateHookField(${i},'title',this.value)"
+             style="width:100%;font-weight:600;font-size:13px;margin-bottom:6px" ${s.keep ? '' : 'disabled'}>
+      <textarea rows="3" oninput="_updateHookField(${i},'script_text',this.value)" style="width:100%;font-size:12.5px"
+                ${s.keep ? '' : 'disabled'}>${escHtml(s.script_text || '')}</textarea>
+      <div class="hint" style="font-size:11px;margin-top:4px">${(s.script_text||'').trim().split(/\s+/).filter(Boolean).length} Wörter</div>
+    </div>
+  `).join('');
+  $('hookScriptsConfirmRow').style.display = HOOK_SCRIPTS_DRAFT.some(s => s.keep) ? '' : 'none';
+}
+
+function _toggleHookKeep(i){
+  HOOK_SCRIPTS_DRAFT[i].keep = !HOOK_SCRIPTS_DRAFT[i].keep;
+  renderHookScriptsStep();
+}
+
+function _updateHookField(i, field, value){
+  HOOK_SCRIPTS_DRAFT[i][field] = value;
+}
+
+async function genHookScriptsStep(){
+  const btn = $('genHookScriptsBtn'); btn.disabled = true; btn.textContent = '⏳ Generiere …';
+  const r = await ch_api('/api/shorts/generate_hook_scripts', {n: 5});
+  btn.disabled = false; btn.textContent = '✍️ Skripte generieren';
+  if(!r.ok){ alert('Fehler: '+(r.error||'unbekannt')); return; }
+  VIDEO_META.hook_scripts = r.scripts;
+  HOOK_SCRIPTS_DRAFT = r.scripts.map(s => ({...s, keep: true}));
+  renderHookScriptsStep();
+}
+
+async function confirmHookScripts(){
+  const kept = HOOK_SCRIPTS_DRAFT.filter(s => s.keep).map(({keep, ...rest}) => rest);
+  if(!kept.length){ alert('Mindestens ein Skript muss bestätigt bleiben.'); return; }
+  const r = await ch_api('/api/shorts/confirm_hook_scripts', {scripts: kept});
+  if(!r.ok){ alert('Fehler: '+(r.error||'unbekannt')); return; }
+  await startBuildHooks();
+}
+
+async function startBuildHooks(){
+  const r = await ch_api('/api/shorts/build_hooks', {});
+  if(!r.ok){ alert('Fehler: '+(r.error||'unbekannt')); return; }
+  startHooksPoll();
+}
+
+const HOOKS_STAGE_LABELS = {
+  startet: 'Startet …', segmentiert: 'Segmentiert Skripte …',
+  bild_zuordnung: 'Ordnet Bilder aus dem Longform zu …', bilder: 'Bilder zuordnen …',
+  audio: 'Erzeugt Voiceover …', rendert: 'Rendert Clips …', queueing: 'In Warteschlange legen …',
+};
+
+let _hooksShownCount = 0;
+function _renderCompletedHooks(list){
+  if(!list || !list.length) return;
+  const result = $('hooksResult');
+  result.style.cssText = 'display:flex;flex-wrap:wrap;gap:10px;align-items:flex-start';
+  if(list.length === _hooksShownCount) return;
+  _hooksShownCount = list.length;
+  result.innerHTML = list.map(h => `
+    <div style="width:150px;flex-shrink:0">
+      <div class="slot" style="aspect-ratio:9/16;width:100%">
+        <video controls preload="metadata" src="/generated/${h.file}?channel=${ACTIVE_CHANNEL}&video=${ACTIVE_VIDEO}"></video>
+      </div>
+      <div style="margin-top:4px;font-size:11px;font-weight:600">${escHtml(h.angle || ('Short ' + h.hook))}</div>
+      <div class="hint" style="font-size:11px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden" title="${escHtml(h.title)}">${escHtml(h.title)}</div>
+    </div>
+  `).join('');
+}
+
+let _hooksPollTimer = null;
+function startHooksPoll(){
+  if(_hooksPollTimer) return;
+  $('confirmHookScriptsBtn').disabled = true;
+  $('hooksBuildHint').style.display = '';
+  $('hooksResult').style.display = 'none';
+  $('hooksResult').innerHTML = '';
+  _hooksShownCount = 0;
+  const poll = async () => {
+    const st = await ch_get('/api/shorts/hooks_status').catch(() => null);
+    if(!st) return;
+    _renderCompletedHooks(st.completed_hooks);
+    if(st.running){
+      let label = `Hook ${st.current_hook}/${st.total_hooks}: ${HOOKS_STAGE_LABELS[st.stage] || st.stage}`;
+      $('hooksBarWrap').style.display = 'none';
+      if(st.stage === 'rendert'){
+        const target = `short_hook_${st.current_hook}`;
+        const renderSt = await ch_get(`/api/render_status?target=${target}`).catch(() => null);
+        if(renderSt && renderSt.running && (renderSt.stage === 'clips' || renderSt.stage === 'transitions')){
+          $('hooksBarWrap').style.display = '';
+          $('hooksBarFill').style.width = (renderSt.total ? renderSt.done/renderSt.total*100 : 0) + '%';
+          const stageLabel = renderSt.stage === 'clips' ? 'Clips' : 'Übergänge';
+          label = `Hook ${st.current_hook}/${st.total_hooks}: ${stageLabel} ${renderSt.done}/${renderSt.total}`;
+        }
+      }
+      $('hooksBuildHint').textContent = label;
+    } else {
+      clearInterval(_hooksPollTimer); _hooksPollTimer = null;
+      $('confirmHookScriptsBtn').disabled = false;
+      $('hooksBarWrap').style.display = 'none';
+      if(st.error){
+        alert('Hook-Shorts fehlgeschlagen: ' + st.error
+          + (st.completed_hooks && st.completed_hooks.length
+             ? ` (${st.completed_hooks.length} Short(s) vorher erfolgreich erzeugt, siehe Liste oben)`
+             : ''));
+        $('hooksBuildHint').style.display = 'none';
+      } else if(st.total_hooks){
+        $('hooksBuildHint').textContent = `${st.total_hooks} Hook-Shorts erzeugt und in die Warteschlange gelegt.`;
+        $('hooksResult').insertAdjacentHTML('beforeend', `<div style="flex-basis:100%;margin-top:8px"><a href="/control" target="_blank">→ In Control ansehen/planen</a></div>`);
+      }
+    }
+  };
+  poll();
+  _hooksPollTimer = setInterval(poll, 2000);
+}
+
+// ---- Publish-Übersichtskarte (letzter Schritt) --------------------------------------
+// Read-only Status-Anzeige DIESES Videos (Longform/Klimax-Short/Parts) + der bestehende
+// Queue-Button, falls ein Ziel noch nie gequeued wurde. Termin-/Text-Bearbeitung bleibt
+// bewusst in Control (User hat nachträgliches Editieren explizit abgelehnt).
+const PUBLISH_STATUS_LABELS = {
+  queued: 'Wartet', uploading: 'Lädt hoch …', uploaded: 'Fertig ✓',
+  failed: 'Fehlgeschlagen', canceled: 'Abgebrochen',
+};
+
+function _publishRow(label, entry, target){
+  let right;
+  if(!entry){
+    right = (target === 'longform' || target === 'short_vertical')
+      ? `<button class="sm" onclick="queueForPublish('${target}')">Zur Warteschlange hinzufügen</button>`
+      : `<span class="hint">—</span>`;
+  } else if(entry.status === 'uploaded' && entry.youtube_video_id){
+    right = `<a href="https://youtu.be/${entry.youtube_video_id}" target="_blank">▶ youtu.be/${entry.youtube_video_id}</a>`;
+  } else {
+    const err = entry.error ? ` — ${escHtml(entry.error)}` : '';
+    right = `<span class="hint">${PUBLISH_STATUS_LABELS[entry.status] || entry.status}${err}</span>`;
+  }
+  return `<div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--border)">
+    <span style="flex:1;font-size:13px">${escHtml(label)}</span>
+    ${right}
+  </div>`;
+}
+
+async function loadPublishOverview(){
+  const card = $('publishOverviewCard'); if(!card) return;
+  const isVideo = CURRENT_MODE === 'video';
+  card.style.display = (isVideo || !SCENES.length) ? 'none' : '';
+  if(isVideo || !SCENES.length) return;
+
+  const r = await ch_get('/api/control/video_publish_status').catch(() => null);
+  const entries = (r && r.entries) || [];
+  const byTarget = {};
+  entries.forEach(e => { byTarget[e.render_target] = e; });
+
+  const rows = [
+    _publishRow('Longform', byTarget['longform'], 'longform'),
+  ];
+  // Juli 2026 (User-Report "sauberer Flow für die neue Short-Engine"): die Klimax-Short-
+  // Zeile stand bisher IMMER hier, mit einem "Zur Warteschlange hinzufügen"-Button, auch
+  // wenn nie ein Klimax-Short gebaut wurde -- die (jetzt ausgeblendete) alte Karte lebte
+  // dadurch in ⑦ Veröffentlichen weiter. Jetzt wie Parts/Hook-Shorts: nur anzeigen, wenn
+  // wirklich ein Eintrag existiert (Alt-Videos mit bereits gebautem Klimax-Short bleiben
+  // dadurch unverändert sichtbar).
+  if(byTarget['short_vertical']){
+    rows.push(_publishRow('Klimax-Short (9:16)', byTarget['short_vertical'], 'short_vertical'));
+  }
+  entries
+    .filter(e => e.render_target.startsWith('short_part_'))
+    .sort((a, b) => parseInt(a.render_target.split('_').pop()) - parseInt(b.render_target.split('_').pop()))
+    .forEach(e => rows.push(_publishRow(`Part ${e.render_target.split('_').pop()}`, e, e.render_target)));
+  entries
+    .filter(e => e.render_target.startsWith('short_hook_'))
+    .sort((a, b) => parseInt(a.render_target.split('_').pop()) - parseInt(b.render_target.split('_').pop()))
+    .forEach(e => rows.push(_publishRow(`Hook-Short ${e.render_target.split('_').pop()}`, e, e.render_target)));
+
+  $('publishOverviewList').innerHTML = rows.join('');
+}
+
+async function queueForPublish(target){
+  // Juli 2026: kein client-seitig berechnetes scheduled_at mehr -- der Server setzt den
+  // Termin jetzt selbst über next_publish_slot() (20 Uhr, gleicher Tag wie Short 1 bzw.
+  // bereits vorhandene Warteschlangen-Einträge dieses Videos, siehe youtube/upload.py).
+  const r = await ch_api('/api/youtube/queue_add', {render_target: target});
+  if(!r.ok){ alert('Fehler: ' + (r.error || 'unbekannt')); return; }
+  loadPublishOverview();
+}
+
+// EIN Timer über Video-Wechsel hinweg -- verhindert, dass beim Öffnen mehrerer Videos
+// hintereinander mehrere parallele Poller entstehen, die sich beim Umschalten das
+// falsche Video anzeigen könnten.
+let _publishOverviewTimer = null;
+function startPublishOverviewPoll(){
+  if(_publishOverviewTimer) clearInterval(_publishOverviewTimer);
+  loadPublishOverview();
+  _publishOverviewTimer = setInterval(loadPublishOverview, 8000);
 }
 
 // ---- Ein-Knopf-Orchestrator (Phase 4.5) ----
@@ -2910,7 +3735,7 @@ function renderCharList(){
         <button class="sm ghost" style="margin-top:4px;font-size:11px" onclick="editCharDesc('${safeId}','${descEsc}')">Beschreibung bearbeiten</button>
       </div>
       <div style="display:flex;gap:6px;margin-top:6px;flex-direction:column">
-        <button class="sm" onclick="genCharSheet('${escHtml(ch.name).replace(/'/g,"&#39;")}','${descEsc}', this)">
+        <button class="sm" onclick="genCharSheet('${escHtml(ch.name).replace(/'/g,"&#39;")}','${descEsc}', this, '${safeId}')">
           ${ch.has_image?'Neu generieren':'Referenzbild erstellen'}
         </button>
         <label class="sm ghost" style="text-align:center;cursor:pointer">
@@ -2974,11 +3799,22 @@ function suggestCharsFromPlan(chars){
   // per character, NOT {name, description} — this mismatch used to throw here (silently
   // aborting whatever awaited this, e.g. openVideo()'s reload-resume) any time a plan's
   // characters array was non-empty.
+  //
+  // Juli 2026 (User-Report "Charakter existiert nicht in diesem Video" beim Bearbeiten):
+  // Callers awaiting this now call loadCharsheets() first (siehe refreshPlanAndStatus(),
+  // startPlanPoll()), damit bereits vorhandene Charaktere (auto-generiert unter char_01
+  // etc.) mit ihrem ECHTEN safe aus dem Backend in CHARS stehen, bevor hier per Namens-
+  // Abgleich auf Duplikate geprüft wird. Für einen Charakter, der WIRKLICH noch kein
+  // Charsheet hat, wird "safe" jetzt aus ch.id abgeleitet (char_01) statt aus dem Namen
+  // ("protagonist__you_") — das ist exakt das Schema, das die Auto-Charsheet-Generierung
+  // (_plan_generate_worker) selbst benutzt, damit später keine zweite, abweichend
+  // benannte Datei für denselben Charakter entsteht.
   chars.forEach(ch=>{
     const name = ch.name_or_role || ch.name;
     if(!name) return;
     if(!CHARS.find(c=>c.name.toLowerCase()===name.toLowerCase())){
-      CHARS.push({name, description: ch.visual_description||ch.description||'', safe: name.toLowerCase().replace(/[^\w-]/g,'_'), has_image:false, uri:null});
+      const safe = ch.id || name.toLowerCase().replace(/[^\w-]/g,'_');
+      CHARS.push({name, description: ch.visual_description||ch.description||'', safe, has_image:false, uri:null});
     }
   });
   renderCharList();
@@ -2999,7 +3835,7 @@ function addChar(){
 // Bei einem vorhandenen Charakter heißt der Button "Neu generieren", die Suche fand also
 // nichts, und der Klick blieb komplett ohne Rückmeldung (User-Report). Ein Charsheet
 // braucht 30-60s — ohne Feedback sieht das aus, als sei der Button kaputt.
-async function genCharSheet(name, desc, btn){
+async function genCharSheet(name, desc, btn, safe){
   const row = btn ? btn.closest('div[style*="grid-template-columns"]') : null;
   const slot = row ? row.querySelector('img, div[style*="aspect-ratio"]') : null;
   const prevLabel = btn ? btn.textContent.trim() : '';
@@ -3019,11 +3855,11 @@ async function genCharSheet(name, desc, btn){
   try{
     const r = await fetch('/api/gen_charsheet',{
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({name, description: desc, channel: ACTIVE_CHANNEL, vid: ACTIVE_VIDEO||''})
+      body: JSON.stringify({name, description: desc, safe: safe||'', channel: ACTIVE_CHANNEL, vid: ACTIVE_VIDEO||''})
     }).then(r=>r.json());
     if(r && r.ok){
       const ch = CHARS.find(c=>c.name===name);
-      if(ch){ ch.has_image = true; ch.uri = r.uri; }
+      if(ch){ ch.has_image = true; ch.uri = r.uri; ch.safe = r.safe || ch.safe; }
       renderCharList();   // rendert neu (inkl. Cache-Bust ?t=), Overlay verschwindet mit
       return;
     }

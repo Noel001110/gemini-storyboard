@@ -26,6 +26,8 @@ werden muss (die Konvention bleibt stabil).
 
 from __future__ import annotations
 
+from typing import Any
+
 # Lazy-Import-Konvention für engine-Module.
 # Andere Module (insbesondere dashboard.py nach M.2+) dürfen engine-Module nicht
 # oben importieren, sondern nur innerhalb von Funktionen über diese Helfer.
@@ -66,3 +68,31 @@ def register_endpoint(method: str, path: str, handler) -> None:
     Wird in spaeteren Phasen genutzt; heute nur Doku der Konvention.
     """
     ENDPOINT_REGISTRY.append({"method": method.upper(), "path": path, "handler": handler})
+
+
+# ── Prefix-Dispatch (Shorts/Upload/Control-Erweiterung, Phase 0) ─────────────
+# Erster ECHTER Mechanismus in diesem Package — ENDPOINT_REGISTRY oben blieb bis
+# hierher wirkungslos (nichts las/rief sie). Statt den bestehenden 1100-Zeilen-
+# Handler in dashboard.py umzubauen (M.6, weiterhin zurückgestellt), hängen sich
+# neue Fähigkeitsgebiete (shorts/, youtube/, control/) hier per Prefix ein.
+# dashboard.py ruft dispatch() einmal ganz am Anfang von do_GET/do_POST auf; ein
+# Treffer wird dort sofort ausgeliefert, sonst läuft die bestehende if/elif-Kette
+# unverändert weiter. Eine mount()-Zeile in main() auskommentieren schaltet ein
+# ganzes Gebiet ab, ohne den Rest anzufassen.
+_MOUNTS: list[tuple[str, Any]] = []
+
+
+def mount(prefix: str, module: Any) -> None:
+    """module muss handle(method, path, handler, qs, cid, vid, body) -> (handled, result)
+    bereitstellen. Reihenfolge = Registrierungsreihenfolge; erster passender Prefix
+    gewinnt."""
+    _MOUNTS.append((prefix, module))
+
+
+def dispatch(method: str, path: str, handler, qs: dict, cid: str, vid: str, body):
+    """Erster Prefix-Treffer liefert (True, result); sonst (False, None) — dashboard.py
+    fällt dann auf seine bestehende if/elif-Kette zurück."""
+    for prefix, module in _MOUNTS:
+        if path.startswith(prefix):
+            return module.handle(method, path, handler, qs, cid, vid, body)
+    return False, None

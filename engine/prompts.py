@@ -38,6 +38,7 @@ import re
 __all__ = [
     "IMAGE_PROMPT_CHUNK_SIZE", "IMAGE_PROMPT_MIN_LEN",
     "SCRIPT_SYSTEM", "TITLE_SYSTEM", "THUMBNAIL_PROMPT_SYSTEM",
+    "SHORTS_SCRIPT_SYSTEM",
     "HOOK_PROMPT_ADDITION",  # Phase L
     "_build_image_prompt", "_build_video_prompt",
     "load_char_refs", "analyze_char_image", "gen_charsheet",
@@ -45,7 +46,10 @@ __all__ = [
     "_image_prompt_chunk", "_image_prompt_single_retry",
     "visual_prompts",
     "generate_script", "generate_titles",
+    "generate_short_scripts", "assign_short_scene_images",
     "make_thumbnail_prompt", "gen_thumbnail_image",
+    "THUMBNAIL_TEXT_SYSTEM", "make_thumbnail_text",
+    "composite_thumbnail_text",
 ]
 
 
@@ -526,7 +530,8 @@ def _filter_char_refs_for_entity(char_refs, entity=""):
     return out
 
 
-def _build_image_prompt(scene_prompt, master, char_refs, phase="", is_hook=False, entity=""):
+def _build_image_prompt(scene_prompt, master, char_refs, phase="", is_hook=False, entity="",
+                         has_style_refs=False):
     """Compose the final image-generation prompt: scene text + (filtered) character refs + master.
 
     July 2026 (User-Report): Phase cues and Hook cues used to be hard-injected here. That was a
@@ -542,6 +547,20 @@ def _build_image_prompt(scene_prompt, master, char_refs, phase="", is_hook=False
     Char-Ref-Filter (Phase 1): Müll-Injection-Schutz, plus entity-scoping (Phase 1b) via
     `_filter_char_refs_for_entity` — see that function's docstring for why unscoped
     injection was actively wrong.
+
+    `has_style_refs` (Juli 2026, User-Report "neues Video zeigt Charakter aus altem Video
+    ohne dass die Szene überhaupt eine Person nennt"): die kanalweiten Style-Referenzbilder
+    werden als reine Bild-Referenz (nicht über diese Funktion) an KIE angehängt, damit
+    Linienführung/Palette/Rendertechnik konsistent bleiben — siehe dashboard.py,
+    `get_channel_style_refs` + `use_style_ref`. Diese Bilder zeigen aber selbst konkrete
+    Charaktere (die Vision-Beschreibung in `style_ref.json` nennt Haarfarbe, Kleidung etc.),
+    und ohne Text-Instruktion behandelt KIE sie wie jede andere Referenz — es übernimmt
+    das abgebildete Motiv (Gesicht, Kleidung), nicht nur den Stil. Das passiert genau in
+    Szenen OHNE eigenen Charakter-Anker (`concrete_entity` ist ein Symbol/Ort, kein
+    `char_`-Eintrag) — dort gibt es sonst keinerlei Identitäts-Instruktion, die dagegenhält,
+    und das erfundene Gesicht variiert von Bild zu Bild (mal mit Nase, mal ohne). Wenn
+    `has_style_refs=True`, wird deshalb IMMER (auch ohne passenden Charakter-Ref) eine
+    Klarstellung angehängt, dass die Style-Referenzbilder nur die Rendertechnik zeigen.
     """
     char_hint = ""
     relevant_refs = _filter_char_refs_for_entity(char_refs, entity)
@@ -573,6 +592,14 @@ def _build_image_prompt(scene_prompt, master, char_refs, phase="", is_hook=False
                       "person shown at a different point in time. Keep the face recognisably the "
                       "same, but age it / recolour the hair / change the clothes as the scene says.\n"
                       "- For anything the scene text does NOT mention, use the reference design.")
+    if has_style_refs:
+        char_hint += (
+            "\n\nSTYLE REFERENCE ONLY: the final reference image(s) in this set exist "
+            "SOLELY to demonstrate the target rendering technique — line weight, flat "
+            "color palette, outline style. Render EXCLUSIVELY the subject, character(s) "
+            "and composition described in the scene text above, in that technique. If "
+            "the scene text above does not describe a person, draw no person at all — "
+            "the people shown in those reference images are not part of this scene.")
     return scene_prompt + char_hint + "\n\n" + master
 
 
@@ -810,18 +837,44 @@ Your task: turn a raw transcript, notes, or video idea into a polished documenta
 
 REQUIREMENTS:
 - First-person or close-third-person narrator voice, consistent throughout
-- Short sentences, spoken cadence. ~120-150 words per minute.
+- Short sentences, spoken cadence. ~150-190 words per minute (documentary voiceover pace,
+  not audiobook-slow) — corrected range (2026 retention research + real measured narration
+  speed on this channel's own finished videos; the old "120-150" figure undershot reality).
 - One clear idea per paragraph; each paragraph ~3-6 sentences.
-- Build tension deliberately: HOOK in the opening 1-2 sentences (a concrete scene, a striking claim, a question that pulls the viewer in).
-- End with an OPEN QUESTION, not a summary. The last paragraph should leave the viewer thinking, not wrap things up.
-- Emotional arc: opens with tension or curiosity, deepens through investigation, lands on a reflective beat.
+
+THE OPENING (first ~30 seconds — the single highest-leverage part of the whole script,
+this is where most viewer drop-off happens):
+- NEVER start with a self-introduction, a channel intro, or a "today we're looking at…"
+  framing. Open on the result, a bold claim, or the problem itself — mid-scene, mid-tension.
+- The opening must do THREE things, in order, within the first few sentences:
+  1. VALIDATE THE CLICK — confirm the viewer landed in the right place for what the
+     title/thumbnail promised.
+  2. RAISE THE STAKES — make clear why this matters right now, concretely, not abstractly.
+  3. OPEN THE FIRST CURIOSITY LOOP — hint at the central payoff/reveal without giving it
+     away. Never state the video's full thesis or conclusion in the opening — that closes
+     the loop before the investigation even starts.
+
+PATTERN INTERRUPTS (every ~60-90 seconds of spoken content, i.e. roughly every 2-4
+paragraphs at this pace): insert a tonal or informational shift — a new fact, a reversal, a
+"but here's what nobody noticed" turn, a mini-payoff that resolves a small open question
+while immediately opening a bigger one. A script that runs flat for minutes without one of
+these loses the viewer even if each individual sentence is well written.
+
+- Build tension deliberately across the whole arc, not just the opening.
+- Chapter/section transitions are themselves open loops — end a chapter on a question or
+  an unresolved implication, never on a settled summary; that's what pulls the viewer into
+  the next chapter instead of letting them feel a natural stopping point.
+- End the whole script with an OPEN QUESTION, not a summary. The last paragraph should
+  leave the viewer thinking, not wrap things up.
+- Emotional arc: opens with tension or curiosity, deepens through investigation, lands on
+  a reflective beat.
 - NEVER invent specific facts, numbers, dates, or names not present in the input.
 - If the input is sparse, write a short but complete script — never pad with filler.
 
 OUTPUT FORMAT:
 - Plain text, paragraphs separated by blank lines.
 - DO NOT include any preamble, title, or meta-commentary.
-- DO NOT label scenes, acts, or chapters.
+- DO NOT label scenes, acts, or chapters as such (no "Chapter 1:", no "Act I").
 - Chapter titles as ## headings. Blank line between paragraphs.
 - The output must NOT be word-for-word identical to the input — it must be freshly written in this style.
 """
@@ -861,11 +914,32 @@ but you NEVER misrepresent what the video actually contains — you exaggerate t
 TENSION and stakes already present in the script, never invent a claim the script
 doesn't support. Misleading clickbait is not acceptable; a strong honest hook is.
 
-FORMULAS TO DRAW FROM (mix, don't just pick one every time):
+FORMULAS TO DRAW FROM (mix, don't just pick one every time — data-backed CTR
+multipliers from 2026 title-performance research in parentheses):
 - Curiosity gap: hint at a shocking fact/connection without revealing it
 - Number-based: "[Number] [Things] That [Concrete Result]"
 - Loss-aversion / FOMO: what the viewer doesn't know yet, what they're missing
-- Personal-authority: "[credible framing]. Here's what [it] means for you."
+- Compression: pair a large payoff against a small time/effort cost, e.g.
+  "[Big Result] in [Surprisingly Short Time/Effort]" (~80x)
+- Blueprint: signal a replicable, concrete system rather than a vague idea, e.g.
+  "The Blueprint to [Result] from Day 1" / "My Full [System] for [Result]" (~100x)
+- Identity: challenge the viewer's self-image directly, second person, imperative
+  or declarative, e.g. "You've Been [Doing X Wrong]. Here's [The Fix]." (~100x)
+- Authority: LEAD with the credential/role, don't bury it, e.g.
+  "[ROLE] EXPLAINS: [Surprising Claim]" (~61x) — stronger than a generic
+  "credible framing" tacked on at the end
+- Novelty: emphasize that this is new/different from what's already out there,
+  e.g. "The NEW Way to [Result]" (~11x)
+
+ANTI-PATTERN — DO NOT DO THIS:
+- Never write a single explanatory sentence that states the video's full thesis or
+  conclusion up front, e.g. "How [X] causes [Y]" or "Why [X] leads to [Y]" as a
+  complete, self-contained statement. That closes the curiosity loop before the
+  click ever happens — there's nothing left to find out. Every title must leave an
+  open loop (a question, a challenge, a missing piece) that only watching resolves.
+- A bracket/parenthetical suffix ("(And How to Stop)", "(Step-by-Step)",
+  "[Full Breakdown]") is a proven CTR booster when it fits naturally — use one on
+  at least one or two of the options.
 
 RULES:
 - 55-60 characters total (titles longer than this get truncated on mobile — this is
@@ -900,6 +974,206 @@ def generate_titles(full_script: str, n: int = 5) -> list:
     return []
 
 
+# ---------- Hook-first Short scripts (Struktur-/Schnitt-Review Juli 2026) ----------
+# Ersetzt die frühere "Longform in sequenzielle Parts zerschneiden"-Pipeline (bestätigter
+# Anti-Pattern: Cold-Feed-Zuschauer ohne Kontext, kein Hook, "Part N" signalisiert
+# fehlenden Kontext). Jeder Short ist jetzt ein EIGENSTÄNDIGES Mini-Skript mit eigenem
+# Voiceover -- ein Longform-Skript liefert per EINEM LLM-Call N unabhängige Aufhänger.
+
+SHORTS_SCRIPT_SYSTEM = """\
+You are a short-form (YouTube Shorts / TikTok / Reels) script writer. You take a finished
+long-form documentary script and write N completely INDEPENDENT short-form voiceover
+scripts that promote it -- each one is its OWN self-contained mini-story, NOT a clip or
+excerpt of the long-form script and NOT a sequential "Part N" of it. A cold viewer who has
+never seen the long-form video and never will must get a complete, satisfying loop from
+ANY ONE of these alone.
+
+STRUCTURE (2026 short-form retention research -- this is a hard constraint, not a style
+suggestion, because the short-form feed swipes away within 1-3 seconds if this fails):
+- HOOK in the very first sentence (the first 1-2 seconds of spoken audio) -- a question,
+  a surprising stat, or a bold claim. Never a greeting, never a setup sentence before the
+  hook lands, never "In this video..." framing.
+- PAYOFF by roughly word 20-30 (about second 6-8 at spoken pace) -- resolve or sharply
+  escalate the hook immediately, never make the viewer wait for it.
+- ONE clear idea per short. Do not compress the whole long-form video into one short --
+  pick ONE angle, moment, or fact from it and build the entire short around just that.
+- 70-110 words total (fits a natural 20-40 second short at documentary spoken pace).
+- End with a SOFT, NATURALLY SPOKEN reference to the full video, e.g. "...and that's just
+  one piece of what actually happened there." NEVER a hard CTA card, never "link in bio",
+  never "Part 1 of N", never a sequence number of any kind.
+- The N shorts must each use a genuinely DIFFERENT angle/moment/fact from the long-form
+  script -- never sequential, never overlapping in what they reveal, never referencing
+  "part" or a fixed viewing order relative to each other.
+- NEVER invent facts, numbers, or claims not present in the long-form script.
+
+For each short, ALSO provide: a short standalone YouTube title (<=60 characters, same
+proven CTR formulas as any strong title -- curiosity gap, bold claim, never a full
+explanatory sentence that gives away the ending) and a 1-2 sentence description.
+"""
+
+
+def generate_short_scripts(full_script: str, chosen_title: str, n: int = 5,
+                           lang: str = "en") -> list:
+    """Generates N independent, self-contained hook-first short scripts that each promote
+    the long-form video from a DIFFERENT angle -- not a sequential split of it. One
+    response_schema-constrained LLM call for all N at once (same post_gemini_native
+    pattern as generate_titles). Returns [] on any failure -- caller must degrade
+    gracefully exactly like generate_titles()'s empty-list contract.
+
+    Each item: {"angle", "hook", "script_text", "title", "description"}.
+    """
+    from dashboard import post_gemini_native  # lazy
+    lang_instr = ("Write in German (natural spoken German, not formal)."
+                  if lang == "de" else
+                  "Write in English (clear, neutral international English).")
+    schema = {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "angle": {"type": "string", "description": "1-5 words naming which "
+                          "distinct moment/fact of the long-form script this short is built around."},
+                "hook": {"type": "string"},
+                "script_text": {"type": "string"},
+                "title": {"type": "string"},
+                "description": {"type": "string"},
+            },
+            "required": ["angle", "hook", "script_text", "title", "description"],
+        },
+    }
+    user_msg = (
+        f"{lang_instr}\n\n"
+        f"LONG-FORM VIDEO TITLE: {chosen_title}\n\n"
+        f"FULL LONG-FORM SCRIPT:\n{full_script.strip()[:6000]}\n\n"
+        f"Write {n} independent short-form scripts promoting this video, each built "
+        f"around a different angle/moment/fact, following the schema and rules above."
+    )
+    try:
+        txt = post_gemini_native([
+            {"role": "system", "content": SHORTS_SCRIPT_SYSTEM},
+            {"role": "user", "content": user_msg},
+        ], json_mode=True, temp=0.9, response_schema=schema)
+        arr = json.loads(txt)
+        if isinstance(arr, list):
+            return arr[:n]
+    except Exception as e:
+        print(f"  [ShortsScript] Fehler: {e}", flush=True)
+    return []
+
+
+def _keyword_overlap_match(short_text: str, longform_scenes: list) -> int:
+    """Deterministischer Fallback (kein API-Call) für assign_short_scene_images: wählt
+    die Longform-Szene mit dem größten Wort-Overlap zwischen ihrem `text`/`prompt` und
+    dem Short-Szenentext. Nie ein Renderabbruch, falls die LLM-Zuordnung fehlschlägt.
+    Sucht NUR unter Szenen mit vorhandenem `file` -- eine fileless Szene als "Match"
+    zurückzugeben wäre für den Aufrufer wertlos (kein Bild zum Wiederverwenden da)."""
+    stop = {"the", "a", "an", "of", "to", "in", "on", "and", "was", "is", "for",
+            "der", "die", "das", "und", "ist", "war", "ein", "eine", "zu", "im"}
+    short_words = {w.lower() for w in re.findall(r"[a-zA-ZäöüßÄÖÜ]{3,}", short_text)} - stop
+    candidates = [i for i, ls in enumerate(longform_scenes) if ls.get("file")]
+    if not candidates:
+        return -1
+    if not short_words:
+        return candidates[0]
+    best_i, best_score = candidates[0], -1
+    for i in candidates:
+        ls = longform_scenes[i]
+        haystack = f"{ls.get('text', '')} {ls.get('concrete_entity', '')}"
+        lf_words = {w.lower() for w in re.findall(r"[a-zA-ZäöüßÄÖÜ]{3,}", haystack)} - stop
+        score = len(short_words & lf_words)
+        if score > best_score:
+            best_i, best_score = i, score
+    return best_i
+
+
+def assign_short_scene_images(shorts_scenes: list, longform_scenes: list) -> list:
+    """'Materialien aus dem Hauptvideo wiederverwenden': ordnet jeder Short-Szene das
+    best passende bereits existierende Longform-Bild zu, statt neue KIE-Bilder zu
+    erzeugen (Regelfall: 0 neue Bildgenerierungen). EIN batched LLM-Call für ALLE
+    übergebenen Short-Skripte zusammen (nicht pro Short) -- Kontext sind die echten
+    Longform-Szenenfelder `text`/`concrete_entity`/`prompt` aus plan.json (kein
+    `core_statement` verfügbar, das existiert nur intern in der Bild-Prompt-Stufe und
+    wird nicht persistiert).
+
+    `shorts_scenes`: Liste von Szenenlisten (eine Liste pro generiertem Short-Skript,
+    bereits durch segment_by_pacing(profile=PACING_PROFILES["short"]) gelaufen).
+    `longform_scenes`: die fertigen Longform-Szenen aus plan.json (brauchen `file`).
+
+    Rückgabe: parallel zu `shorts_scenes` strukturiert -- eine Liste von Dateipfad-Listen
+    (oder None pro Szene, falls kein Longform-Bild + kein Fallback-Match existiert ->
+    Aufrufer generiert in diesem Ausnahmefall ein frisches Bild). Degradiert bei jedem
+    API-Fehler auf den deterministischen Keyword-Overlap-Fallback, NIE ein Renderabbruch.
+    """
+    lf_indexed = [{"i": i, "text": s.get("text", "")[:200],
+                   "concrete_entity": s.get("concrete_entity", ""),
+                   "prompt": s.get("prompt", "")[:150]}
+                  for i, s in enumerate(longform_scenes) if s.get("file")]
+    lf_file_by_i = {i: longform_scenes[i]["file"] for i in range(len(longform_scenes))
+                    if longform_scenes[i].get("file")}
+
+    def _fallback() -> list:
+        out = []
+        for scenes in shorts_scenes:
+            picks = []
+            for sc in scenes:
+                idx = _keyword_overlap_match(sc.get("text", ""), longform_scenes)
+                picks.append(lf_file_by_i.get(idx))
+            out.append(picks)
+        return out
+
+    if not lf_indexed:
+        return _fallback()
+
+    try:
+        from dashboard import post_gemini_native  # lazy
+        schema = {
+            "type": "object",
+            "properties": {
+                "assignments": {
+                    "type": "array",
+                    "items": {"type": "array", "items": {"type": "integer"}},
+                }
+            },
+            "required": ["assignments"],
+        }
+        shorts_ctx = [[sc.get("text", "") for sc in scenes] for scenes in shorts_scenes]
+        user_msg = (
+            f"LONG-FORM SCENES (index: text / entity / image content):\n" +
+            "\n".join(f"{e['i']}: \"{e['text']}\" | entity={e['concrete_entity']} | "
+                      f"image shows: {e['prompt']}" for e in lf_indexed) +
+            f"\n\nSHORT-FORM SCRIPTS, each already split into scene lines -- for EACH "
+            f"scene of EACH short, pick the long-form scene index whose EXISTING IMAGE "
+            f"best illustrates that scene line. Use -1 only if truly nothing fits.\n\n" +
+            "\n".join(f"SHORT {si}:\n" + "\n".join(f"  scene {li}: \"{t}\"" for li, t in enumerate(lines))
+                      for si, lines in enumerate(shorts_ctx))
+        )
+        txt = post_gemini_native([
+            {"role": "system", "content": "You match short-form video scenes to the "
+             "best-fitting existing image from a long-form video's scene list, by "
+             "matching what the image actually depicts to what the short-form line "
+             "narrates. Return only the JSON object per the schema."},
+            {"role": "user", "content": user_msg},
+        ], json_mode=True, temp=0.3, response_schema=schema)
+        data = json.loads(txt)
+        assignments = data.get("assignments", [])
+        out = []
+        for si, scenes in enumerate(shorts_scenes):
+            row = assignments[si] if si < len(assignments) else []
+            picks = []
+            for li, sc in enumerate(scenes):
+                idx = row[li] if li < len(row) else -1
+                f = lf_file_by_i.get(idx) if idx is not None and idx >= 0 else None
+                if not f:
+                    idx = _keyword_overlap_match(sc.get("text", ""), longform_scenes)
+                    f = lf_file_by_i.get(idx)
+                picks.append(f)
+            out.append(picks)
+        return out
+    except Exception as e:
+        print(f"  [ShortsImageAssign] Fehler: {e} — Keyword-Overlap-Fallback.", flush=True)
+        return _fallback()
+
+
 # ---------- Thumbnail generator ----------
 # Research-backed rules (2026 CTR studies): one dominant subject, one message, one
 # second to understand. Strong contrast (dark bg + light subject, or reverse).
@@ -915,13 +1189,21 @@ non-negotiable rules:
 
 1. ONE dominant subject only — the main character or the single most concrete symbol
    of the video's hook. No busy multi-element scenes.
-2. STRONG CONTRAST — either a light subject on a dark background or a dark subject on
-   a light background. Never a low-contrast, evenly-lit scene.
+2. FLAT, HIGH-CONTRAST BACKGROUND — a plain dark backdrop behind a light subject, or a
+   plain light backdrop behind a dark subject (same flat-color rule as every other
+   image in this channel's style — see STYLE CONTEXT). No busy scenery.
 3. EXAGGERATED, READABLE EMOTION on the subject if it's a character — shock, alarm,
    intense focus, fear, urgency. Subtle/neutral expressions do not work for thumbnails.
-4. RULE OF THIRDS — subject off-center, clear headroom, nothing important near the edges.
-5. NO more than one small supporting prop/symbol tied directly to the video's hook.
-6. Do not describe on-image text here — text is composited separately.
+4. RULE OF THIRDS: subject placed off-center with clear headroom in the top third of
+   the frame — that headroom is where bold title text gets added afterward, so keep it
+   free of important detail (no face, no key prop, up there).
+5. MUST include one or two bold, bright RED graphic annotations (a directional arrow
+   and/or a circle/ring) — simple drawn shapes, not text — pointing at or circling the
+   subject or the single most concrete detail/symbol of the hook. This is the classic
+   clickbait attention-director, non-negotiable.
+6. Do not describe on-image text here — text is composited separately (AI-rendered
+   text inside images is unreliable/garbled; drawn arrow/circle shapes are not, which is
+   why they belong in the image itself but the text does not).
 7. Keep the established character/art style exactly as given in STYLE CONTEXT, but push
    the POSE, EXPRESSION, and LIGHTING to thumbnail-appropriate extremes — a thumbnail
    is the most exaggerated, highest-contrast frame of the whole video, not a typical one.
@@ -949,6 +1231,98 @@ def make_thumbnail_prompt(full_script: str, master_style: str) -> str:
     except Exception as e:
         print(f"  [Thumbnail] Prompt-Fehler: {e}", flush=True)
         return "A single figure in a moment of shocked realization, strong dramatic lighting, high contrast."
+
+
+THUMBNAIL_TEXT_SYSTEM = """\
+You write the on-image CLICKBAIT TEXT for a YouTube thumbnail -- 2-4 words, punchy,
+provocative, grounded only in what the script actually supports (never invent a claim).
+This is NOT the video title (that's written separately) -- it's a short, shouted
+fragment that works alongside the image, e.g. a number, a verdict, a single loaded
+word or short phrase. Examples of the RIGHT length/energy: "$1,000,000?!", "HE QUIT",
+"BIG MISTAKE", "NEVER AGAIN". Return ONLY the text itself, no quotes, no punctuation
+beyond what belongs in the phrase itself.
+"""
+
+
+def make_thumbnail_text(full_script: str, chosen_title: str) -> str:
+    """Kurzer (2-4 Wörter), provokanter Text fürs Thumbnail-Kompositing (siehe
+    composite_thumbnail_text) -- getrennt von make_thumbnail_prompt (Bild) und
+    generate_titles (Videotitel), aber dasselbe post_gemini_native-Muster."""
+    from dashboard import post_gemini_native  # lazy
+    user_msg = f"TITLE: {chosen_title}\n\nSCRIPT:\n{full_script.strip()[:3000]}"
+    try:
+        text = post_gemini_native([
+            {"role": "system", "content": THUMBNAIL_TEXT_SYSTEM},
+            {"role": "user", "content": user_msg},
+        ], temp=0.8).strip().strip('"').strip("'")
+        return text or chosen_title[:20]
+    except Exception as e:
+        print(f"  [Thumbnail] Text-Fehler: {e}", flush=True)
+        return chosen_title[:20]
+
+
+def composite_thumbnail_text(image_path: str, text: str) -> None:
+    """Zeichnet den Clickbait-Text GROSS + fett + weiß mit dickem schwarzem Rand ins
+    obere Bilddrittel -- Pillow direkt (kein .venv_whisper-Subprocess nötig, Pillow ist
+    im Haupt-Environment vorhanden, siehe shorts/cta.py für dasselbe Muster).
+
+    Juli 2026 (User-Report "Text komplett verdeckt, Mitte des Wortes verschluckt"): ein
+    erster Anlauf legte das freigestellte Motiv (_extract_subject_mask) HINTER den Text
+    zurück, um einen "3D-Layered"-Tiefeneffekt zu erzeugen (Motiv schneidet den Text an,
+    wie beim Referenz-Kanal). Drei Iterationen an der erlaubten Überlapp-Fläche brachten
+    es nicht zuverlässig genug hin -- ein breiter Kopf/buschige Haare zerstörten immer
+    wieder die Wortmitte. User-Entscheidung: Tiefeneffekt fallengelassen, Lesbarkeit hat
+    Vorrang. Der dicke schwarze Rand allein reicht für Kontrast über JEDEM Hintergrund
+    -- kein Freistellen/Compositing mehr nötig, nur noch ein einfaches Overlay."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    canvas = Image.open(image_path).convert("RGB")
+    width, height = canvas.size
+    draw = ImageDraw.Draw(canvas)
+
+    font_candidates = [
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+    ]
+
+    def _load_font(size):
+        for path in font_candidates:
+            if os.path.exists(path):
+                return ImageFont.truetype(path, size)
+        return ImageFont.load_default(size)
+
+    text = text.upper()
+    words = text.split()
+    font_size = round(height * 0.17)
+    min_font_size = round(height * 0.09)
+    lines = [text]
+    font = _load_font(font_size)
+    # Zu breit? Erst an der Wortgrenze in 2 Zeilen umbrechen (Referenz-Thumbnails wie
+    # "THE GREAT DEPRESSION" laufen genauso zweizeilig), erst danach die Schrift
+    # verkleinern -- schrumpfen allein macht kurze Wörter unnötig winzig.
+    while True:
+        font = _load_font(font_size)
+        widths = [draw.textbbox((0, 0), ln, font=font)[2] for ln in lines]
+        if max(widths) <= width * 0.90 or font_size <= min_font_size:
+            break
+        if len(lines) == 1 and len(words) > 1:
+            mid = len(words) // 2
+            lines = [" ".join(words[:mid]), " ".join(words[mid:])]
+            continue
+        font_size = round(font_size * 0.92)
+
+    stroke_w = max(3, round(font_size * 0.09))
+    line_gap = round(font_size * 0.18)
+    line_dims = [draw.textbbox((0, 0), ln, font=font, stroke_width=stroke_w)[2:4] for ln in lines]
+    y = height * 0.06
+    for ln, (lw, lh) in zip(lines, line_dims):
+        x = (width - lw) / 2
+        # Gelb auf schwarzem Outline (User-Referenzbild "TRUST ME BRO") -- klassischer
+        # Clickbait-Kontrast, lesbar über jedem Bild.
+        draw.text((x, y), ln, font=font, fill=(255, 221, 0),
+                   stroke_width=stroke_w, stroke_fill=(0, 0, 0))
+        y += lh + line_gap
+    canvas.save(image_path, quality=92)
 
 
 def gen_thumbnail_image(prompt: str, master_style: str, out_path: str,

@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>Upload-Kontrolle</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{
+    --bg:#fafaf9; --surface:#ffffff; --surface-2:#f3f3f2; --border:#e5e5e4;
+    --text:#111827; --mut:#374151; --mut-2:#6b7280;
+    --acc:#c13838; --acc-soft:#fce8e8; --acc-hover:#a02828;
+    --ok:#16a34a; --ok-soft:#f0fdf4;
+    --warn:#d97706; --warn-soft:#fffbeb;
+    --danger:#dc2626; --danger-soft:#fef2f2;
+    --radius:10px; --radius-sm:6px;
+    --shadow:0 1px 2px rgba(16,24,40,.05);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1100px;margin:0 auto;padding:24px 20px 60px}
+  header{display:flex;align-items:center;gap:12px;margin-bottom:20px}
+  header h1{font-size:18px;margin:0;font-weight:700}
+  header a{color:var(--mut);font-size:13px;text-decoration:none}
+  header a:hover{color:var(--acc)}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:18px;margin-bottom:16px;box-shadow:var(--shadow)}
+  .card h2{font-size:14px;margin:0 0 12px;font-weight:700}
+  .hint{color:var(--mut);font-size:12px}
+  button{background:var(--acc);color:#fff;border:0;border-radius:var(--radius-sm);padding:8px 14px;font-size:12px;font-weight:600;cursor:pointer;transition:background .12s}
+  button:hover{background:var(--acc-hover)}
+  button.ghost{background:transparent;border:1px solid var(--border);color:var(--text)}
+  button.ghost:hover{background:var(--surface-2);border-color:var(--mut-2)}
+  button.danger{background:var(--danger)}
+  button.danger:hover{background:#b91c1c}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  input[type=text],input[type=datetime-local],select,textarea{background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 8px;font-size:12px}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th{text-align:left;color:var(--mut-2);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em;padding:6px 8px;border-bottom:1px solid var(--border)}
+  td{padding:8px;border-bottom:1px solid var(--border);vertical-align:top}
+  tr:last-child td{border-bottom:0}
+  .pill{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600}
+  .pill-queued{background:var(--surface-2);color:var(--mut)}
+  .pill-uploading{background:var(--warn-soft);color:var(--warn)}
+  .pill-uploaded{background:var(--ok-soft);color:var(--ok)}
+  .pill-failed,.pill-canceled{background:var(--danger-soft);color:var(--danger)}
+  .ch-row{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)}
+  .ch-row:last-child{border-bottom:0}
+  .ch-row .name{font-weight:600;flex:1}
+  .quota-bar{height:8px;background:var(--surface-2);border-radius:4px;overflow:hidden;margin-top:8px}
+  .quota-fill{height:100%;background:var(--acc);transition:width .2s}
+  .banner{background:var(--warn-soft);color:var(--warn);border:1px solid var(--warn);border-radius:var(--radius-sm);padding:10px 12px;font-size:12px;margin-bottom:14px}
+  textarea.desc{width:100%;min-width:220px;height:52px;resize:vertical}
+  input.tagsField{width:100%;min-width:180px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>📤 Upload-Kontrolle</h1>
+    <a href="/">← Zurück zum Dashboard</a>
+  </header>
+
+  <div id="oauthBanner" class="banner" style="display:none">
+    ~/.youtube_oauth_client.json fehlt — Upload/OAuth ist serverseitig inaktiv.
+    Shorts/Packaging funktionieren unabhängig davon weiter.
+  </div>
+
+  <div class="card">
+    <h2>Kanäle verbinden</h2>
+    <div id="channelsList"><p class="hint">Lädt …</p></div>
+  </div>
+
+  <div class="card">
+    <h2>Tageskontingent</h2>
+    <p class="hint" id="quotaLabel">Lädt …</p>
+    <div class="quota-bar"><div class="quota-fill" id="quotaFill" style="width:0%"></div></div>
+  </div>
+
+  <div class="card">
+    <h2>Warteschlange</h2>
+    <p class="hint" style="margin-bottom:10px">Jeder Eintrag ist immer privat + geplant — es gibt keine Option für sofortige Veröffentlichung.</p>
+    <div style="overflow-x:auto">
+      <table>
+        <thead>
+          <tr>
+            <th>Video</th><th>Ziel</th><th>Titel</th><th>Description / Tags / Kategorie</th>
+            <th>Status</th><th>Geplant für</th><th></th>
+          </tr>
+        </thead>
+        <tbody id="queueBody"><tr><td colspan="7" class="hint">Lädt …</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const api = (u,m,b) => fetch(u,{method:m||'GET',headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined}).then(r=>r.json());
+const escHtml = s => String(s ?? "").replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+let CATEGORIES_CACHE = null;
+async function getCategories(cid){
+  if(CATEGORIES_CACHE) return CATEGORIES_CACHE;
+  const r = await api(`/api/youtube/categories?channel=${encodeURIComponent(cid)}`).catch(() => null);
+  CATEGORIES_CACHE = (r && r.categories) || [];
+  return CATEGORIES_CACHE;
+}
+
+// datetime-local <-> Unix-Sekunden (lokale Zeitzone des Browsers -- der Server
+// validiert ohnehin serverseitig nochmal absolut gegen time.time(), siehe
+// assert_schedulable in youtube/upload.py; dieser Client-Wert ist nur Bequemlichkeit)
+function unixToLocalInput(ts){
+  const d = new Date(ts * 1000);
+  const pad = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function localInputToUnix(v){
+  return new Date(v).getTime() / 1000;
+}
+
+async function loadChannels(){
+  const r = await api('/api/control/channels').catch(() => null);
+  if(!r){ $('channelsList').innerHTML = '<p class="hint">Fehler beim Laden.</p>'; return; }
+  $('oauthBanner').style.display = r.oauth_client_configured ? 'none' : '';
+  $('channelsList').innerHTML = r.channels.map(ch => `
+    <div class="ch-row">
+      <span class="name">${escHtml(ch.name)}</span>
+      <input type="text" placeholder="Playlist-ID (optional)" value="${escHtml(ch.playlist_id || '')}"
+             style="width:180px" onchange="setPlaylistId('${ch.id}', this.value)">
+      ${ch.connected
+        ? `<span class="hint">✓ Verbunden: ${escHtml(ch.youtube_channel_title || '')}</span>
+           <button class="sm ghost" onclick="connectChannel('${ch.id}')" title="Nötig nach neu hinzugefügten OAuth-Scopes (z.B. Untertitel-Upload, Juli 2026) -- ein bestehender Token bekommt einen neuen Scope nicht automatisch">Neu verbinden</button>`
+        : `<button ${r.oauth_client_configured ? '' : 'disabled'} onclick="connectChannel('${ch.id}')">YouTube verbinden</button>`}
+    </div>
+  `).join('') || '<p class="hint">Keine Kanäle vorhanden.</p>';
+}
+
+// Optionale Playlist-Zuordnung pro Kanal (channels/<cid>/youtube_playlist_id.txt via
+// control/api.py) -- gilt für Longform UND alle Shorts-Varianten dieses Kanals.
+async function setPlaylistId(cid, playlist_id){
+  await api('/api/control/set_playlist', 'POST', {cid, playlist_id: playlist_id.trim()});
+}
+
+function connectChannel(cid){
+  window.location.href = `/api/youtube/oauth_start?channel=${encodeURIComponent(cid)}`;
+}
+
+async function loadQuota(){
+  const r = await api('/api/control/quota').catch(() => null);
+  if(!r) return;
+  $('quotaLabel').textContent = `${r.limit - r.remaining} / ${r.limit} Uploads heute (Reset um Mitternacht Pacific)`;
+  $('quotaFill').style.width = Math.round((r.limit - r.remaining) / r.limit * 100) + '%';
+}
+
+const STATUS_LABELS = {queued:'Wartet', uploading:'Lädt hoch', uploaded:'Fertig', failed:'Fehlgeschlagen', canceled:'Abgebrochen'};
+
+async function loadQueue(){
+  const r = await api('/api/control/queue').catch(() => null);
+  const body = $('queueBody');
+  if(!r || !r.queue.length){ body.innerHTML = '<tr><td colspan="7" class="hint">Warteschlange ist leer.</td></tr>'; return; }
+  const rowsHtml = await Promise.all(r.queue.map(async q => {
+    const tags = (() => { try { return JSON.parse(q.tags || '[]'); } catch(e){ return []; } })();
+    const categories = await getCategories(q.cid);
+    const catOptions = categories.map(c =>
+      `<option value="${c.id}"${c.id === q.category_id ? ' selected' : ''}>${escHtml(c.title)}</option>`
+    ).join('');
+    const editable = q.status === 'queued' || q.status === 'failed';
+    return `
+      <tr data-id="${q.id}">
+        <td>${escHtml(q.cid)}/${escHtml(q.vid)}</td>
+        <td>${q.render_target === 'longform' ? 'Longform' : 'Short'}</td>
+        <td style="max-width:200px">${escHtml(q.title)}</td>
+        <td>
+          <textarea class="desc" ${editable?'':'disabled'} onchange="updateQueueEntry(${q.id})">${escHtml(q.description||'')}</textarea>
+          <input type="text" class="tagsField" ${editable?'':'disabled'} value="${escHtml(tags.join(', '))}" onchange="updateQueueEntry(${q.id})" style="margin-top:4px">
+          <select ${editable?'':'disabled'} onchange="updateQueueEntry(${q.id})" style="margin-top:4px;width:100%">${catOptions}</select>
+        </td>
+        <td><span class="pill pill-${q.status}">${STATUS_LABELS[q.status]||q.status}</span>
+          ${q.error ? `<div class="hint" title="${escHtml(q.error)}" style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--danger)">${escHtml(q.error)}</div>` : ''}
+        </td>
+        <td><input type="datetime-local" ${editable?'':'disabled'} value="${unixToLocalInput(q.scheduled_at)}" onchange="updateQueueEntry(${q.id})"></td>
+        <td>${(q.status==='queued'||q.status==='failed'||q.status==='uploading') ? `<button class="ghost danger" onclick="cancelQueueEntry(${q.id})">Abbrechen</button>` : ''}</td>
+      </tr>
+    `;
+  }));
+  body.innerHTML = rowsHtml.join('');
+}
+
+async function updateQueueEntry(id){
+  const row = document.querySelector(`tr[data-id="${id}"]`);
+  if(!row) return;
+  const description = row.querySelector('textarea.desc').value;
+  const tags = row.querySelector('input.tagsField').value.split(',').map(s=>s.trim()).filter(Boolean);
+  const category_id = row.querySelector('select').value;
+  const scheduled_at = localInputToUnix(row.querySelector('input[type=datetime-local]').value);
+  const r = await api('/api/control/queue_update', 'POST', {id, description, tags, category_id, scheduled_at});
+  if(!r.ok){ alert('Fehler: ' + (r.error || 'unbekannt')); }
+  loadQueue();
+}
+
+async function cancelQueueEntry(id){
+  if(!confirm('Diesen Upload wirklich abbrechen?')) return;
+  await api('/api/control/queue_cancel', 'POST', {id});
+  loadQueue();
+}
+
+async function refreshAll(){
+  await Promise.all([loadChannels(), loadQuota(), loadQueue()]);
+}
+refreshAll();
+setInterval(refreshAll, 8000);
+</script>
+</body>
+</html>

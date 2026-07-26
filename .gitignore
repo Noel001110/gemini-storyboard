@@ -10,12 +10,21 @@ anchor.png
 # All runtime channel/video data (master prompts, plans, generated media, uploads)
 channels/
 
+# Fertige Shorts, nach Video sortiert, zum Weiterleiten (dashboard.export_short_copy) --
+# reine Kopien von Dateien die eh schon unter channels/ liegen, keine Quelle der Wahrheit.
+shorts_export/
+
 # Backup sound collections — too large for Git. Only selected files in music/ + sfx/
 # are version-controlled (the ones actively used by MUSIC_BEDS / SFX_FILES).
 assets/Sounds/
 
 # Legacy root-level upload dir (pre-channels layout)
 /uploads/
+
+# Shorts/Upload/Control-Erweiterung: SQLite-Laufzeitdatei (store/db.py), nie eingecheckt
+store/pipeline.db
+store/pipeline.db-wal
+store/pipeline.db-shm
 
 # Old per-session JSON files
 /*.json
