@@ -1449,94 +1449,13 @@ PRODUCE_JOBS: dict = {}
 _PRODUCE_JOBS_LOCK = threading.Lock()
 
 
-def _produce_worker(cid: str, vid: str, text: str = "", wpm: float = 130.0, sec: float = 4.0):
-    """Plan (falls nötig) -> Alle Bilder generieren -> Rendern, nacheinander. Bevorzugt
-    einen bereits bestehenden Plan; sonst ein hochgeladenes Voice-over (Option A); sonst
-    das übergebene `text` (Option B, manueller Skript-Pfad). Bricht bei Fehler in einer
-    Etappe sofort ab, der Etappen-Name + Fehlergrund landen in PRODUCE_JOBS."""
-    key = (cid, vid)
-
-    def set_stage(stage):
-        with _PRODUCE_JOBS_LOCK:
-            if key in PRODUCE_JOBS:
-                PRODUCE_JOBS[key]["stage"] = stage
-
-    def stop_requested():
-        with _PRODUCE_JOBS_LOCK:
-            return PRODUCE_JOBS.get(key, {}).get("stop_requested", False)
-
-    def fail(stage, msg):
-        with _PRODUCE_JOBS_LOCK:
-            PRODUCE_JOBS[key] = {"running": False, "stage": stage, "stop_requested": False,
-                                  "error": msg, "file": None, "ts": time.time()}
-        print(f"  [Produce] {cid}/{vid}: Fehler in Etappe '{stage}': {msg}", flush=True)
-
-    try:
-        plan_path = v_plan(cid, vid)
-        try:
-            has_plan = bool(json.load(open(plan_path)).get("scenes"))
-        except Exception:
-            has_plan = False
-
-        if not has_plan:
-            if stop_requested():
-                return fail("plan", "Abgebrochen (Stop angefordert)")
-            set_stage("plan")
-            if os.path.exists(v_audio(cid, vid)):
-                try:
-                    _transcribe_generate_worker(cid, vid, sec)
-                except Exception as e:
-                    return fail("plan", f"Transkription fehlgeschlagen: {e}")
-            elif text.strip():
-                with _PLAN_JOBS_LOCK:
-                    PLAN_JOBS[key] = {"running": True, "step": "Startet …", "error": None, "done": False}
-                _plan_generate_worker(cid, vid, text, wpm, sec)
-                with _PLAN_JOBS_LOCK:
-                    plan_err = PLAN_JOBS.get(key, {}).get("error")
-                if plan_err:
-                    return fail("plan", plan_err)
-            else:
-                return fail("plan", "Kein Voice-over hochgeladen und kein Skript eingegeben.")
-
-        if stop_requested():
-            return fail("images", "Abgebrochen (Stop angefordert)")
-        set_stage("images")
-        with _BATCH_JOBS_LOCK:
-            if BATCH_JOBS.get(key, {}).get("running"):
-                return fail("images", "Bild-Generierung läuft bereits für dieses Video.")
-        _batch_generate_worker(cid, vid)
-        with _BATCH_JOBS_LOCK:
-            batch_err = BATCH_JOBS.get(key, {}).get("error")
-        if batch_err:
-            return fail("images", batch_err)
-
-        if stop_requested():
-            return fail("render", "Abgebrochen (Stop angefordert)")
-        set_stage("render")
-        # Der One-Button-"Produce"-Flow rendert bewusst nur Longform -- eigener
-        # (cid, vid, "longform")-Schlüssel statt des obigen `key` (cid, vid), damit er
-        # nie denselben RENDER_JOBS-Eintrag wie ein parallel laufender Shorts-Render
-        # desselben Videos trifft (siehe _render_worker-Docstring).
-        render_key = (cid, vid, "longform")
-        with _RENDER_JOBS_LOCK:
-            RENDER_JOBS[render_key] = {"running": True, "stop_requested": False, "stage": "startet",
-                                 "done": 0, "total": 0, "error": None, "file": None,
-                                 "started_ts": time.time()}
-        _render_worker(cid, vid, "longform")
-        with _RENDER_JOBS_LOCK:
-            render_state = dict(RENDER_JOBS.get(render_key, {}))
-        if render_state.get("error"):
-            return fail("render", render_state["error"])
-
-        with _PRODUCE_JOBS_LOCK:
-            PRODUCE_JOBS[key] = {"running": False, "stage": "fertig", "stop_requested": False,
-                                  "error": None, "file": render_state.get("file"), "ts": time.time()}
-        print(f"  [Produce] {cid}/{vid}: fertig → {render_state.get('file')}", flush=True)
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        with _PRODUCE_JOBS_LOCK:
-            cur_stage = PRODUCE_JOBS.get(key, {}).get("stage", "unbekannt")
-        fail(cur_stage, str(e))
+# Refactor Phase 3: nach workers/produce.py verschoben (lazy `import dashboard` für
+# die verbliebenen God-Modul-Helfer, siehe workers/__init__.py). Re-Export hält den
+# bestehenden threading.Thread(target=_produce_worker, ...)-Call-Site unverändert.
+# PRODUCE_JOBS/_PRODUCE_JOBS_LOCK bleiben hier -- sie werden auch von
+# _request_stop_all_running_jobs/_cleanup_stale_jobs sowie den /api/produce_*-Routen
+# direkt gebraucht, nicht nur vom Worker selbst.
+from workers.produce import run as _produce_worker  # noqa: F401
 
 
 def gen_image(scene_prompt, master, out_path, char_refs=None):
