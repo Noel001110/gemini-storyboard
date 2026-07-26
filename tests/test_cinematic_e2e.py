@@ -951,11 +951,13 @@ def t_round5_image_job_worker_race_detect():
     """Round-5 Fix-4: _batch_generate_worker checks ACTIVE_SCENE_JOBS before submitting
     a KIE task. Without it, a manual 'Generate Scene 5' click + a 'Generate all'
     batch passing through Scene 5 would BOTH submit."""
-    src = open(os.path.join(ROOT, "dashboard.py")).read()
-    idx = src.find("def _batch_generate_worker")
+    # Refactor Phase 3: _batch_generate_worker lebt jetzt in workers/batch.py.
+    src = open(os.path.join(ROOT, "workers", "batch.py")).read()
+    idx = src.find("def run")
     body = src[idx:idx + 24000]   # large slice — function has grown with later fixes' comments
-    # The dedup-block must be present in the batch worker
-    assert "if existing_job and JOBS.get(existing_job, {}).get(\"status\") == \"running\":" in body, \
+    # The dedup-block must be present in the batch worker (dashboard.JOBS seit der
+    # workers/batch.py-Extraktion, siehe workers/__init__.py lazy-import-Konvention).
+    assert "if existing_job and dashboard.JOBS.get(existing_job, {}).get(\"status\") == \"running\":" in body, \
         "Round-5 Fix-4 missing: _batch_generate_worker has no ACTIVE_SCENE_JOBS-dedup check"
 
 
@@ -1587,10 +1589,11 @@ def t_seq_todo_preserves_scene_order():
     `todo` (e.g. "Hook zuerst" in Phase L), anchors and continuations land in
     parallel batches and deadlock via _wait_for_chain_scene.
     """
-    src = open(os.path.join(ROOT, "dashboard.py")).read()
-    # Find _batch_generate_worker body
-    i = src.find("def _batch_generate_worker")
-    assert i >= 0, "_batch_generate_worker must still exist in dashboard.py"
+    # Refactor Phase 3: _batch_generate_worker lebt jetzt in workers/batch.py.
+    src = open(os.path.join(ROOT, "workers", "batch.py")).read()
+    # Find run() body (= die ex-_batch_generate_worker-Funktion)
+    i = src.find("def run")
+    assert i >= 0, "_batch_generate_worker (jetzt workers/batch.py:run) must still exist"
     # Look for `todo` until the function's next def or class
     # Crude but effective: scan 200 lines after def and check for forbidden calls on `todo`
     end = src.find("\ndef ", i + 50)
@@ -1711,8 +1714,9 @@ def t_seq_batch_worker_docstring_s1_fixed():
     """§11.4 (S1 regression): _batch_generate_worker docstring no longer claims
     'no ordering dependency' — it now correctly notes the chain-ref dependency.
     """
-    src = open(os.path.join(ROOT, "dashboard.py")).read()
-    i = src.find("def _batch_generate_worker")
+    # Refactor Phase 3: _batch_generate_worker lebt jetzt in workers/batch.py.
+    src = open(os.path.join(ROOT, "workers", "batch.py")).read()
+    i = src.find("def run")
     assert i >= 0
     # Read the docstring — find the NEXT triple-quote AFTER the opening one
     open_q = src.find('"""', i)

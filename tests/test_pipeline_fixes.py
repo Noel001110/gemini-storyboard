@@ -1285,7 +1285,10 @@ def t_evalu_d1_batch_worker_style_ref_always_attached():
 def t_evalu_d1_generate_one_style_ref_always_attached():
     """D1: derselbe Fix am zweiten Aufrufer (/api/generate_one, Einzelklick) -- vorher
     hing use_style_ref hier noch von `not (entity_refs or chain_refs)` ab."""
-    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    # Refactor Phase 3: der Batch-Aufrufer lebt jetzt in workers/batch.py, der
+    # /api/generate_one-Einzelklick-Pfad noch in dashboard.py (Phase 4).
+    src = (open(os.path.join(ROOT, "dashboard.py")).read()
+           + open(os.path.join(ROOT, "workers", "batch.py")).read())
     occurrences = [i for i in range(len(src)) if src.startswith("use_style_ref = bool(style_ref_urls)", i)]
     assert len(occurrences) == 2, f"erwartet 2 Aufrufstellen mit dem Fix, gefunden: {len(occurrences)}"
     for idx in occurrences:
@@ -1297,7 +1300,10 @@ def t_evalu_d1_generate_one_style_ref_always_attached():
 def t_evalu_d1_refs_order_identity_before_style():
     """D1: Reihenfolge muss Identitäts-Refs (chain/entity) vor Style-Ref(s) sein --
     frühe Referenzbilder werden stärker gewichtet (Recherche-Befund)."""
-    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    # Refactor Phase 3: der Batch-Aufrufer lebt jetzt in workers/batch.py, der
+    # /api/generate_one-Einzelklick-Pfad noch in dashboard.py (Phase 4).
+    src = (open(os.path.join(ROOT, "dashboard.py")).read()
+           + open(os.path.join(ROOT, "workers", "batch.py")).read())
     for marker in ("refs = chain_refs + entity_refs + (style_ref_urls if use_style_ref else [])",):
         assert src.count(marker) == 2, f"erwartet 2x identische refs-Zuweisung, war: {src.count(marker)}"
 
