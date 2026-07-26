@@ -1491,11 +1491,15 @@ def t_seq_continuity_prompt_last():
     Schutzregel 3: master + phase-cue may change, but the CONTINUITY block must
     stay at the very end — otherwise earlier instructions can dilute or contradict
     the chain-ref adherence.
+
+    Refactor Phase 4 (Teil 15): der /api/generate_one-Einzelklick-Pfad (der hier
+    tatsächlich geprüft wird) lebt jetzt in routes/images.py, nicht mehr in
+    dashboard.py.
     """
-    src = open(os.path.join(ROOT, "dashboard.py")).read()
-    # Find the CONTINUITY block in _batch_generate_worker
+    src = open(os.path.join(ROOT, "routes", "images.py")).read()
+    # Find the CONTINUITY block in the single-click generate_one path
     i = src.find('"\\n\\nCONTINUITY (STRICT):')
-    assert i >= 0, "CONTINUITY (STRICT) block must still exist in dashboard.py"
+    assert i >= 0, "CONTINUITY (STRICT) block must still exist in routes/images.py"
     # Within the next ~80 lines, there must be NO further mutation of full_prompt.
     # `print()` and `acquire()`/`try:` between CONTINUITY and submit are OK.
     after = src[i:i+5000]

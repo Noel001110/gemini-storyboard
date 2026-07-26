@@ -281,12 +281,11 @@ def t_a5_transcribe_worker_uses_preserve_helper():
 
 def t_a2_generate_one_uses_resolve_entity_ref():
     """Source-check: /api/generate_one must delegate to the shared fallback chain
-    instead of its old source_url-only inline logic."""
-    src = open(os.path.join(ROOT, "dashboard.py")).read()
-    idx = src.find('if p == "/api/generate_one"')
-    assert idx != -1
-    body = src[idx:idx + 5000]
-    assert "_resolve_entity_ref(v_plan(cid, vid), scene_for_phase, wait=False)" in body, \
+    instead of its old source_url-only inline logic.
+
+    Refactor Phase 4 (Teil 15): die Route lebt jetzt in routes/images.py."""
+    src = open(os.path.join(ROOT, "routes", "images.py")).read()
+    assert "_resolve_entity_ref(v_plan(cid, vid), scene_for_phase, wait=False)" in src, \
         "A2 fix missing: generate_one must call _resolve_entity_ref with wait=False"
 
 
@@ -1279,8 +1278,10 @@ def t_evalu_d1_batch_worker_style_ref_always_attached():
     """D1 (Fund 1): der Batch-Worker darf den Style-Ref nicht mehr weglassen, sobald
     ein Chain-/Entity-Anchor existiert -- sonst verlieren Charakter-Szenen den
     Grafik-Stil-Anker. use_style_ref darf nur noch von style_ref_urls selbst abhängen.
-    (Audit Juli 2026, Bereich 3: style_ref_url -> style_ref_urls, Liste statt Einzel-URL.)"""
-    src = open(os.path.join(ROOT, "dashboard.py")).read()
+    (Audit Juli 2026, Bereich 3: style_ref_url -> style_ref_urls, Liste statt Einzel-URL.)
+
+    Refactor Phase 3: der Batch-Worker lebt in workers/batch.py."""
+    src = open(os.path.join(ROOT, "workers", "batch.py")).read()
     idx = src.find("use_style_ref = bool(style_ref_urls)")
     assert idx != -1, "use_style_ref-Zuweisung nicht gefunden"
     line_end = src.find("\n", idx)
@@ -1291,10 +1292,11 @@ def t_evalu_d1_batch_worker_style_ref_always_attached():
 
 def t_evalu_d1_generate_one_style_ref_always_attached():
     """D1: derselbe Fix am zweiten Aufrufer (/api/generate_one, Einzelklick) -- vorher
-    hing use_style_ref hier noch von `not (entity_refs or chain_refs)` ab."""
-    # Refactor Phase 3: der Batch-Aufrufer lebt jetzt in workers/batch.py, der
-    # /api/generate_one-Einzelklick-Pfad noch in dashboard.py (Phase 4).
-    src = (open(os.path.join(ROOT, "dashboard.py")).read()
+    hing use_style_ref hier noch von `not (entity_refs or chain_refs)` ab.
+
+    Refactor Phase 4 (Teil 15): der Batch-Aufrufer lebt in workers/batch.py, der
+    /api/generate_one-Einzelklick-Pfad in routes/images.py."""
+    src = (open(os.path.join(ROOT, "routes", "images.py")).read()
            + open(os.path.join(ROOT, "workers", "batch.py")).read())
     occurrences = [i for i in range(len(src)) if src.startswith("use_style_ref = bool(style_ref_urls)", i)]
     assert len(occurrences) == 2, f"erwartet 2 Aufrufstellen mit dem Fix, gefunden: {len(occurrences)}"
@@ -1306,10 +1308,11 @@ def t_evalu_d1_generate_one_style_ref_always_attached():
 
 def t_evalu_d1_refs_order_identity_before_style():
     """D1: Reihenfolge muss Identitäts-Refs (chain/entity) vor Style-Ref(s) sein --
-    frühe Referenzbilder werden stärker gewichtet (Recherche-Befund)."""
-    # Refactor Phase 3: der Batch-Aufrufer lebt jetzt in workers/batch.py, der
-    # /api/generate_one-Einzelklick-Pfad noch in dashboard.py (Phase 4).
-    src = (open(os.path.join(ROOT, "dashboard.py")).read()
+    frühe Referenzbilder werden stärker gewichtet (Recherche-Befund).
+
+    Refactor Phase 4 (Teil 15): der Batch-Aufrufer lebt in workers/batch.py, der
+    /api/generate_one-Einzelklick-Pfad in routes/images.py."""
+    src = (open(os.path.join(ROOT, "routes", "images.py")).read()
            + open(os.path.join(ROOT, "workers", "batch.py")).read())
     for marker in ("refs = chain_refs + entity_refs + (style_ref_urls if use_style_ref else [])",):
         assert src.count(marker) == 2, f"erwartet 2x identische refs-Zuweisung, war: {src.count(marker)}"
