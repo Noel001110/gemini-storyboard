@@ -2285,52 +2285,6 @@ class H(BaseHTTPRequestHandler):
             with _PRODUCE_JOBS_LOCK:
                 state = PRODUCE_JOBS.get((cid, vid))
             return self._send(200, state or {"running": False})
-        if p == "/api/video_meta":
-            meta = load_v_meta(cid, vid)
-            meta["has_thumbnail"] = os.path.exists(os.path.join(v_out(cid, vid), "thumbnail.jpg"))
-            return self._send(200, meta)
-        # UI-Rebuild Phase 33.2 — Stepper-Heuristik (Round-Trip für ALLE State-Daten)
-        if p == "/api/stepper_state":
-            # Konsolidierter Endpunkt: alle 5 Heuristik-Bedingungen in EINEM Round-Trip.
-            # Vorher: Frontend machte 5 separate fetches → race-anfällig, langsam, viele 404s
-            # wenn das Backend-Routing anders benannt ist. Mit diesem Endpunkt hat das
-            # Frontend genau eine Quelle der Wahrheit für "wie weit ist das Video?".
-            try:
-                meta = load_v_meta(cid, vid)
-            except Exception:
-                meta = {}
-            plan_path = v_plan(cid, vid)
-            audio_path = os.path.join(v_uploads(cid, vid), "voiceover.mp3")
-            out_dir = v_out(cid, vid)
-            # Image count: plan.json scenes total + Anzahl generierter *NNN.jpg im out/.
-            try:
-                plan = json.load(open(plan_path)) if os.path.exists(plan_path) else {}
-            except Exception:
-                plan = {}
-            total_scenes = len(plan.get("scenes") or [])
-            try:
-                generated_files = [f for f in os.listdir(out_dir) if re.match(r"^\d{3}\.jpg$", f)]
-                generated_count = len(generated_files)
-            except Exception:
-                generated_count = 0
-            rendered = bool(meta.get("rendered_at")) or \
-                os.path.exists(os.path.join(v_out(cid, vid), "final.mp4"))
-            return self._send(200, {
-                # ① THEMA: meta.json + selected_title nicht leer (siehe 33.2-Heuristik)
-                "thema_done": bool((meta.get("selected_title") or "").strip()),
-                # ② SKRIPT
-                "plan_done":   os.path.exists(plan_path),
-                # ③ AUDIO: NUR voiceover.mp3, kein audio_meta.json-Fallback (Race-Bug-Safe)
-                "audio_done":  os.path.exists(audio_path),
-                # ④ BILDER: counter (N / M), kein binärer done-Threshold
-                "images_done": generated_count,
-                "images_total": total_scenes,
-                # ⑤ RENDER
-                "rendered":    rendered,
-                # raw meta für UI-Sidebars (nicht für Stepper selbst, aber das Backend
-                # hat's geladen — Übertragung vermeidet zweiten Fetch)
-                "meta":        meta,
-            })
         if p == "/api/measure_wpm":
             # Struktur-/Schnitt-Review Juli 2026: gibt die reale, aus bereits fertigen
             # Videos DIESES Kanals gemessene Sprechrate zurück (statt der festen 150/160-
@@ -2396,10 +2350,6 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/plan":
             try:    return self._send(200, json.load(open(v_plan(cid, vid))))
             except: return self._send(200, {"scenes": []})
-        if p == "/api/script":
-            if not vid: return self._send(200, {"text": None})
-            data = load_v_script(cid, vid)
-            return self._send(200, data or {"text": None})
         if p == "/api/voiceover_file":
             # Juli 2026 (User-Report: "generiertes Voiceover wird im Frontend nicht
             # angezeigt"): bis jetzt hatte der Server keinen Endpunkt der die
@@ -2561,47 +2511,6 @@ class H(BaseHTTPRequestHandler):
             meta["titles"] = titles
             save_v_meta(cid, vid, meta)
             return self._send(200, {"ok": True, "titles": titles})
-
-        if p == "/api/select_title":
-            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
-            meta = load_v_meta(cid, vid)
-            meta["selected_title"] = d.get("title", "").strip()
-            save_v_meta(cid, vid, meta)
-            return self._send(200, {"ok": True})
-
-        # ── Script persistence (per-video, server-side, survives browser/device) ─
-        # The frontend had a localStorage workaround that worked for a single browser
-        # on a single machine but lost the script the moment Noel opened the dashboard
-        # on the Mac after writing it on the laptop. script.json fixes that — written
-        # debounced (every ~2.5s while typing), read once on video load, never blocks.
-        # (GET /api/script lives in do_GET since it has no body.)
-        if p == "/api/save_script":
-            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
-            text = d.get("text", "")
-            if not isinstance(text, str):
-                return self._send(400, {"error": "text muss String sein"})
-            # Hard cap — protects against accidental paste of a 500-page document into
-            # a single script.json. ~500KB is enough for ~5h narration at ~150wpm.
-            if len(text) > 500_000:
-                return self._send(413, {"error": "Skript zu lang (>500k Zeichen)"})
-            payload = {
-                "text": text,
-                "language": d.get("language", "de"),
-                "preset": d.get("preset", "flat_cartoon_doc"),
-                "updatedAt": int(time.time()),
-            }
-            try:
-                save_v_script(cid, vid, payload)
-            except Exception as e:
-                return self._send(500, {"error": f"Schreiben fehlgeschlagen: {e}"})
-            return self._send(200, {"ok": True, "savedAt": payload["updatedAt"]})
-
-        if p == "/api/save_idea":
-            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
-            meta = load_v_meta(cid, vid)
-            meta["idea"] = d.get("idea", "").strip()
-            save_v_meta(cid, vid, meta)
-            return self._send(200, {"ok": True})
 
         # ── Thumbnail generator ───────────────────────────────────────────────
         if p == "/api/generate_thumbnail":
@@ -3582,8 +3491,9 @@ def main():
     import shorts.api, youtube.api, control.api
     import routes.channels
     import routes.video_settings
+    import routes.video_meta
     import store.db as store_db
-    # Refactor Phase 4 (Teil 1+2): Route-Gruppen aus dem dashboard.py-Handler
+    # Refactor Phase 4 (Teil 1-3): Route-Gruppen aus dem dashboard.py-Handler
     # ausgelagert. Reihenfolge unkritisch -- Präfixe überschneiden sich nicht
     # mit shorts/youtube/control.
     mount("/api/channels", routes.channels)
@@ -3597,6 +3507,12 @@ def main():
     mount("/api/image_model", routes.video_settings)
     mount("/api/style_ref", routes.video_settings)
     mount("/api/overlay_opts", routes.video_settings)
+    mount("/api/video_meta", routes.video_meta)
+    mount("/api/stepper_state", routes.video_meta)
+    mount("/api/script", routes.video_meta)
+    mount("/api/select_title", routes.video_meta)
+    mount("/api/save_script", routes.video_meta)
+    mount("/api/save_idea", routes.video_meta)
     mount("/api/shorts/", shorts.api)
     mount("/api/youtube/", youtube.api)
     mount("/api/control/", control.api)

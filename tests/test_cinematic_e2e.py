@@ -1001,12 +1001,14 @@ def t_stepper_backend_endpoint_exists():
     """Phase 33.2 Bug-1-Fix: Stepper nutzt nicht /api/v1/videos/... (existiert nicht),
     sondern den EINEN Backend-Endpoint /api/stepper_state der alle 5 Heuristik-
     Daten konsolidiert zurückgibt. Verifiziert dass der Endpoint im Backend
-    definiert ist + das Frontend die korrekte URL nutzt."""
-    py_src = open(os.path.join(ROOT, "dashboard.py")).read()
+    definiert ist + das Frontend die korrekte URL nutzt.
+
+    Refactor Phase 4 (Teil 3): der Endpoint lebt jetzt in routes/video_meta.py."""
+    py_src = open(os.path.join(ROOT, "routes", "video_meta.py")).read()
     html_src = open(os.path.join(ROOT, "dashboard.html")).read()
     # Backend-Endpoint vorhanden
     assert '/api/stepper_state' in py_src, \
-        "Bug-1 missing: backend /api/stepper_state endpoint not defined in dashboard.py"
+        "Bug-1 missing: backend /api/stepper_state endpoint not defined in routes/video_meta.py"
     # Frontend nutzt genau diesen Endpoint
     assert '/api/stepper_state?channel=' in html_src, \
         "Bug-1 missing: frontend /api/stepper_state URL with channel/video params"
