@@ -36,19 +36,21 @@ jobs:
         run: mypy engine/
 
   test:
-    name: Unit Tests
+    name: Unit Tests (pytest, alle Testdateien)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install dependencies
-        run: |
-          # Zero-Framework: keine pip-deps, nur stdlib
-          echo "No pip deps needed for the unit tests"
+      # Refactor Phase 0: Runner-Migration von "python3 tests/test_cinematic_e2e.py"
+      # (nur eine Datei) auf pytest (beide Testdateien, 242 Funktionen). Die App selbst
+      # bleibt Zero-Framework -- nur der Test-Runner braucht pytest, siehe
+      # requirements-dev.txt (dort mit ruff/mypy identisch gepinnt).
+      - name: Install pytest
+        run: pip install pytest==8.3.3
       - name: Run unit tests
-        run: python3 tests/test_cinematic_e2e.py
+        run: python3 -m pytest
         env:
           # Tests laufen ohne externe API-Keys
           KIE_KEY_FILE: /dev/null

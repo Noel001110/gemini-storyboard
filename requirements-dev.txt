@@ -1,0 +1,10 @@
+# requirements-dev.txt — Entwickler-Tooling, gepinnt (Refactor Phase 0).
+#
+# Versionen 1:1 identisch zu .github/workflows/lint.yml, damit CI und lokal exakt
+# dasselbe Verhalten zeigen (kein "bei mir lief's aber"). Betrifft nur Tooling, nicht
+# die Haupt-App (siehe requirements-whisper.txt für deren einzige echte Runtime-Deps).
+#
+# Installation: ./.venv_whisper/bin/python -m pip install -r requirements-dev.txt
+ruff==0.6.9
+mypy==1.11.2
+pytest==8.3.3

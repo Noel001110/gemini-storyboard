@@ -1,0 +1,13 @@
+# requirements-whisper.txt — harte Pins für .venv_whisper (Refactor Phase 0,
+# Dependency-Locking-Punkt aus dem Enterprise-Assessment).
+#
+# Die Haupt-App (dashboard.py + engine/*) bleibt bewusst Zero-Framework/stdlib-only
+# (siehe pyproject.toml). NUR der isolierte Whisper-/Pillow-Subprozess (Wort-Timing-
+# Alignment, Bild-Compositing) hat echte Runtime-Deps -- die werden hier gepinnt,
+# damit das System auch in 6 Monaten reproduzierbar baut, statt sich auf "was gerade
+# zufällig installiert war" zu verlassen.
+#
+# Installation: ./.venv_whisper/bin/python -m pip install -r requirements-whisper.txt
+pillow==12.3.0
+faster-whisper==1.2.1
+numpy==2.5.1

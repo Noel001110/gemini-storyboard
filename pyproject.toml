@@ -68,5 +68,36 @@ module = ["engine.*"]
 strict = true
 
 [[tool.mypy.overrides]]
+# engine/prompts.py importiert PIL lazy (nur zur Thumbnail-Compositing-Laufzeit).
+# Pillows Stubs referenzieren numpy-Typing, dessen aktuelle Stub-Datei PEP-695-
+# `type`-Syntax nutzt (erst ab Python 3.12) -- mit python_version=3.11 oben bricht
+# mypy beim Folgen dieses Imports hart ab (nur lokal reproduzierbar: CI installiert
+# kein numpy, .venv_whisper hier schon, siehe requirements-whisper.txt). follow_imports
+# = skip lässt PIL/numpy als Any durch, statt sie selbst durchzutypisieren -- wir
+# brauchen ihre Stubs nicht, nur dass unser eigener Code strict bleibt.
+module = ["PIL.*", "numpy.*"]
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+# Refactor Phase 1: core/ ist das neue Fundament (config/logging/jobs/paths) -- ab
+# Tag 1 strict, damit Routen/Worker, die später darauf aufbauen, verlässliche Typen
+# erben statt den dashboard.py-Fehler zu wiederholen (Pre-Phase-M-Code = untypisiert).
+module = ["core.*"]
+strict = true
+
+[tool.pytest.ini_options]
+# Refactor Phase 0: Runner-Migration von Hand-Rolled (`run()`/`main()` in den
+# Testdateien) auf pytest -- die 242 bestehenden Testfunktionen bleiben WORTWÖRTLICH
+# unverändert (Konvention `t_*` statt `test_*`, siehe Docstrings in tests/*.py), nur
+# der Aufrufer wechselt. tests/conftest.py bindet die modul-eigenen setup()/teardown()
+# generisch ein. python_files bleibt am Default (test_*.py) -- beide Dateien passen
+# schon; python_functions deckt zusätzlich das alte t_*-Muster ab, ohne test_* zu
+# verlieren, falls künftige Tests pytest-idiomatisch geschrieben werden.
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*", "t_*"]
+addopts = "-v"
+
+[[tool.mypy.overrides]]
 module = ["dashboard", "engine_elevenlabs", "render_overlay"]
 ignore_errors = true   # Pre-Phase-M-Code, noch nicht getypt

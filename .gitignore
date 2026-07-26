@@ -25,6 +25,7 @@ assets/Sounds/
 store/pipeline.db
 store/pipeline.db-wal
 store/pipeline.db-shm
+store/pipeline.db.bak.*
 
 # Old per-session JSON files
 /*.json
@@ -50,3 +51,4 @@ __pycache__/
 .gemini_key
 .kie_key
 *_key.txt
+legacy/yeonmi_storyboard/

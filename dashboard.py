@@ -4707,6 +4707,9 @@ def main():
     mount("/api/shorts/", shorts.api)
     mount("/api/youtube/", youtube.api)
     mount("/api/control/", control.api)
+    # Refactor Phase 0: rotierendes Backup VOR init_db(), sonst würde die frisch
+    # geöffnete Connection mitkopiert statt des Vor-Start-Stands.
+    store_db.backup_db()
     store_db.init_db()
     # Upload-Worker läuft nur, wenn der Nutzer je einen Google-Cloud-OAuth-Client
     # eingerichtet hat -- ohne diese Datei gibt es serverseitig ohnehin kein Kanal-

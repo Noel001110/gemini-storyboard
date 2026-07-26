@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import threading
 import time
@@ -89,6 +90,24 @@ def get_connection() -> sqlite3.Connection:
         _conn.execute("PRAGMA synchronous=NORMAL")
         _conn.row_factory = sqlite3.Row
     return _conn
+
+
+def backup_db(keep: int = 5) -> None:
+    """Rotierendes Startup-Backup (`pipeline.db.bak.1` = neuestes). WAL-Mode ist
+    bereits an -- das hier ist eine zweite, unabhängige Absicherungsebene gegen
+    Write-Korruption bei Crash (Refactor Phase 0). No-Op beim allerersten Start,
+    solange noch keine pipeline.db existiert. Muss vor get_connection()/init_db()
+    laufen (dashboard.py main()), sonst würde die offene Connection mitkopiert."""
+    if not os.path.exists(DB_PATH):
+        return
+    oldest = f"{DB_PATH}.bak.{keep}"
+    if os.path.exists(oldest):
+        os.remove(oldest)
+    for i in range(keep - 1, 0, -1):
+        src = f"{DB_PATH}.bak.{i}"
+        if os.path.exists(src):
+            os.replace(src, f"{DB_PATH}.bak.{i + 1}")
+    shutil.copy2(DB_PATH, f"{DB_PATH}.bak.1")
 
 
 def init_db() -> None:
