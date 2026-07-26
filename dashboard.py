@@ -2794,33 +2794,6 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True, "removed": removed})
 
         # ── Generate one image (async) ────────────────────────────────────────
-        # ── "Alle Bilder generieren" — runs server-side, survives reloads ──────
-        if p == "/api/generate_all_start":
-            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
-            # force=True: auch bereits generierte Bilder neu erzeugen ("Alle neu generieren")
-            force = bool(d.get("force", False))
-            key = (cid, vid)
-            with _BATCH_JOBS_LOCK:
-                if BATCH_JOBS.get(key, {}).get("running"):
-                    return self._send(200, {"ok": True, "already_running": True})
-                # Set running=True HERE, atomically with the check above, before the
-                # worker thread even exists — not inside the thread itself. Setting it
-                # later left a window where two rapid start calls (e.g. a user
-                # double-clicking, or stop-then-immediately-start) could both see
-                # "not running" and each spin up their own worker, causing multiple
-                # concurrent generation loops hammering KIE in parallel.
-                BATCH_JOBS[key] = {"running": True, "stop_requested": False, "done": 0,
-                                    "total": 0, "current_i": [], "error": None}
-            threading.Thread(target=_batch_generate_worker, args=(cid, vid, force), daemon=True).start()
-            return self._send(200, {"ok": True, "already_running": False})
-
-        if p == "/api/generate_all_stop":
-            key = (cid, vid)
-            with _BATCH_JOBS_LOCK:
-                if key in BATCH_JOBS:
-                    BATCH_JOBS[key]["stop_requested"] = True
-            return self._send(200, {"ok": True})
-
         # ── Auto-rendering (Ken Burns clips -> concat -> audio mux) ─────────────
         if p == "/api/render_start":
             if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
@@ -3267,6 +3240,7 @@ def main():
     import routes.script_gen
     import routes.thumbnail
     import routes.plan
+    import routes.batch
     import store.db as store_db
     # Refactor Phase 4 (Teil 1-5): Route-Gruppen aus dem dashboard.py-Handler
     # ausgelagert. Reihenfolge unkritisch -- Präfixe überschneiden sich nicht
@@ -3302,6 +3276,8 @@ def main():
     mount("/api/generate_titles", routes.script_gen)
     mount("/api/generate_thumbnail", routes.thumbnail)
     mount("/api/plan", routes.plan)
+    mount("/api/generate_all_start", routes.batch)
+    mount("/api/generate_all_stop", routes.batch)
     mount("/api/shorts/", shorts.api)
     mount("/api/youtube/", youtube.api)
     mount("/api/control/", control.api)
