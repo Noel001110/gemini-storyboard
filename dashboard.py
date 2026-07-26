@@ -1442,15 +1442,6 @@ PRODUCE_JOBS: dict = {}
 _PRODUCE_JOBS_LOCK = threading.Lock()
 
 
-# Refactor Phase 3: nach workers/produce.py verschoben (lazy `import dashboard` für
-# die verbliebenen God-Modul-Helfer, siehe workers/__init__.py). Re-Export hält den
-# bestehenden threading.Thread(target=_produce_worker, ...)-Call-Site unverändert.
-# PRODUCE_JOBS/_PRODUCE_JOBS_LOCK bleiben hier -- sie werden auch von
-# _request_stop_all_running_jobs/_cleanup_stale_jobs sowie den /api/produce_*-Routen
-# direkt gebraucht, nicht nur vom Worker selbst.
-from workers.produce import run as _produce_worker  # noqa: F401
-
-
 def gen_image(scene_prompt, master, out_path, char_refs=None):
     """Synchronous image generation — used only for charsheets.
 
@@ -2795,39 +2786,6 @@ class H(BaseHTTPRequestHandler):
 
         # ── Generate one image (async) ────────────────────────────────────────
 
-        if p == "/api/produce_start":
-            if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
-            key = (cid, vid)
-            text = d.get("text", ""); wpm = float(d.get("wpm", 130)); sec = float(d.get("sec", 4))
-            with _PRODUCE_JOBS_LOCK:
-                if PRODUCE_JOBS.get(key, {}).get("running"):
-                    return self._send(200, {"ok": True, "already_running": True})
-                # Same atomic "set running=True before the thread exists" fix as
-                # generate_all_start/render_start above.
-                PRODUCE_JOBS[key] = {"running": True, "stage": "startet", "stop_requested": False,
-                                      "error": None, "file": None}
-            threading.Thread(target=_produce_worker, args=(cid, vid, text, wpm, sec), daemon=True).start()
-            return self._send(200, {"ok": True, "already_running": False})
-
-        if p == "/api/produce_stop":
-            key = (cid, vid)
-            with _PRODUCE_JOBS_LOCK:
-                if key in PRODUCE_JOBS:
-                    PRODUCE_JOBS[key]["stop_requested"] = True
-            # Also forward the stop into whichever sub-job is CURRENTLY running --
-            # _produce_worker only checks its own stop_requested BETWEEN stages, so a
-            # stage already in flight (image batch or render) needs its own flag set
-            # too, otherwise "Stop" would silently wait for that stage to finish first.
-            with _BATCH_JOBS_LOCK:
-                if BATCH_JOBS.get(key, {}).get("running"):
-                    BATCH_JOBS[key]["stop_requested"] = True
-            # _produce_worker rendert intern immer (cid, vid, "longform") -- siehe dort.
-            with _RENDER_JOBS_LOCK:
-                render_key = (cid, vid, "longform")
-                if RENDER_JOBS.get(render_key, {}).get("running"):
-                    RENDER_JOBS[render_key]["stop_requested"] = True
-            return self._send(200, {"ok": True})
-
         if p == "/api/generate_one":
             if not vid: return self._send(400, {"error": "Kein Video ausgewählt"})
             i = int(d["i"]); prompt = d.get("prompt", "")
@@ -3193,6 +3151,7 @@ def main():
     import routes.plan
     import routes.batch
     import routes.render
+    import routes.produce
     import store.db as store_db
     # Refactor Phase 4 (Teil 1-5): Route-Gruppen aus dem dashboard.py-Handler
     # ausgelagert. Reihenfolge unkritisch -- Präfixe überschneiden sich nicht
@@ -3232,6 +3191,8 @@ def main():
     mount("/api/generate_all_stop", routes.batch)
     mount("/api/render_start", routes.render)
     mount("/api/render_stop", routes.render)
+    mount("/api/produce_start", routes.produce)
+    mount("/api/produce_stop", routes.produce)
     mount("/api/shorts/", shorts.api)
     mount("/api/youtube/", youtube.api)
     mount("/api/control/", control.api)
