@@ -539,6 +539,25 @@
         <span class="est" id="est">—</span>
       </div>
       <p class="hint" id="wpmMeasuredHint" style="margin-top:4px"></p>
+      <!-- Long-Form-Retention-Framework (2026-07-27): presst ein bereits fertiges
+           Skript (egal ob generiert oder direkt reingepastet) einmalig VOR der
+           Plan-Erstellung in die Retention-Struktur (gestapelter Cold-Open,
+           Re-Engagement alle 2-3 Min, eskalierende Stakes/Kishotenketsu, offenes
+           Ende) -- bewusst als eigener Review-Schritt statt automatisch im
+           Plan-Aufruf (siehe routes/plan.py: ein Re-Plan verwirft bereits
+           gerenderte Szenenbilder, sobald sich der Szenentext ändert). Gleiches
+           Vorschau-vor-Übernehmen-Muster wie #scriptOutCard/copyScript() oben. -->
+      <div class="row" style="margin-top:12px;gap:10px;align-items:center">
+        <button class="sm ghost" onclick="rewriteScriptRetention()" id="retentionRewriteBtn">🎬 Nach Retention-Framework umschreiben</button>
+        <span class="hint" id="retentionRewriteStatus">Presst das Skript oben in Cold-Open + Re-Engagement-Struktur, ohne Fakten zu ändern.</span>
+      </div>
+      <div class="card" id="retentionRewriteCard" style="display:none;margin-top:10px">
+        <h2 style="font-size:13px">Umgeschriebener Vorschlag
+          <button class="sm ghost" onclick="applyRetentionRewrite()" style="margin-left:8px;text-transform:none;letter-spacing:0">Übernehmen</button>
+          <button class="sm ghost" onclick="discardRetentionRewrite()" style="margin-left:4px;text-transform:none;letter-spacing:0">Verwerfen</button>
+        </h2>
+        <div class="script-out" id="retentionRewriteOut"></div>
+      </div>
       <div class="row" style="margin-top:12px;gap:10px;align-items:center">
         <button onclick="makePlan()" id="planBtn">Plan aus Skript erstellen</button>
         <span class="hint">Timing geschätzt via WPM-Formel + Pacing-Analyse</span>
@@ -3607,7 +3626,7 @@ function stopScriptBar(ok){
   $('scriptBar').style.width = ok ? '100%' : '0%';
 }
 
-function renderScriptMarkdown(md){
+function renderScriptMarkdown(md, targetId){
   const html = md
     .replace(/^## (.+)$/gm, '<h2>$1</h2>')
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
@@ -3615,7 +3634,7 @@ function renderScriptMarkdown(md){
     .split(/\n\n+/)
     .map(block => block.startsWith('<h2>') ? block : `<p>${block.replace(/\n/g,' ')}</p>`)
     .join('\n');
-  $('scriptOut').innerHTML = html;
+  $(targetId || 'scriptOut').innerHTML = html;
 }
 
 async function generateScript(){
@@ -3647,6 +3666,43 @@ function copyScript(){
     const btn = event.target; btn.textContent='Kopiert ✓';
     setTimeout(()=>btn.textContent='Kopieren', 2000);
   });
+}
+
+// Long-Form-Retention-Framework (2026-07-27): presst ein bereits fertiges
+// #script-Skript in die Retention-Struktur, in einer Vorschau statt direkt
+// überschrieben -- gleiches Muster wie generateScript()/scriptOut/copyScript()
+// oben, nur mit "Übernehmen" statt "Kopieren" (schreibt direkt in #script statt
+// in die Zwischenablage).
+async function rewriteScriptRetention(){
+  const raw = ($('script') || {}).value || '';
+  if(!raw.trim()){ $('retentionRewriteStatus').textContent = 'Erst ein Skript eingeben.'; return; }
+  const btn = $('retentionRewriteBtn');
+  btn.disabled = true;
+  $('retentionRewriteStatus').textContent = 'Schreibe um …';
+  $('retentionRewriteCard').style.display = 'none';
+
+  const r = await api('/api/rewrite_script_retention', 'POST', {text: raw, lang: CURRENT_SCRIPT_LANG});
+
+  if(r.ok){
+    $('retentionRewriteStatus').textContent = 'Vorschlag fertig — prüfen und übernehmen.';
+    $('retentionRewriteCard').style.display = 'block';
+    renderScriptMarkdown(r.script, 'retentionRewriteOut');
+    $('retentionRewriteOut').dataset.raw = r.script;
+  } else {
+    $('retentionRewriteStatus').textContent = 'Fehler: '+(r.error||'unbekannt');
+  }
+  btn.disabled = false;
+}
+
+function applyRetentionRewrite(){
+  const raw = $('retentionRewriteOut').dataset.raw || $('retentionRewriteOut').innerText;
+  $('script').value = raw;
+  $('retentionRewriteCard').style.display = 'none';
+  estimate(); _elRefreshGenBtn(); saveScriptLocal();
+}
+
+function discardRetentionRewrite(){
+  $('retentionRewriteCard').style.display = 'none';
 }
 
 // ---- Init ----

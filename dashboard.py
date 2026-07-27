@@ -2077,6 +2077,7 @@ def main():
     mount("/api/elevenlabs_settings", routes.voice)
     mount("/api/generate_script", routes.script_gen)
     mount("/api/generate_titles", routes.script_gen)
+    mount("/api/rewrite_script_retention", routes.script_gen)
     mount("/api/generate_thumbnail", routes.thumbnail)
     mount("/api/plan", routes.plan)
     mount("/api/generate_all_start", routes.batch)

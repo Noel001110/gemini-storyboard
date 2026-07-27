@@ -1,17 +1,22 @@
-"""routes/script_gen.py — Prefix /api/generate_script, /api/generate_titles.
+"""routes/script_gen.py — Prefix /api/generate_script, /api/generate_titles,
+/api/rewrite_script_retention.
 
-Sechste Route-Gruppe aus dem dashboard.py-Handler (Refactor Phase 4, Teil 6).
-Beide Routen machen einen synchronen LLM-Call (Gemini, via engine/prompts.py)
-und liefern das Ergebnis direkt in der HTTP-Response zurück -- kein
-Worker-Thread, kein Job-Status-Polling (anders als z.B. /api/plan oder
-/api/generate_thumbnail, die wegen ihrer Laufzeit als Background-Jobs laufen;
-Skript-/Titel-Generierung ist kurz genug für eine synchrone Response).
+Sechste Route-Gruppe aus dem dashboard.py-Handler (Refactor Phase 4, Teil 6);
+/api/rewrite_script_retention kam am 2026-07-27 dazu (Long-Form-Retention-
+Framework-Review, siehe engine/prompts.py Docstring bei
+rewrite_script_for_retention). Alle drei Routen machen einen synchronen
+LLM-Call (Gemini, via engine/prompts.py) und liefern das Ergebnis direkt in
+der HTTP-Response zurück -- kein Worker-Thread, kein Job-Status-Polling
+(anders als z.B. /api/plan oder /api/generate_thumbnail, die wegen ihrer
+Laufzeit als Background-Jobs laufen; Skript-/Titel-/Rewrite-Generierung ist
+kurz genug für eine synchrone Response).
 
 engine/prompts.py ist mypy-strict und hat keine dashboard.py-Abhängigkeit --
 Top-Level-Import hier ist sicher, kein lazy `import dashboard` für die
 LLM-Calls nötig. Für Video-Meta (load_v_meta/save_v_meta) und den Plan-Read
 bleibt `import dashboard` lazy, da diese Helfer noch nicht aus dashboard.py
-extrahiert sind.
+extrahiert sind. /api/rewrite_script_retention braucht wie /api/generate_script
+kein cid/vid -- reiner Text-Transform, kein dashboard-Import nötig.
 """
 from __future__ import annotations
 
@@ -19,7 +24,7 @@ import json
 import traceback
 
 from core.paths import v_plan
-from engine.prompts import generate_script, generate_titles
+from engine.prompts import generate_script, generate_titles, rewrite_script_for_retention
 
 
 def handle(method, path, handler, qs, cid, vid, body):
@@ -36,6 +41,21 @@ def handle(method, path, handler, qs, cid, vid, body):
         try:
             print(f"  [Script] {lang.upper()} ({len(raw)} Zeichen) …", flush=True)
             handler._send(200, {"ok": True, "script": generate_script(raw, lang)})
+        except Exception as e:
+            traceback.print_exc()
+            handler._send(500, {"error": str(e)})
+        return True, None
+
+    if path == "/api/rewrite_script_retention":
+        d = body or {}
+        raw = d.get("text", "").strip()
+        lang = d.get("lang", "en")
+        if not raw:
+            handler._send(400, {"error": "Kein Skript-Text eingegeben."})
+            return True, None
+        try:
+            print(f"  [RetentionRewrite] {lang.upper()} ({len(raw)} Zeichen) …", flush=True)
+            handler._send(200, {"ok": True, "script": rewrite_script_for_retention(raw, lang)})
         except Exception as e:
             traceback.print_exc()
             handler._send(500, {"error": str(e)})

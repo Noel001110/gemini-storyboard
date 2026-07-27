@@ -892,6 +892,92 @@ def generate_script(raw_input: str, lang: str) -> str:
     return post_kie_text(msgs, temp=0.8)
 
 
+# ---------- Long-form retention rewrite (Blueprint-Review 2026-07-27) ----------
+# Anders als SCRIPT_SYSTEM/generate_script (Rohnotizen -> neues Skript) nimmt diese
+# Funktion ein BEREITS FERTIGES Skript (egal ob über generate_script erzeugt oder
+# extern/handgeschrieben direkt in die #script-Textarea gepastet -- letzteres läuft
+# nie durch SCRIPT_SYSTEMs Hook-/Pattern-Interrupt-Regeln) und presst es in die
+# Long-Form-Retention-Struktur, OHNE Fakten zu verändern. Läuft manuell, einmalig
+# VOR /api/plan -- nicht automatisch bei jedem Plan-Aufruf (siehe routes/plan.py
+# Docstring zur Re-Plan-Stale-Preservation: ein automatischer Rewrite bei jedem
+# Re-Plan würde durch minimale Textänderungen bereits gerenderte Szenenbilder
+# grundlos nach _stale/ verschieben).
+
+LONGFORM_RETENTION_REWRITE_SYSTEM = """\
+You REWRITE an existing, finished narration script to fit a proven long-form
+YouTube retention structure. You do NOT invent new facts, numbers, dates, names, or
+claims — every fact, argument, and number in the input MUST survive in the output.
+You may reorder, restructure, add transitional/framing sentences, and rewrite the
+opening/closing, but the factual content stays completely intact.
+
+STACKED COLD OPEN (the first 4-6 sentences), in this order:
+1. IN MEDIAS RES — open on a consequence or a moment, not on backstory or context.
+   Start where the tension already exists.
+2. CONTRARIAN CLAIM / CURIOSITY GAP — a specific, concrete claim that creates a
+   genuine information gap. Never vague ("you won't believe what happened") —
+   always specific enough to be falsifiable.
+3. STAKES / IDENTITY DEBT — make explicit who exactly this affects and what
+   they concretely stand to lose. Precision beats broad appeal.
+4. Weave in ONE concrete number from the script's own content early in the
+   opening (not before medias res/claim, but within this opening block).
+Never resolve the core outcome/thesis in the opening — that closes the loop
+before the investigation starts.
+
+RE-ENGAGEMENT RHYTHM (throughout the whole script, not just the opening):
+roughly every 2-3 minutes of spoken content (~300-450 words at documentary
+pace), ensure there is a pattern-interrupt beat — a reversal, a new fact, a
+"but here's what nobody noticed" turn, a mini-payoff that resolves a small
+open question while immediately opening a bigger one. Every chapter/section
+transition must end on an open question or unresolved implication, never a
+settled summary, followed by a one-sentence forward-pull bridge into the next
+section that makes clear why it matters.
+
+MACROSTRUCTURE — choose whichever fits the material, do not force both:
+- ESCALATING STAKES ("wait, it gets worse"): for mistake/collapse narratives —
+  each new revelation deepens the problem, widens who's affected, or raises
+  the cost. Never start at maximum stakes (nothing left to escalate to).
+- KISHOTENKETSU (Ki: setup -> Sho: development -> Ten: unexpected twist/
+  reframe -> Ketsu: resolution/harmonization): for insight/psychology
+  narratives where a surprising reframing IS the point, not a conflict.
+
+ENDING: leave at least one loop genuinely, deliberately unresolved. Never end
+on a full recap or a "so what we learned today is..." wrap-up. End on a
+question or an open implication.
+
+LENGTH AND FORMAT: keep approximately the same overall length as the input —
+downstream scene timing assumes a similar word/duration budget. Match the
+input's chapter-heading convention if it uses one (## headings), plain text
+otherwise, paragraphs separated by blank lines. No preamble, no meta-
+commentary, no "Chapter 1:"/"Act I" labels.
+"""
+
+
+def rewrite_script_for_retention(full_script: str, lang: str = "en") -> str:
+    """Presses an already-finished narration script into the long-form retention
+    structure (stacked cold-open, 2-3min re-engagement rhythm, escalating-stakes/
+    Kishotenketsu macrostructure, deliberately open ending) without altering its
+    facts. Sibling to generate_script() but transforms an EXISTING script instead
+    of drafting a new one from raw notes -- same error contract (raises on LLM
+    failure, caller/route degrades to 500, no empty-string swallow)."""
+    lang_instr = (
+        "Write the rewritten script in German (natural spoken German, not formal)."
+        if lang == "de"
+        else "Write the rewritten script in English (clear, neutral international English)."
+    )
+    user_msg = (
+        f"{lang_instr}\n\n"
+        f"Here is the finished narration script to rewrite into the retention "
+        f"structure above. Preserve every fact and argument, restructure the "
+        f"narrative architecture:\n\n{full_script}"
+    )
+    from dashboard import post_kie_text  # lazy
+    msgs = [
+        {"role": "system", "content": LONGFORM_RETENTION_REWRITE_SYSTEM},
+        {"role": "user", "content": user_msg},
+    ]
+    return post_kie_text(msgs, temp=0.7)
+
+
 # ---------- Title generator (viral/clickbait, research-backed formulas) ----------
 # Formulas per 2026 CTR research: curiosity gap + loss-aversion/FOMO + a concrete
 # number or fact + an emotional hook, 55-60 chars so it doesn't truncate on mobile.
