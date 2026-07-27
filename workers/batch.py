@@ -25,6 +25,14 @@ from engine.imagegen import (
 )
 from engine.prompts import _build_image_prompt
 from engine.scenes import _find_charsheet_png, _resolve_chain_refs, _resolve_entity_ref
+from engine.upscale import upscale_images_batch
+
+# Zeitbasiert statt "warte auf genau N fertige Bilder" (Rollender Upscale-Sweep,
+# siehe run()): bei ungerader/kleiner Restmenge (z.B. 4 von 100 Szenen noch offen,
+# weil der Rest per Hand generiert wurde) würde ein zähl-basierter Trigger nie
+# auslösen. Ein Zeit-Trigger sweept einfach, was gerade fertig ist -- unabhängig
+# von der Gesamtzahl, plus ein garantierter Abschluss-Sweep am Ende (siehe unten).
+UPSCALE_SWEEP_INTERVAL_SEC = 25
 
 
 def run(cid: str, vid: str, force: bool = False) -> None:
@@ -131,6 +139,14 @@ def run(cid: str, vid: str, force: bool = False) -> None:
                 # finish instead of submitting a second KIE task for the same scene.
                 while dashboard.JOBS.get(existing_job_id, {}).get("status") == "running":
                     time.sleep(2)
+                # Report it back regardless of whether the OTHER job already upscaled it
+                # (manual click, skip_upscale=False) — an already-4K image just no-ops
+                # through a redundant sweep pass, cheap insurance against the rarer case
+                # where the other in-flight job is itself a second concurrent batch run
+                # (skip_upscale=True) that would otherwise never sweep it either.
+                if dashboard.JOBS.get(existing_job_id, {}).get("status") == "done":
+                    return out_path
+                return None
             else:
                 # Chain-refs + entity-ref resolution can BLOCK (waiting on a sibling
                 # sequence scene or the character's first occurrence, see
@@ -373,17 +389,40 @@ def run(cid: str, vid: str, force: bool = False) -> None:
                     except Exception:
                         pass
                 try:
-                    dashboard._image_job_worker_inner(job_id, task_id, out_path, plan_path, i)
+                    # skip_upscale=True: der Batch-Worker sammelt fertige Bilder selbst
+                    # und upscaled sie gebündelt (siehe run() unten, rollender Sweep) --
+                    # Verzeichnis-Modus amortisiert den Modell-Load-Overhead über viele
+                    # Bilder statt ihn pro Bild einzeln zu zahlen (siehe engine/upscale.py).
+                    dashboard._image_job_worker_inner(job_id, task_id, out_path, plan_path, i,
+                                                       skip_upscale=True)
                 finally:
                     dashboard.IMAGE_GEN_SEMAPHORE.release()
                     with dashboard._ACTIVE_SCENE_JOBS_LOCK:
                         if dashboard.ACTIVE_SCENE_JOBS.get(scene_key) == job_id:
                             del dashboard.ACTIVE_SCENE_JOBS[scene_key]
+                if dashboard.JOBS.get(job_id, {}).get("status") == "done":
+                    return out_path
+                return None
         finally:
             with dashboard._BATCH_JOBS_LOCK:
                 dashboard.BATCH_JOBS[key]["done"] += 1
                 if i in dashboard.BATCH_JOBS[key]["current_i"]:
                     dashboard.BATCH_JOBS[key]["current_i"].remove(i)
+
+    pending_upscale: list = []
+    last_sweep_ts = time.time()
+
+    def sweep(reason: str) -> None:
+        nonlocal pending_upscale, last_sweep_ts
+        if not pending_upscale:
+            return
+        n = len(pending_upscale)
+        with dashboard._BATCH_JOBS_LOCK:
+            dashboard.BATCH_JOBS[key]["stage"] = f"hochskalieren ({n} Bilder) …"
+        print(f"  [BatchGen] {cid}/{vid}: Upscale-Sweep ({reason}), {n} Bilder", flush=True)
+        upscale_images_batch(pending_upscale)
+        pending_upscale = []
+        last_sweep_ts = time.time()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=dashboard.MAX_CONCURRENT_IMAGE_GENS) as pool:
         futures = []
@@ -392,8 +431,24 @@ def run(cid: str, vid: str, force: bool = False) -> None:
                 if dashboard.BATCH_JOBS[key]["stop_requested"]:
                     break
             futures.append(pool.submit(process_scene, scene))
-        for f in futures:
-            f.result()
+        # as_completed statt Submit-Reihenfolge: liefert jedes fertige Bild sofort,
+        # sobald es TATSÄCHLICH fertig ist -- Voraussetzung für den rollenden
+        # Upscale-Sweep, der die GPU-Leerlaufzeit während laufender KIE-Downloads
+        # nutzt statt erst nach Abschluss ALLER Szenen zu batchen (siehe Chat:
+        # KIE-Phase dauert ohnehin ~20min bei 100 Bildern, GPU liegt die ganze
+        # Zeit brach -- Sweeps währenddessen machen den Upscale-Anteil quasi gratis).
+        for f in concurrent.futures.as_completed(futures):
+            out_path = f.result()
+            if out_path:
+                pending_upscale.append(out_path)
+            if pending_upscale and (time.time() - last_sweep_ts) >= UPSCALE_SWEEP_INTERVAL_SEC:
+                sweep("rollend")
+        # Garantierter Abschluss-Sweep: fängt den Rest ein, ganz gleich wie klein
+        # diese letzte Gruppe ist (auch nur 1 Bild) -- kein Bild bleibt unskaliert
+        # liegen, unabhängig von Gesamtzahl oder Timing der Sweeps oben (siehe Chat:
+        # der Fall "96 statt 100 offen, weil der Rest per Hand generiert wurde" darf
+        # nicht dazu führen, dass die letzte Gruppe nie gesweept wird).
+        sweep("abschluss")
 
     with dashboard._BATCH_JOBS_LOCK:
         stopped = dashboard.BATCH_JOBS[key]["stop_requested"]

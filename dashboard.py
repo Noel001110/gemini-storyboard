@@ -1235,7 +1235,8 @@ def _mark_scene_error(plan_path: str, scene_i: int):
             _atomic_write_json(plan_path, plan, ensure_ascii=False, indent=1)
         except: pass
 
-def _image_job_worker_inner(job_id: str, task_id: str, out_path: str, plan_path: str, scene_i: int):
+def _image_job_worker_inner(job_id: str, task_id: str, out_path: str, plan_path: str, scene_i: int,
+                             skip_upscale: bool = False):
     poll_url  = f"{KIE_API}/recordInfo?taskId={task_id}"
     poll_hdrs = {"Authorization": f"Bearer {kie_key()}"}
     print(f"  [KIE] Job {job_id} / task {task_id} läuft …", flush=True)
@@ -1269,8 +1270,9 @@ def _image_job_worker_inner(job_id: str, task_id: str, out_path: str, plan_path:
                 JOBS[job_id] = {"status": "error", "progress": 0, "error": f"Bild-Download fehlgeschlagen: {e}", "ts": time.time()}
                 _mark_scene_error(plan_path, scene_i)
                 return
-            from engine.upscale import upscale_image_local_safe
-            upscale_image_local_safe(out_path)
+            if not skip_upscale:
+                from engine.upscale import upscale_image_local_safe
+                upscale_image_local_safe(out_path)
             fn = os.path.basename(out_path)
             JOBS[job_id] = {"status": "done", "progress": 100,
                             "file": fn, "source_url": urls[0], "ts": int(time.time()), "error": None}
