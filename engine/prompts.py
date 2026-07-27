@@ -897,11 +897,11 @@ def generate_script(raw_input: str, lang: str) -> str:
 # Funktion ein BEREITS FERTIGES Skript (egal ob über generate_script erzeugt oder
 # extern/handgeschrieben direkt in die #script-Textarea gepastet -- letzteres läuft
 # nie durch SCRIPT_SYSTEMs Hook-/Pattern-Interrupt-Regeln) und presst es in die
-# Long-Form-Retention-Struktur, OHNE Fakten zu verändern. Läuft manuell, einmalig
-# VOR /api/plan -- nicht automatisch bei jedem Plan-Aufruf (siehe routes/plan.py
-# Docstring zur Re-Plan-Stale-Preservation: ein automatischer Rewrite bei jedem
-# Re-Plan würde durch minimale Textänderungen bereits gerenderte Szenenbilder
-# grundlos nach _stale/ verschieben).
+# Long-Form-Retention-Struktur, OHNE Fakten zu verändern. Läuft seit Juli 2026
+# automatisch als erster Teilschritt jedes Plan-Laufs (workers/plan.py::run(),
+# kein manueller Button mehr) -- ein Hash-Guard dort verhindert, dass ein Re-Plan
+# mit unverändertem, bereits umgeschriebenem Text den Rewrite grundlos erneut
+# auslöst (siehe dessen Docstring zur Re-Plan-Stale-Preservation).
 
 LONGFORM_RETENTION_REWRITE_SYSTEM = """\
 You REWRITE an existing, finished narration script to fit a proven long-form
@@ -923,6 +923,20 @@ line into a still image and rewards concrete, specific content over abstraction)
   piggy bank, a locked door, a leaking bucket) -- this illustrates something the script
   already argues, it is not a new invented fact. Only do this if it fits naturally; do
   not force a recurring object onto material that doesn't support one.
+- METAPHOR CONSISTENCY: once the opening establishes a central physical image (a
+  vault, a tree, a wheel, a monster), that is now the ONE visual world for the rest
+  of the script -- do not introduce a second, unrelated image for the same idea
+  partway through (e.g. starting with a vault and then switching to a sinking ship).
+  When the argument turns abstract (opportunity cost, risk versus stability, a
+  technical distinction), translate it back into the SAME established image instead
+  of reverting to explanatory/abstract language or reaching for a new metaphor --
+  one image, developed and paid off, beats several disconnected ones. This applies
+  EVEN WHEN the input script itself already phrases an argument through a different,
+  competing metaphor (e.g. a lifeboat/ship comparison sitting in the middle of an
+  input that opens on a vault) -- the fact/argument that sentence carries must
+  survive, but rewrite its vehicle into your established image rather than
+  preserving the input's competing metaphor just because it was already there.
+  Keeping a source sentence's claim intact is not the same as keeping its imagery.
 - Prefer vivid, concrete, sensory language over abstract or clinical phrasing,
   especially at high-tension moments -- concrete language produces stronger images
   downstream than abstraction does.
