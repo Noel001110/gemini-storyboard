@@ -910,6 +910,23 @@ claims — every fact, argument, and number in the input MUST survive in the out
 You may reorder, restructure, add transitional/framing sentences, and rewrite the
 opening/closing, but the factual content stays completely intact.
 
+VISUAL ANCHORING (grounds the downstream image-generation pipeline, which turns each
+line into a still image and rewards concrete, specific content over abstraction):
+- Replace abstract metaphors with concrete, physical actions or objects the person the
+  script addresses (or its narrator) visibly does, sees, or interacts with. Instead of
+  "financial pressure rose," write something closer to "you stare at a stack of unpaid
+  bills piling higher than the table." Write this in the same natural narration voice
+  as the rest of the script -- never insert internal system labels or IDs into the
+  narration text.
+- Where the script's own content supports it, let ONE concrete object or image recur
+  2-4 times across the script as a physical stand-in for the central idea (a shrinking
+  piggy bank, a locked door, a leaking bucket) -- this illustrates something the script
+  already argues, it is not a new invented fact. Only do this if it fits naturally; do
+  not force a recurring object onto material that doesn't support one.
+- Prefer vivid, concrete, sensory language over abstract or clinical phrasing,
+  especially at high-tension moments -- concrete language produces stronger images
+  downstream than abstraction does.
+
 STACKED COLD OPEN (the first 4-6 sentences), in this order:
 1. IN MEDIAS RES — open on a consequence or a moment, not on backstory or context.
    Start where the tension already exists.
