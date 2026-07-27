@@ -3,12 +3,13 @@ Refactor Phase 3). Siehe workers/__init__.py für die lazy-import-Konvention.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
 import traceback
 
-from core.paths import ch_sheets, v_out, v_plan
+from core.paths import ch_sheets, v_analysis_cache, v_out, v_plan
 from engine.prompts import gen_charsheet, visual_prompts
 from engine.scenes import segment_by_pacing, split_units
 
@@ -80,9 +81,40 @@ def run(cid: str, vid: str, text: str, wpm: float, sec: float) -> None:
         # the emotional arc decides pacing, so cuts land on "a complete thought" instead
         # of a mechanical time interval, and pacing can't drift from what the model
         # already decided is the climax vs. the setup.
-        with dashboard._PLAN_JOBS_LOCK:
-            dashboard.PLAN_JOBS[key]["step"] = f"Analysiere {len(units)} Einheiten (Story-Bogen + Pacing) …"
-        analysis = dashboard.analyze_script(units)
+        #
+        # Juli 2026 (Re-Plan-Determinismus-Bug, gefunden beim Live-Test des
+        # Retention-Rewrite-Schritts): analyze_script() ist ein LLM-Call und daher
+        # NICHT deterministisch — ein Re-Plan mit unverändertem Skript-Text konnte
+        # trotzdem leicht andere pacing-Labels zurückbekommen, wodurch
+        # segment_by_pacing() (rein deterministisch, siehe engine/scenes.py) andere
+        # Szenengrenzen erzeugte. Die byte-identische Text-Prüfung in
+        # _preserve_rendered_scenes() griff dann nicht mehr, obwohl sich am Skript
+        # nichts geändert hatte — bereits gerenderte Bilder wurden grundlos auf
+        # "geplant" zurückgesetzt. Fix: Ergebnis keyed by Skript-Text-Hash cachen;
+        # bei unverändertem Text wird der LLM-Call übersprungen (spart nebenbei
+        # auch die API-Kosten für einen ansonsten redundanten Analyse-Call).
+        script_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        analysis = None
+        cache_p = v_analysis_cache(cid, vid)
+        try:
+            cached = json.load(open(cache_p))
+            if cached.get("script_hash") == script_hash:
+                analysis = cached.get("analysis")
+                print("  [Plan] Skript-Text unverändert — nutze gecachte Analyse "
+                      "(kein erneuter LLM-Call).", flush=True)
+        except Exception:
+            pass
+
+        if analysis is None:
+            with dashboard._PLAN_JOBS_LOCK:
+                dashboard.PLAN_JOBS[key]["step"] = f"Analysiere {len(units)} Einheiten (Story-Bogen + Pacing) …"
+            analysis = dashboard.analyze_script(units)
+            try:
+                dashboard._atomic_write_json(
+                    cache_p, {"script_hash": script_hash, "analysis": analysis},
+                    ensure_ascii=False, indent=1)
+            except Exception as e:
+                print(f"  [Plan] Analyse-Cache konnte nicht geschrieben werden: {e}", flush=True)
 
         with dashboard._PLAN_JOBS_LOCK:
             dashboard.PLAN_JOBS[key]["step"] = "Gruppiere Szenen nach Pacing …"

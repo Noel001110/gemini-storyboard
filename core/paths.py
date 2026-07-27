@@ -74,6 +74,15 @@ def v_plan(cid: str, vid: str) -> str:
     return os.path.join(v_out(cid, vid), "plan.json")
 
 
+def v_analysis_cache(cid: str, vid: str) -> str:
+    # Cache für analyze_script()'s Ergebnis, keyed by Skript-Text-Hash (siehe
+    # workers/plan.py) -- analyze_script ist ein LLM-Call und daher nicht
+    # deterministisch; ohne Cache konnte ein Re-Plan mit UNVERÄNDERTEM Text
+    # trotzdem leicht andere Szenengrenzen erzeugen und dadurch bereits
+    # gerenderte Bilder grundlos verwerfen (siehe _preserve_rendered_scenes).
+    return os.path.join(v_out(cid, vid), "analysis_cache.json")
+
+
 def v_uploads(cid: str, vid: str) -> str:
     return os.path.join(v_dir(cid, vid), "uploads")
 

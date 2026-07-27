@@ -34,7 +34,7 @@ def handle(method, path, handler, qs, cid, vid, body):
     if path == "/api/generate_script":
         d = body or {}
         raw = d.get("text", "").strip()
-        lang = d.get("lang", "de")
+        lang = d.get("lang", "en")
         if not raw:
             handler._send(400, {"error": "Kein Text eingegeben."})
             return True, None
