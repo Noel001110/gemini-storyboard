@@ -918,8 +918,14 @@ STACKED COLD OPEN (the first 4-6 sentences), in this order:
    always specific enough to be falsifiable.
 3. STAKES / IDENTITY DEBT — make explicit who exactly this affects and what
    they concretely stand to lose. Precision beats broad appeal.
-4. Weave in ONE concrete number from the script's own content early in the
-   opening (not before medias res/claim, but within this opening block).
+4. Weave in ONE concrete number (currency, percent, count) from the script's
+   own content early in the opening, if one exists. If the input has NO
+   number anywhere, use a concrete time or quantity phrase already present in
+   the script instead ("for 5 years", "every single Monday", "every euro")
+   to ground the opening — do NOT invent a number, a statistic, or a study
+   ("research shows 78%...") to fill the gap. A fabricated number is exactly
+   as unacceptable as a fabricated name or date under the no-invented-facts
+   rule above, not a style choice.
 Never resolve the core outcome/thesis in the opening — that closes the loop
 before the investigation starts.
 
