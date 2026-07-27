@@ -539,28 +539,20 @@
         <span class="est" id="est">—</span>
       </div>
       <p class="hint" id="wpmMeasuredHint" style="margin-top:4px"></p>
-      <!-- Long-Form-Retention-Framework (2026-07-27): presst ein bereits fertiges
-           Skript (egal ob generiert oder direkt reingepastet) einmalig VOR der
-           Plan-Erstellung in die Retention-Struktur (gestapelter Cold-Open,
-           Re-Engagement alle 2-3 Min, eskalierende Stakes/Kishotenketsu, offenes
-           Ende) -- bewusst als eigener Review-Schritt statt automatisch im
-           Plan-Aufruf (siehe routes/plan.py: ein Re-Plan verwirft bereits
-           gerenderte Szenenbilder, sobald sich der Szenentext ändert). Gleiches
-           Vorschau-vor-Übernehmen-Muster wie #scriptOutCard/copyScript() oben. -->
-      <div class="row" style="margin-top:12px;gap:10px;align-items:center">
-        <button class="sm ghost" onclick="rewriteScriptRetention()" id="retentionRewriteBtn">🎬 Nach Retention-Framework umschreiben</button>
-        <span class="hint" id="retentionRewriteStatus">Presst das Skript oben in Cold-Open + Re-Engagement-Struktur, ohne Fakten zu ändern.</span>
-      </div>
-      <div class="card" id="retentionRewriteCard" style="display:none;margin-top:10px">
-        <h2 style="font-size:13px">Umgeschriebener Vorschlag
-          <button class="sm ghost" onclick="applyRetentionRewrite()" style="margin-left:8px;text-transform:none;letter-spacing:0">Übernehmen</button>
-          <button class="sm ghost" onclick="discardRetentionRewrite()" style="margin-left:4px;text-transform:none;letter-spacing:0">Verwerfen</button>
-        </h2>
-        <div class="script-out" id="retentionRewriteOut"></div>
-      </div>
+      <!-- Long-Form-Retention-Framework (2026-07-27, seit User-Wunsch "soll immer
+           angewandt werden" automatisiert): läuft jetzt serverseitig als erster
+           Teilschritt von "Plan aus Skript erstellen" (workers/plan.py), presst das
+           Skript (egal ob generiert oder direkt reingepastet) in die Retention-
+           Struktur (gestapelter Cold-Open, Re-Engagement alle 2-3 Min, eskalierende
+           Stakes/Kishotenketsu, offenes Ende) -- kein eigener manueller Button mehr
+           nötig, kein Vorschau-Schritt. Ein Hash-Guard (workers/plan.py) sorgt dafür,
+           dass ein Re-Plan mit bereits umgeschriebenem, unverändertem Text den
+           Rewrite nicht erneut auslöst -- sonst würde jeder Re-Plan-Klick durch die
+           Nicht-Determinismus des Rewrite-LLM-Calls selbst leicht anderen Text
+           erzeugen und bereits gerenderte Szenenbilder grundlos verwerfen. -->
       <div class="row" style="margin-top:12px;gap:10px;align-items:center">
         <button onclick="makePlan()" id="planBtn">Plan aus Skript erstellen</button>
-        <span class="hint">Timing geschätzt via WPM-Formel + Pacing-Analyse</span>
+        <span class="hint">Wendet zuerst automatisch das Retention-Framework an, dann Timing via WPM-Formel + Pacing-Analyse</span>
       </div>
       <div id="planProgress" style="display:none;margin-top:12px">
         <div style="height:8px;background:var(--surface-2);border-radius:4px;overflow:hidden">
@@ -3637,6 +3629,12 @@ function renderScriptMarkdown(md, targetId){
   $(targetId || 'scriptOut').innerHTML = html;
 }
 
+// Long-Form-Retention-Framework (2026-07-27, seit User-Wunsch "soll immer angewandt
+// werden" automatisiert): "Skript generieren" verkettet direkt den Retention-Rewrite,
+// bevor irgendwas angezeigt wird -- kein separater Rewrite-Klick mehr nötig, exakt wie
+// bei "Plan aus Skript erstellen" (workers/plan.py). Anders als dort gibt es hier
+// keinen Hash-Guard nötig: jeder Klick erzeugt ohnehin ein frisches Skript, kein
+// wiederholter Re-Plan auf demselben Text.
 async function generateScript(){
   const raw = $('scriptInput').value.trim();
   if(!raw){ $('scriptStatus').textContent='Bitte Text eingeben.'; return; }
@@ -3647,16 +3645,22 @@ async function generateScript(){
   startScriptBar();
 
   const r = await api('/api/generate_script','POST',{text: raw, lang: _scriptLang});
-  stopScriptBar(r.ok);
-
-  if(r.ok){
-    $('scriptStatus').textContent = 'Fertig ✓';
-    $('scriptOutCard').style.display = 'block';
-    renderScriptMarkdown(r.script);
-    $('scriptOut').dataset.raw = r.script;
-  } else {
+  if(!r.ok){
+    stopScriptBar(false);
     $('scriptStatus').textContent = 'Fehler: '+(r.error||'unbekannt');
+    btn.disabled = false;
+    return;
   }
+
+  $('scriptStatus').textContent = 'Wende Retention-Framework an …';
+  const r2 = await api('/api/rewrite_script_retention','POST',{text: r.script, lang: _scriptLang});
+  stopScriptBar(true);
+
+  const finalScript = r2.ok ? r2.script : r.script;
+  $('scriptStatus').textContent = r2.ok ? 'Fertig ✓' : 'Fertig ✓ (Retention-Rewrite fehlgeschlagen, Rohentwurf gezeigt)';
+  $('scriptOutCard').style.display = 'block';
+  renderScriptMarkdown(finalScript);
+  $('scriptOut').dataset.raw = finalScript;
   btn.disabled = false;
 }
 
@@ -3666,43 +3670,6 @@ function copyScript(){
     const btn = event.target; btn.textContent='Kopiert ✓';
     setTimeout(()=>btn.textContent='Kopieren', 2000);
   });
-}
-
-// Long-Form-Retention-Framework (2026-07-27): presst ein bereits fertiges
-// #script-Skript in die Retention-Struktur, in einer Vorschau statt direkt
-// überschrieben -- gleiches Muster wie generateScript()/scriptOut/copyScript()
-// oben, nur mit "Übernehmen" statt "Kopieren" (schreibt direkt in #script statt
-// in die Zwischenablage).
-async function rewriteScriptRetention(){
-  const raw = ($('script') || {}).value || '';
-  if(!raw.trim()){ $('retentionRewriteStatus').textContent = 'Erst ein Skript eingeben.'; return; }
-  const btn = $('retentionRewriteBtn');
-  btn.disabled = true;
-  $('retentionRewriteStatus').textContent = 'Schreibe um …';
-  $('retentionRewriteCard').style.display = 'none';
-
-  const r = await api('/api/rewrite_script_retention', 'POST', {text: raw, lang: CURRENT_SCRIPT_LANG});
-
-  if(r.ok){
-    $('retentionRewriteStatus').textContent = 'Vorschlag fertig — prüfen und übernehmen.';
-    $('retentionRewriteCard').style.display = 'block';
-    renderScriptMarkdown(r.script, 'retentionRewriteOut');
-    $('retentionRewriteOut').dataset.raw = r.script;
-  } else {
-    $('retentionRewriteStatus').textContent = 'Fehler: '+(r.error||'unbekannt');
-  }
-  btn.disabled = false;
-}
-
-function applyRetentionRewrite(){
-  const raw = $('retentionRewriteOut').dataset.raw || $('retentionRewriteOut').innerText;
-  $('script').value = raw;
-  $('retentionRewriteCard').style.display = 'none';
-  estimate(); _elRefreshGenBtn(); saveScriptLocal();
-}
-
-function discardRetentionRewrite(){
-  $('retentionRewriteCard').style.display = 'none';
 }
 
 // ---- Init ----

@@ -55,11 +55,18 @@ def handle(method, path, handler, qs, cid, vid, body):
 
         # Script speichern! Wenn der User klickt und sofort reloadet, bricht der Timeout ab
         try:
+            # retention_hash aus dem bisherigen Stand übernehmen (nicht einfach weglassen) --
+            # save_v_script() überschreibt die GANZE Datei (siehe dessen Docstring), ein
+            # fehlendes Feld hier würde es sonst bei JEDEM Klick löschen. workers/plan.py
+            # vergleicht diesen Hash gegen den tatsächlich ankommenden Text und entscheidet
+            # selbst, ob der Retention-Rewrite nötig ist -- hier nur unverändert durchreichen.
+            existing = dashboard.load_v_script(cid, vid)
             payload = {
                 "text": d.get("script", ""),
                 "language": d.get("language", "en"),
                 "preset": d.get("preset", "flat_cartoon_doc"),
                 "updatedAt": int(time.time()),
+                "retention_hash": existing.get("retention_hash", ""),
             }
             dashboard.save_v_script(cid, vid, payload)
         except Exception as e:
