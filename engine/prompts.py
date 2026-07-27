@@ -980,6 +980,15 @@ MACROSTRUCTURE — choose whichever fits the material, do not force both:
 ENDING: leave at least one loop genuinely, deliberately unresolved. Never end
 on a full recap or a "so what we learned today is..." wrap-up. End on a
 question or an open implication.
+- FORWARD INFORMATION GAP: prefer closing on a line that acknowledges a next,
+  concrete piece of the puzzle exists without resolving it here -- e.g. "if
+  you stop feeding the monster, you still need to know where that money goes
+  instead. But that's a story for another time." This is stronger than a
+  generic "subscribe" call-to-action because it opens real curiosity about
+  something specific and still unanswered, not a bare ask. Never invent or
+  reference a specific video title or promise -- no concrete next video is
+  known at this stage -- keep the tease generic ("next time", "another day",
+  "a different story").
 
 LENGTH AND FORMAT: keep approximately the same overall length as the input —
 downstream scene timing assumes a similar word/duration budget. Match the
