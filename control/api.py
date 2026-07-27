@@ -29,7 +29,30 @@ def handle(method, path, handler, qs, cid, vid, body):
             "id": r["id"], "render_target": r["render_target"], "title": r["title"],
             "status": r["status"], "scheduled_at": r["scheduled_at"],
             "youtube_video_id": r["youtube_video_id"], "error": r["error"],
+            "platform": r.get("platform", "youtube"),
         } for r in rows]
+        
+        # Check for generated files that are not yet queued
+        queued_targets = {r["render_target"] for r in rows}
+        import core.paths
+        import os
+        gen_dir = core.paths.v_out(cid, vid)
+        if os.path.exists(gen_dir):
+            if "longform" not in queued_targets and os.path.exists(os.path.join(gen_dir, "final.mp4")):
+                entries.append({"id": None, "render_target": "longform", "title": "Longform", "status": "not_queued", "platform": "youtube"})
+            if "short_vertical" not in queued_targets and os.path.exists(os.path.join(gen_dir, "final_short_vertical.mp4")):
+                entries.append({"id": None, "render_target": "short_vertical", "title": "Klimax-Short", "status": "not_queued", "platform": "youtube"})
+                
+            for fname in os.listdir(gen_dir):
+                if fname.startswith("final_short_part_") and fname.endswith(".mp4"):
+                    target = fname.replace("final_", "").replace(".mp4", "")
+                    if target not in queued_targets:
+                        entries.append({"id": None, "render_target": target, "title": target, "status": "not_queued", "platform": "youtube"})
+                elif fname.startswith("final_short_hook_") and fname.endswith(".mp4"):
+                    target = fname.replace("final_", "").replace(".mp4", "")
+                    if target not in queued_targets:
+                        entries.append({"id": None, "render_target": target, "title": target, "status": "not_queued", "platform": "youtube"})
+
         handler._send(200, {"entries": entries})
         return True, None
 
@@ -46,6 +69,8 @@ def handle(method, path, handler, qs, cid, vid, body):
         out = []
         for ch in dashboard.load_channels():
             tokens = db.get_tokens(ch["id"])
+            import tiktok.oauth
+            tiktok_tokens = tiktok.oauth.get_tokens(ch["id"])
             playlist_id = ""
             try:
                 playlist_id = open(dashboard.ch_youtube_playlist_id(ch["id"])).read().strip()
@@ -55,6 +80,7 @@ def handle(method, path, handler, qs, cid, vid, body):
                 "id": ch["id"],
                 "name": ch.get("name", ch["id"]),
                 "connected": bool(tokens),
+                "tiktok_connected": bool(tiktok_tokens),
                 "youtube_channel_title": (tokens or {}).get("youtube_channel_title"),
                 "playlist_id": playlist_id,
             })

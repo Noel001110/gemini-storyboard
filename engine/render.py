@@ -54,12 +54,12 @@ from typing import TypedDict
 # ── Constants ────────────────────────────────────────────────────────────────
 
 RENDER_FPS = 30
-RENDER_WIDTH = 1920
-RENDER_HEIGHT = 1080
-RENDER_SUPERSAMPLE_WIDTH = 3840  # scale-up before zoompan — without this, zoompan's
-# per-frame rounding to whole pixels is visible as jitter on a slow zoom. 4K is enough
-# to make that invisible at the zoom intensities used here (capped well under 1.2x)
-# while costing only ~1/4 the memory/CPU of 8K supersampling.
+RENDER_WIDTH = 3840
+RENDER_HEIGHT = 2160
+RENDER_SUPERSAMPLE_WIDTH = 7680  # scale-up before zoompan — without this, zoompan's
+# per-frame rounding to whole pixels is visible as jitter on a slow zoom. Keeps the
+# same 2x margin over RENDER_WIDTH that worked at 1080p (was 1920->3840, now
+# 3840->7680) — the margin, not the absolute value, is what hides the jitter.
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WHISPER_VENV_PY = os.path.join(HERE, ".venv_whisper", "bin", "python3")
@@ -93,7 +93,8 @@ class RenderTarget:
 RENDER_TARGETS: dict[str, RenderTarget] = {
     "longform": RenderTarget("longform", RENDER_WIDTH, RENDER_HEIGHT, RENDER_FPS,
                               RENDER_SUPERSAMPLE_WIDTH),
-    "short_vertical": RenderTarget("short_vertical", 1080, 1920, RENDER_FPS, 2160,
+    # Gleiches 2x-Supersample-Verhältnis wie longform (war 1080->2160, jetzt 2160->4320).
+    "short_vertical": RenderTarget("short_vertical", 2160, 3840, RENDER_FPS, 4320,
                                      pad_style="blur"),
 }
 

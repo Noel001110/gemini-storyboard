@@ -249,7 +249,7 @@ def _generate_chapter_titles(block_texts: list) -> list:
         txt = post_gemini_native([
             {"role": "system", "content": CHAPTER_TITLE_SYSTEM},
             {"role": "user", "content": segments_str},
-        ], json_mode=True, temp=0.7, response_schema=schema)
+        ], json_mode=True, temp=0.7, response_schema=schema, thinking_level="low")
         data = json.loads(txt)
         titles = [str(t).strip() for t in data.get("titles", [])]
         if len(titles) == len(block_texts):
@@ -336,7 +336,7 @@ def generate_packaging(full_script: str, chosen_title: str, categories: list) ->
     txt = post_gemini_native([
         {"role": "system", "content": PACKAGING_SYSTEM},
         {"role": "user", "content": user_msg},
-    ], json_mode=True, temp=0.7, response_schema=schema)
+    ], json_mode=True, temp=0.7, response_schema=schema, thinking_level="low")
     data = json.loads(txt)
     return {
         "description": str(data.get("description", "")).strip(),

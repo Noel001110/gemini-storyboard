@@ -185,22 +185,37 @@ def _with_precedence(master: str) -> str:
     return master.rstrip() + "\n" + _STYLE_PRECEDENCE
 
 
+_UNLISTED_TACTICAL_V2_MASTER = """\
+STYLE (apply to EVERY image, never deviate):
+Gritty 2D tactical vector style illustration with high-contrast chiaroscuro shadows.
+Industrial color palette: dark slate, deep teals, moody greys, with sharp neon amber or warning yellow highlights for focal objects.
+LIGHTING IS EXTREME: heavy shadows, dramatic single-source lighting (glowing monitors, single tactical spotlights, light through blinds).
+Characters: sharp, expressive silhouettes, calculating facial features, tactical or rugged attire; emotion is intense, focused, or burdened.
+Environments: high-tech war rooms, server vaults, underground command centers, dark cityscapes, industrial corridors. Never sterile office spaces.
+Cinematic 16:9 framing: dramatic angles, intense close-ups, low-angle profile shots, poster-like composition with high negative space.
+NO photorealism, NO mainstream corporate stock clichés, NO soft pastel colors, NO speech bubbles, NO text inside image.
+Sensitive subjects: depict symbolically via abandoned tactical gear, dark silhouettes, broken conduits, or glowing warning indicators.
+"""
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 PRESET_MASTERS: dict[str, str] = {
-    "flat_cartoon_doc":  _with_precedence(_FLAT_CARTOON_DOC_MASTER),
-    "editorial_minimal": _with_precedence(_EDITORIAL_MINIMAL_MASTER),
-    "ink_documentary":   _with_precedence(_INK_DOCUMENTARY_MASTER),
-    "charcoal_noir":     _with_precedence(_CHARCOAL_NOIR_MASTER),
-    "stick_minimal":     _with_precedence(_STICK_MINIMAL_MASTER),
+    "unlisted_tactical_v2": _with_precedence(_UNLISTED_TACTICAL_V2_MASTER),
+    "flat_cartoon_doc":      _with_precedence(_FLAT_CARTOON_DOC_MASTER),
+    "editorial_minimal":     _with_precedence(_EDITORIAL_MINIMAL_MASTER),
+    "ink_documentary":       _with_precedence(_INK_DOCUMENTARY_MASTER),
+    "charcoal_noir":         _with_precedence(_CHARCOAL_NOIR_MASTER),
+    "stick_minimal":         _with_precedence(_STICK_MINIMAL_MASTER),
 }
 
 PRESET_DESCRIPTIONS: dict[str, str] = {
-    "flat_cartoon_doc":  "Flacher 2D-Cartoon, dokumentarisch. Warmes Farbkonzept, eine Lichtquelle pro Szene.",
-    "editorial_minimal": "Editorial-Illustration, Erklär-/Essay-Formate. Datenfreundlich mit zwei Akzentfarben.",
-    "ink_documentary":   "Schwarz-weiße Tusche, dokumentarisch. Hoher Kontrast, viel Negativraum.",
-    "charcoal_noir":     "True Crime / düstere Stoffe. Monochrom mit symbolischem Rot-Akzent.",
-    "stick_minimal":     "Strichmännchen, monochrom. Legacy-Stil — wird nur noch auf explizite Wahl genutzt.",
+    "unlisted_tactical_v2": "Tactical War Room, 2D Vector. Düstere Schatten, Neon-Akzente, hoher Kontrast.",
+    "flat_cartoon_doc":      "Flacher 2D-Cartoon, dokumentarisch. Warmes Farbkonzept, eine Lichtquelle pro Szene.",
+    "editorial_minimal":     "Editorial-Illustration, Erklär-/Essay-Formate. Datenfreundlich mit zwei Akzentfarben.",
+    "ink_documentary":       "Schwarz-weiße Tusche, dokumentarisch. Hoher Kontrast, viel Negativraum.",
+    "charcoal_noir":         "True Crime / düstere Stoffe. Monochrom mit symbolischem Rot-Akzent.",
+    "stick_minimal":         "Strichmännchen, monochrom. Legacy-Stil — wird nur noch auf explizite Wahl genutzt.",
 }
 
 DEFAULT_PRESET: str = "flat_cartoon_doc"

@@ -138,4 +138,16 @@ def handle(method, path, handler, qs, cid, vid, body):
         handler._send(200, {"ok": True, "brand_color": color})
         return True, None
 
+    if method == "POST" and path == "/api/channels/brand_vibe":
+        import dashboard
+        d = body or {}
+        vibe = (d.get("brand_vibe") or "").strip()
+        chs = dashboard.load_channels()
+        for c in chs:
+            if c["id"] == cid:
+                c["brand_vibe"] = vibe
+        dashboard.save_channels(chs)
+        handler._send(200, {"ok": True, "brand_vibe": vibe})
+        return True, None
+
     return False, None

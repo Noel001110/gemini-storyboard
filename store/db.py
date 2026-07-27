@@ -41,6 +41,18 @@ CREATE TABLE IF NOT EXISTS youtube_oauth (
     youtube_channel_title TEXT
 );
 
+CREATE TABLE IF NOT EXISTS tiktok_oauth (
+    cid TEXT PRIMARY KEY,
+    access_token TEXT NOT NULL,
+    refresh_token TEXT NOT NULL,
+    expires_at REAL NOT NULL,
+    refresh_expires_at REAL NOT NULL,
+    open_id TEXT,
+    creator_avatar_url TEXT,
+    creator_nickname TEXT,
+    obtained_at REAL NOT NULL
+);
+
 -- Nur für Upload — kein Research-Verbraucher (mehr) in diesem System.
 CREATE TABLE IF NOT EXISTS quota_usage (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -116,6 +128,10 @@ def init_db() -> None:
     conn = get_connection()
     with WRITE_LOCK:
         conn.executescript(_SCHEMA)
+        try:
+            conn.execute("ALTER TABLE upload_queue ADD COLUMN platform TEXT NOT NULL DEFAULT 'youtube'")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         conn.commit()
 
 
@@ -195,18 +211,22 @@ def get_uploads_today() -> int:
 
 # ── upload_queue ─────────────────────────────────────────────────────────────────
 def queue_add(cid: str, vid: str, render_target: str, file_path: str, title: str,
-              scheduled_at: float, short_id: str | None = None, description: str = "",
-              tags: list | None = None, category_id: str | None = None) -> int | None:
+              scheduled_at: float, short_id: str | None = None,
+              description: str = "", tags: list[str] | None = None,
+              category_id: str | None = None, platform: str = "youtube") -> int:
+    """Fügt einen neuen Warteschlangen-Eintrag (Status 'queued') hinzu.
+    `render_target` identifiziert die Datei (z.B. 'longform', 'short_vertical',
+    'short_part_1').
+    Rückgabe ist die `queue_id`."""
     conn = get_connection()
-    now = time.time()
     with WRITE_LOCK:
         cur = conn.execute(
             """INSERT INTO upload_queue
-               (cid, vid, render_target, short_id, file_path, title, description, tags,
-                category_id, scheduled_at, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (cid, vid, render_target, short_id, file_path, title, description,
+                tags, category_id, scheduled_at, platform, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (cid, vid, render_target, short_id, file_path, title, description,
-             json.dumps(tags or []), category_id, scheduled_at, now, now),
+             json.dumps(tags or []), category_id, scheduled_at, platform, time.time(), time.time()),
         )
         conn.commit()
         return cur.lastrowid

@@ -199,11 +199,23 @@ def handle(method, path, handler, qs, cid, vid, body):
         except ValueError as e:
             handler._send(400, {"error": str(e)})
             return True, None
-        qid = db.queue_add(cid, vid, render_target, file_path, title, scheduled_at,
-                            description=meta.get("description", ""),
-                            tags=meta.get("tags", []),
-                            category_id=meta.get("category_id"))
-        handler._send(200, {"ok": True, "queue_id": qid})
+        qids = []
+        # Immer für YouTube in die Warteschlange
+        qids.append(db.queue_add(cid, vid, render_target, file_path, title, scheduled_at,
+                                 description=meta.get("description", ""),
+                                 tags=meta.get("tags", []),
+                                 category_id=meta.get("category_id"),
+                                 platform="youtube"))
+        
+        # Falls es sich um einen Short handelt, AUCH für TikTok in die Warteschlange
+        if render_target != "longform":
+            qids.append(db.queue_add(cid, vid, render_target, file_path, title, scheduled_at,
+                                     description=meta.get("description", ""),
+                                     tags=meta.get("tags", []),
+                                     category_id=meta.get("category_id"),
+                                     platform="tiktok"))
+                                     
+        handler._send(200, {"ok": True, "queue_ids": qids})
         return True, None
 
     return False, None

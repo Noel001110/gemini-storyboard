@@ -83,8 +83,13 @@ def handle(method, path, handler, qs, cid, vid, body):
             handler._send(400, {"error": "Kein Skript und kein Thema vorhanden"})
             return True, None
 
+        # Video-Sprache explizit vorgeben statt sie von TITLE_SYSTEM aus full_script
+        # erraten zu lassen -- der Idee-Fallback oben hat keinen eigenen Sprach-
+        # Schalter und wird oft auf Deutsch getippt, auch wenn das Video Englisch
+        # sein soll (siehe generate_titles()-Docstring).
+        lang = dashboard.load_v_script(cid, vid).get("language", "en")
         print("  [Title] Generiere Titel-Optionen …", flush=True)
-        titles = generate_titles(full_script, n=5)
+        titles = generate_titles(full_script, n=5, lang=lang)
         if not titles:
             handler._send(500, {"error": "Titel-Generierung fehlgeschlagen"})
             return True, None

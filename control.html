@@ -127,11 +127,28 @@ async function loadChannels(){
       <input type="text" placeholder="Playlist-ID (optional)" value="${escHtml(ch.playlist_id || '')}"
              style="width:180px" onchange="setPlaylistId('${ch.id}', this.value)">
       ${ch.connected
-        ? `<span class="hint">✓ Verbunden: ${escHtml(ch.youtube_channel_title || '')}</span>
-           <button class="sm ghost" onclick="connectChannel('${ch.id}')" title="Nötig nach neu hinzugefügten OAuth-Scopes (z.B. Untertitel-Upload, Juli 2026) -- ein bestehender Token bekommt einen neuen Scope nicht automatisch">Neu verbinden</button>`
+        ? `<span class="hint">✓ YouTube: ${escHtml(ch.youtube_channel_title || '')}</span>
+           <button class="sm ghost" onclick="connectChannel('${ch.id}')" title="Neu verbinden">Neu verbinden</button>`
         : `<button ${r.oauth_client_configured ? '' : 'disabled'} onclick="connectChannel('${ch.id}')">YouTube verbinden</button>`}
+      ${ch.tiktok_connected
+        ? `<span class="hint" style="margin-left: 8px;">✓ TikTok verbunden</span>
+           <button class="sm ghost" onclick="connectTikTok('${ch.id}')" title="Neu verbinden">Neu verbinden</button>`
+        : `<button onclick="connectTikTok('${ch.id}')" style="margin-left: 8px;">TikTok verbinden</button>`}
     </div>
   `).join('') || '<p class="hint">Keine Kanäle vorhanden.</p>';
+  
+  if(r.channels.some(ch => !ch.tiktok_connected)) {
+      $('channelsList').innerHTML += `
+        <div id="tiktokManualAuth" style="display:none; margin-top:20px; padding:15px; background:var(--bg-dark); border:1px solid var(--border); border-radius:6px;">
+          <h4>TikTok Login abschließen</h4>
+          <p class="hint" style="margin:5px 0 10px 0;">Nach dem Login wurdest du auf <code>example.com</code> umgeleitet. Kopiere die <strong>komplette URL</strong> aus der Adresszeile und füge sie hier ein:</p>
+          <div style="display:flex; gap:10px;">
+            <input type="text" id="tiktokUrlInput" placeholder="https://example.com/?code=...&state=..." style="flex:1;">
+            <button onclick="submitTikTokUrl()">Verknüpfen</button>
+          </div>
+        </div>
+      `;
+  }
 }
 
 // Optionale Playlist-Zuordnung pro Kanal (channels/<cid>/youtube_playlist_id.txt via
@@ -142,6 +159,18 @@ async function setPlaylistId(cid, playlist_id){
 
 function connectChannel(cid){
   window.location.href = `/api/youtube/oauth_start?channel=${encodeURIComponent(cid)}`;
+}
+function connectTikTok(cid){
+  window.open(`/tiktok/oauth/login?channel=${encodeURIComponent(cid)}`, '_blank');
+  $('tiktokManualAuth').style.display = 'block';
+}
+function submitTikTokUrl() {
+  const url = $('tiktokUrlInput').value.trim();
+  if(!url) return;
+  let qPos = url.indexOf('?');
+  if(qPos === -1) { alert("Das sieht nicht nach der Weiterleitungs-URL aus (kein ?code=... enthalten)."); return; }
+  let qs = url.substring(qPos);
+  window.location.href = `/tiktok/oauth/callback${qs}`;
 }
 
 async function loadQuota(){
@@ -166,9 +195,10 @@ async function loadQueue(){
     const editable = q.status === 'queued' || q.status === 'failed';
     return `
       <tr data-id="${q.id}">
-        <td>${escHtml(q.cid)}/${escHtml(q.vid)}</td>
-        <td>${q.render_target === 'longform' ? 'Longform' : 'Short'}</td>
-        <td style="max-width:200px">${escHtml(q.title)}</td>
+        <td style="max-width:200px">
+          ${escHtml(q.title)}
+          <br><button class="sm ghost" style="margin-top:4px" onclick="copyTikTokCaption('${escHtml(q.title)}', this)">📋 Text kopieren</button>
+        </td>
         <td>
           <textarea class="desc" ${editable?'':'disabled'} onchange="updateQueueEntry(${q.id})">${escHtml(q.description||'')}</textarea>
           <input type="text" class="tagsField" ${editable?'':'disabled'} value="${escHtml(tags.join(', '))}" onchange="updateQueueEntry(${q.id})" style="margin-top:4px">
@@ -201,6 +231,23 @@ async function cancelQueueEntry(id){
   if(!confirm('Diesen Upload wirklich abbrechen?')) return;
   await api('/api/control/queue_cancel', 'POST', {id});
   loadQueue();
+}
+
+function copyTikTokCaption(title, btn){
+  const row = btn.closest('tr');
+  const desc = row.querySelector('textarea.desc').value;
+  const tagsStr = row.querySelector('input.tagsField').value;
+  const tags = tagsStr.split(',').map(t => t.trim()).filter(Boolean).map(t => t.startsWith('#') ? t : '#'+t.replace(/\s+/g,''));
+  
+  let fullText = title;
+  if(desc) fullText += '\n\n' + desc;
+  if(tags.length) fullText += '\n\n' + tags.join(' ');
+  
+  navigator.clipboard.writeText(fullText).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = '✓ Kopiert!';
+    setTimeout(() => btn.textContent = orig, 2000);
+  });
 }
 
 async function refreshAll(){

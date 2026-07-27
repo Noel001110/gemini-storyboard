@@ -33,6 +33,11 @@ in dashboard.py — andere Baustelle, nicht Teil dieser Änderung (siehe Umbau-D
 Lazy-Import-Konvention (siehe routes/__init__.py): keine Top-Level-Imports von
 dashboard.py oder anderen engine-Modulen hier — dieses Modul ist absichtlich das
 Blatt der Abhängigkeits-Kette (nichts importiert wieder zurück).
+
+Ausnahme: `engine.upscale` (lazy, innerhalb `_kie_poll_and_download`) — reines
+Utility-Blatt selbst (importiert nur `core.logging`, nichts aus `engine`/
+`dashboard`), kein Zirkel-Risiko. Lokales 4K-Upscaling läuft dort direkt nach
+jedem Bild-Download automatisch mit.
 """
 
 from __future__ import annotations
@@ -241,6 +246,8 @@ def _kie_poll_and_download(task_id: str, out_path: str, *, max_polls: int = 50,
                     open(out_path, "wb").write(img_r.read())
             except Exception as e:
                 return {"ok": False, "file": None, "source_url": urls[0], "error": f"Download fehlgeschlagen: {e}"}
+            from engine.upscale import upscale_image_local_safe
+            upscale_image_local_safe(out_path)
             return {"ok": True, "file": os.path.basename(out_path), "source_url": urls[0], "error": None}
         if state == "fail":
             return {"ok": False, "file": None, "source_url": None,

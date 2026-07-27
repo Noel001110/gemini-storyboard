@@ -179,8 +179,8 @@ def _parts_worker(cid: str, vid: str):
             # vermeidet Datei-/Job-Key-Kollisionen zwischen Parts und dem Klimax-Short,
             # exakt dasselbe Muster wie short_vertical selbst (engine/render.py).
             dashboard.RENDER_TARGETS[target] = dashboard.RenderTarget(
-                name=target, width=1080, height=1920, fps=dashboard.RENDER_FPS,
-                supersample_width=2160, pad_style="blur")
+                name=target, width=2160, height=3840, fps=dashboard.RENDER_FPS,
+                supersample_width=4320, pad_style="blur")
 
             short_scenes = build_short_plan_scenes(part_scenes)
             short_audio_path = os.path.join(uploads_dir, f"{target}_voiceover.wav")
@@ -254,14 +254,8 @@ def _parts_worker(cid: str, vid: str):
 
             with _PARTS_JOBS_LOCK:
                 PARTS_JOBS[key].update(stage="queueing")
-            # Gleicher simpler Default-Termin wie die bestehende Warteschlangen-Brücke
-            # (dashboard.html: updateQueueBridgeVisibility(), +1 Tag) -- User-Entscheidung:
-            # keine eigene Staffelungs-Logik, Zeitpunkte werden später in Control angepasst.
-            scheduled_at = time.time() + 86400
-            qid = db.queue_add(cid, vid, target, final_with_cta_path, part_title,
-                                scheduled_at, short_id=f"part_{n}",
-                                description=part_description, tags=packaging["tags"],
-                                category_id=packaging["category_id"])
+            # Removed auto-queueing of Klimax-Short
+            qid = -1  # Placeholder since we don't queue automatically anymore
             queue_ids.append(qid)
 
             # Progressiv sichtbar machen -- die Datei liegt fertig auf der Platte, sobald
@@ -386,8 +380,8 @@ def _hooks_worker(cid: str, vid: str):
             # Eigener RenderTarget-Name pro Hook-Short (gleiche Maße wie short_vertical) --
             # vermeidet Datei-/Job-Key-Kollisionen, exakt dasselbe Muster wie Parts oben.
             dashboard.RENDER_TARGETS[target] = dashboard.RenderTarget(
-                name=target, width=1080, height=1920, fps=dashboard.RENDER_FPS,
-                supersample_width=2160, pad_style="blur")
+                name=target, width=2160, height=3840, fps=dashboard.RENDER_FPS,
+                supersample_width=4320, pad_style="blur")
 
             for i, sc in enumerate(scenes):
                 sc["i"] = i
@@ -460,11 +454,11 @@ def _hooks_worker(cid: str, vid: str):
             # selben Tag wie Short 1"): day_offset=n-1 -- Short 1 landet auf demselben
             # Anker-Tag wie das Longform (day_offset=0 dort), Short 2 einen Tag später,
             # usw. Siehe next_publish_slot()-Docstring in youtube/upload.py.
-            from youtube.upload import next_publish_slot
-            scheduled_at = next_publish_slot(cid, vid, day_offset=n - 1)
-            qid = db.queue_add(cid, vid, target, final_path, title, scheduled_at,
-                                short_id=f"hook_{n}", description=description,
-                                tags=meta.get("tags") or [], category_id=meta.get("category_id"))
+            # Removed auto-queueing of Hook-Shorts
+            # from youtube.upload import next_publish_slot
+            # scheduled_at = next_publish_slot(cid, vid, day_offset=n - 1)
+            # qid = db.queue_add(...)
+            qid = -1 # Placeholder
             queue_ids.append(qid)
 
             # Progressiv sichtbar -- die Datei liegt fertig, sobald dieser Hook durch

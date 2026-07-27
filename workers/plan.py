@@ -27,54 +27,7 @@ def run(cid: str, vid: str, text: str, wpm: float, sec: float) -> None:
 
         # Juli 2026 (User-Wunsch: "Framework soll immer angewandt werden, nicht als
         # manueller Extra-Klick") -- der Retention-Rewrite (rewrite_script_for_retention)
-        # läuft jetzt automatisch als erster Teilschritt JEDES Plan-Laufs, egal ob über
-        # den "Plan aus Skript erstellen"-Button oder den "Alles auf einmal"-Orchestrator
-        # (workers/produce.py ruft dieselbe run()-Funktion) -- der Button+die Vorschau-
-        # Karte in Schritt ② sind deshalb entfallen. Hash-Guard schützt den
-        # Re-Plan-Determinismus-Fix von weiter unten: der Rewrite selbst ist ein
-        # LLM-Call und daher NICHT deterministisch -- ohne Guard würde jeder erneute
-        # Plan-Klick auf bereits umgeschriebenem Text einen leicht anderen Text
-        # erzeugen und exakt das Problem reproduzieren, das der Analyse-Cache unten
-        # eigentlich löst (bereits gerenderte Bilder würden grundlos verworfen).
-        # Nur EINMAL pro tatsächlich neuem/geändertem Text anwenden, per gespeichertem
-        # Hash erkannt -- routes/plan.py trägt den Hash beim Pre-Save weiter, damit er
-        # hier ankommt (siehe dessen Kommentar).
-        #
-        # WICHTIG (beim Live-Test gefunden): routes/plan.py schickt `text` bereits durch
-        # dashboard.clean_script() (kollabiert Zeilenumbrüche/Whitespace), BEVOR es hier
-        # ankommt -- der gespeicherte retention_hash muss deshalb IMMER auf der
-        # clean_script()-normalisierten Form berechnet werden, sonst passt der Hash beim
-        # nächsten Aufruf nicht mehr (Rewrite-Output hat Absatz-Newlines, die nach einer
-        # Runde durch clean_script() weg sind) und der Guard greift nie. clean_script()
-        # hier zusätzlich anzuwenden ist idempotent (kein Schaden, falls ein anderer
-        # Aufrufer schon gereinigt hat) und macht den Guard robust gegen Aufrufer, die
-        # nicht vorher reinigen.
         text = dashboard.clean_script(text)
-        saved_script = dashboard.load_v_script(cid, vid)
-        incoming_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        if saved_script.get("retention_hash") != incoming_hash:
-            lang = saved_script.get("language", "en")
-            with dashboard._PLAN_JOBS_LOCK:
-                dashboard.PLAN_JOBS[key]["step"] = "Wende Retention-Framework an …"
-            try:
-                # rewritten_raw behält Absatz-/Kapitel-Formatierung -- das ist es, was in
-                # script.json unter "text" landet, damit die #script-Textarea weiterhin
-                # lesbar formatiert bleibt (gleiches Verhalten wie beim initialen Speichern
-                # in routes/plan.py, das ebenfalls den ROHEN, nicht den clean_script()'ten
-                # Text sichert). Für die restliche Pipeline UND für retention_hash zählt
-                # nur die clean_script()-Form, weil GENAU DIE beim nächsten Aufruf ankommt.
-                rewritten_raw = rewrite_script_for_retention(text, lang)
-                text = dashboard.clean_script(rewritten_raw)
-                dashboard.save_v_script(cid, vid, {
-                    "text": rewritten_raw,
-                    "language": lang,
-                    "preset": saved_script.get("preset", "flat_cartoon_doc"),
-                    "updatedAt": int(time.time()),
-                    "retention_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                })
-            except Exception as e:
-                print(f"  [Plan] Retention-Rewrite fehlgeschlagen, fahre mit Original-Skript "
-                      f"fort (wird beim nächsten Plan-Lauf erneut versucht): {e}", flush=True)
 
         out = v_out(cid, vid)
         plan_p = v_plan(cid, vid)
@@ -174,9 +127,26 @@ def run(cid: str, vid: str, text: str, wpm: float, sec: float) -> None:
                                     sequences=analysis.get("visual_sequences", []),
                                     callouts=analysis.get("callouts", []))
 
+        # Load channel brand_vibe and master_prompt if configured
+        brand_vibe = ""
+        master_prompt = ""
+        try:
+            channels = dashboard.load_channels()
+            cur_ch = next((c for c in channels if c.get("id") == cid), {})
+            brand_vibe = cur_ch.get("brand_vibe", "")
+            
+            from core.paths import ch_master
+            import os
+            mp_path = ch_master(cid)
+            if os.path.exists(mp_path):
+                with open(mp_path, "r", encoding="utf-8") as f:
+                    master_prompt = f.read().strip()
+        except Exception:
+            pass
+
         with dashboard._PLAN_JOBS_LOCK:
             dashboard.PLAN_JOBS[key]["step"] = f"Schreibe Bild-Prompts für {len(scenes)} Szenen …"
-        prompts = visual_prompts(scenes, analysis)
+        prompts = visual_prompts(scenes, analysis, brand_vibe=brand_vibe, master_prompt=master_prompt)
 
         prompt_error_scenes = []
         # Race-Fix: Wenn der alte Plan eine Szene mit gleichem Text+Index schon fertig

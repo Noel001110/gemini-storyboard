@@ -454,13 +454,18 @@ def process_one(entry: dict) -> None:
         print(f"  [Upload] Queue #{entry['id']}: Fehler: {e}", flush=True)
 
 
-def worker_loop(poll_interval_sec: float = 60.0) -> None:
+def worker_loop(poll_interval_sec: float = 5.0) -> None:
     """Dauerschleife für den Upload-Worker-Thread (dashboard.py main(), nur gestartet
     wenn youtube.oauth.client_configured())."""
     while True:
         try:
             for entry in db.queue_pending():
-                process_one(entry)
+                if entry.get("platform") == "tiktok":
+                    # Lazy import to avoid circular dependency
+                    from tiktok.upload import process_one as tiktok_process_one
+                    tiktok_process_one(entry)
+                else:
+                    process_one(entry)
         except Exception as e:
             print(f"  [Upload] Worker-Loop-Fehler: {e}", flush=True)
         time.sleep(poll_interval_sec)

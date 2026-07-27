@@ -159,23 +159,9 @@ def _validate_image_prompt_entry(entry: dict, anonymized_words: "set | frozenset
 
 def _image_prompt_chunk(chunk_beats: list, chunk_offset: int, total: int,
                          analysis_ctx: str, chunk_phases: list | None = None,
-                         valid_entity_ids: list | None = None) -> list:
-    """One LLM call for a small chunk of scenes (still images — no story-phase/camera-move
-    logic like video; instead forces explicit character-consistency notes, since stills have
-    no 'last frame of previous clip' anchor to inherit continuity from).
-
-    `valid_entity_ids` (Juli 2026, A1) — Liste bekannter char_-IDs, beschränkt per `enum`
-    NUR `secondary_entity`, NICHT `concrete_entity`. Das ist bewusst asymmetrisch:
-    `secondary_entity` ist strukturell immer entweder eine bekannte Charakter-ID oder
-    leer (siehe Instruktion unten) — dafür ist ein `enum` eine echte, verlustfreie
-    Absicherung. `concrete_entity` dagegen darf laut eigener Instruktion („name the
-    single new concrete thing from the line") auch ein noch nicht katalogisiertes,
-    neues Objekt benennen — ein `enum` würde diese Freiheit kappen und wäre eine
-    Verschlechterung, kein Fix (verifiziert: `enum` ist bei Gemini eine geschlossene
-    Menge ohne Fluchttür-Wert). Format-Chaos bei `concrete_entity` bleibt Aufgabe von
-    `_normalize_concrete_entity` (bereits verifiziert: 59→10 Varianten).
-    """
-    # Lazy-imports: LLM bridge functions live in dashboard.py
+                         valid_entity_ids: list | None = None,
+                         brand_vibe: str | None = None) -> list:
+    """One LLM call for a small chunk of scenes (still images). Accepts optional `brand_vibe`."""
     from dashboard import post_gemini_native
 
     if chunk_phases is None:
@@ -185,11 +171,6 @@ def _image_prompt_chunk(chunk_beats: list, chunk_offset: int, total: int,
         for i, (t, p) in enumerate(zip(chunk_beats, chunk_phases))
     )
 
-    # July 2026 — Gemini responseSchema (passed through KIE.ai). Forces Gemini to
-    # produce output that exactly matches this schema: no missing fields, no
-    # unescaped quotes in user-facing strings, no truncation mid-value. Combined
-    # with thinking_level="low" + maxOutputTokens=16384 in post_gemini_native,
-    # this eliminates the JSON-parse cascade that was eating ~80% of long-script runs.
     _image_chunk_schema = {
         "type": "array",
         "items": {
@@ -198,50 +179,52 @@ def _image_prompt_chunk(chunk_beats: list, chunk_offset: int, total: int,
                 "scene": {"type": "integer"},
                 "core_statement": {"type": "string"},
                 "concrete_entity": {"type": "string"},
-                # Juli 2026 (User-Report, Bilder UI#84/#93: zwei Charaktere im selben Bild,
-                # z.B. Protagonist + Coworker im Restaurant — nur EINE Referenz wurde
-                # angehängt, die zweite Person driftete/wurde neu erfunden). Optional, nur
-                # gefüllt wenn ZWEI Charaktere gemeinsam in der Zeile auftreten. `enum`
-                # NUR hier (siehe Docstring oben, warum concrete_entity keins bekommt):
-                # secondary_entity kann laut Instruktion nur eine bekannte char_-ID oder
-                # leer sein, nie ein neues Objekt — ein enum ist hier verlustfrei sicher.
                 "secondary_entity": (
                     {"type": "string", "enum": valid_entity_ids + [""]}
                     if valid_entity_ids else {"type": "string"}
                 ),
                 "callback_check": {"type": "string"},
+                "forbidden_visuals_check": {"type": "string"},
+                "visual_subversion": {"type": "string"},
                 "character_consistency": {"type": "string"},
                 "line_specific_anchor": {"type": "string"},
+                "visual_spike": {"type": "string"},
                 "image_prompt": {"type": "string", "minLength": 50},
             },
             "required": ["scene", "core_statement", "concrete_entity",
-                         "callback_check", "character_consistency",
-                         "line_specific_anchor", "image_prompt"],
+                         "callback_check", "forbidden_visuals_check",
+                         "visual_subversion", "character_consistency",
+                         "line_specific_anchor", "visual_spike", "image_prompt"],
         },
     }
 
-    instr = f"""\
-You are a storyboard director turning narration into single still images. You receive a
-structural ANALYSIS of the full script and a CHUNK of consecutive narrator lines. Work
-through each line using the forced fields below — do not skip straight to the final prompt.
+    vibe_text = ""
+    if brand_vibe or master_prompt:
+        vibe_text = "\n\nBRAND TONE & AESTHETIC DIRECTIVE:\n"
+        if brand_vibe:
+            vibe_text += f"- VIBE / SOUL: {brand_vibe}\n"
+        if master_prompt:
+            vibe_text += f"- VISUAL MASTER PROMPT (MUST STRICTLY OBEY): {master_prompt}\n"
+        vibe_text += "Enforce this overarching vibe, world-building metaphor, and visual style strictly in every image prompt!"
 
-LINE-SPECIFIC ILLUSTRATION (July 2026, User-Report: "Bilder wirken fast schon generisch"):
-Every image must visually illustrate what the narrator is saying AT THIS MOMENT — not
-what they said earlier, not what they will say next, and not a generic atmosphere that
-could fit any scene. If you can imagine the image appearing in another scene without
-anyone noticing, your image has failed. The single hardest rule of this work is:
-the image is a visual translation of THIS line and nothing else.
+    instr = f"""\
+You are a master visual director turning narration into striking, high-retention still images for a YouTube documentary. You receive a structural ANALYSIS of the full script and a CHUNK of consecutive narrator lines. Work through each line using the forced fields below.
+{vibe_text}
+
+LINE-SPECIFIC ILLUSTRATION & ANTI-GENERIC RULE:
+Every image must visually illustrate what the narrator is saying AT THIS MOMENT — not generic stock atmosphere. If you can imagine the image appearing in another scene without anyone noticing, your image has failed.
+
+METAPHOR + ANCHOR RULE:
+The visual subversion MUST ALWAYS retain the literal anchor object (e.g. if the line mentions money or interest rates, a physical currency symbol, vault door, or glowing ledger MUST remain visible in the scene). The subversion enhances the concept — it must NEVER obscure the core subject matter into unrecognisable abstraction.
 
 ANALYSIS (entities, locations, symbols, emotional arc, callbacks — extracted from the FULL script):
 {analysis_ctx}
 
-PHASE STYLING (Phase C, Juli 2026) — each numbered line below is annotated with its
-narrative phase. Adapt the image style to that phase:
-- OPENING:       slow, deliberate composition; establish setting; neutral color palette; static-feeling even if motion comes later.
-- RISING_ACTION: building tension; tighter framing; movement toward subject; contrast slightly elevated.
-- CLIMAX:        maximum visual impact; high contrast; dynamic angle; subject dominates frame; emotional saturation.
-- RESOLUTION:    wind-down; wider framing; softer palette; contemplative stillness.
-Don't override the LINE'S TEXT — these cues modulate STYLING, not subject matter.
+PHASE STYLING & EMOTIONAL ARC:
+- OPENING:       slow, deliberate composition; establish setting; character shows VULNERABILITY, ISOLATION, or EXHAUSTION (not an all-powerful predator yet!).
+- RISING_ACTION: building tension; tighter framing; character calculating, moving through traps.
+- CLIMAX:        maximum visual impact; high contrast; dynamic angle; character asserting CONTROL/DOMINANCE.
+- RESOLUTION:    wind-down; wider framing; contemplative stillness.
 
 {_IMAGE_PROMPT_FEWSHOT}
 
@@ -249,60 +232,18 @@ For EACH line in the chunk below, produce an object with ALL of these fields, in
 {{
   "scene": N,
   "core_statement": "What is this line actually claiming/showing? One sentence.",
-  "concrete_entity": "EXACTLY ONE entity id from ANALYSIS (locations/characters/recurring_symbols).
-                       FORMAT IS STRICT: a single id, nothing else. NO commas, NO second entity,
-                       NO parenthetical additions, NO age/state suffixes. Write 'char_01', never
-                       'char_01, smartphone', never 'char_01 (older)', never 'char_01_elderly'.
-                       If a PERSON appears in this scene, that person's character id ALWAYS wins
-                       over any object or location — the character id is what pins their face and
-                       outfit to the reference image, and a scene that names an object instead
-                       loses that anchor and gets a re-invented person.
-                       Only when NO person appears: name the single new concrete thing from the
-                       line (place/object/technology). Abstract metaphor ONLY if the line truly
-                       has no concrete referent.",
-  "secondary_entity": "Only if a SECOND character (a different char_ id from ANALYSIS) appears
-                       TOGETHER with the one in concrete_entity in this same scene (e.g. two
-                       people talking, sitting across a table, interacting) — name that second
-                       character's id here, same strict single-id format as concrete_entity.
-                       Leave this field empty ('') if only one character appears.",
-  "callback_check": "Does ANALYSIS.callbacks say this scene references an earlier one? If yes,
-                      name the recurring element that MUST appear in image_prompt. Else 'none'.",
-  "character_consistency": "Since this is a single still with no motion/continuity anchor from
-                             a previous clip, ANCHOR the character's identity. Preserve their FACIAL
-                             identity first — same eyes, nose, face shape — then hair color/style,
-                             then signature outfit and build. Keep hands correct (five fingers).
-                             BUT VARY pose, camera angle, framing, and facial expression per
-                             scene to match THIS line's emotional beat — do NOT repeat the
-                             same pose+expression+composition across scenes even if the
-                             underlying identity description is identical.",
-  "line_specific_anchor": "BEFORE you write image_prompt: list the ONE specific visual element
-                            that makes THIS line different from the lines around it. What would
-                            be wrong or missing if you swapped this image with the previous or
-                            next scene's image? Examples: 'the cracked vial that wasn't there
-                            before' (showing the test failed), 'the crowd turning away from the
-                            founder' (showing rejection), 'a single yellow leaf on otherwise green
-                            branches' (showing decline). If you cannot name one such element,
-                            your scene is too generic — re-read the line and find the visual
-                            detail that ONLY this narration introduces. 1-2 sentences.",
-  "image_prompt": "The final image text. MUST visibly include concrete_entity AND the
-                    callback_check element (if not 'none'). MUST visibly include the
-                    line_specific_anchor — without it the image could belong to ANY scene,
-                    and that is exactly what we are forbidding here. MUST reflect the
-                    IDENTITY ANCHOR of character_consistency (hair, proportions, signature
-                    outfit) but may VARY pose, framing, expression to match the scene —
-                    repeating the same pose+expression across consecutive scenes makes
-                    characters look like the same photo reused. NO art-style words
-                    here (line weight, color palette etc. — that's applied separately from
-                    the master prompt). Must explicitly name: (1) the concrete main subject,
-                    (2) the setting/location, (3) the composition/framing, AND (4) the
-                    line_specific_anchor. A prompt that describes only a generic mood
-                    without these four elements is invalid. Minimum {IMAGE_PROMPT_MIN_LEN} characters."
+  "concrete_entity": "EXACTLY ONE entity id from ANALYSIS. Single id format (e.g. 'char_01').",
+  "secondary_entity": "Second character id if two characters interact in this scene, else ''.",
+  "callback_check": "Recurring element from ANALYSIS.callbacks, or 'none'.",
+  "forbidden_visuals_check": "Identify the top 1-2 stock clichés for this topic (e.g., piggy bank, generic handshake, smiling suit man, rising green line) and FORBID them explicitly.",
+  "visual_subversion": "Identify the cliché (e.g., a piggy bank). FORBID IT. Instead, create a brutal metaphor strictly using the anatomy/rules of the VISUAL MASTER PROMPT (e.g. if the style is stick-figure, show the character violently welding a black-line cage). Make the POSES extreme.",
+  "character_consistency": "Maintain facial identity anchor. Reflect EMOTIONAL ARC (vulnerable/exhausted early on vs calculating/predatory later).",
+  "line_specific_anchor": "The ONE specific visual detail that ONLY this narration introduces. 1-2 sentences.",
+  "visual_spike": "If this scene is at a major transition (e.g. ~30%, ~60%, ~90% or CLIMAX), specify a RADICAL CAMERA/Framing BREAK (e.g. 'Extreme low-angle macro view', 'Tactical blueprint overlay look', 'High-contrast silhouette spike') to break visual monotony. Else 'standard'.",
+  "image_prompt": "The final image text. MUST describe a physical interaction using the exact anatomy defined in the VISUAL MASTER PROMPT. Rules: (1) Use ACTION VERBS ('slamming', 'shielding', 'tethering'). (2) Anchor objects must match the style (e.g. flat outlined icon if minimalist). (3) VISUAL SPIKE: If this is a spike scene, request a Radical Framing Change (e.g. extreme close-up of a hand crushing gears). (4) NO art-style words (colors, camera types - these are applied by the master prompt). Minimum {IMAGE_PROMPT_MIN_LEN} characters."
 }}
 
-HARD RULE: if a line names a concrete person, place, or technology, image_prompt MUST show
-exactly that — check this yourself against your own concrete_entity field before writing it.
-
-SENSITIVE content (violence/death/abuse/trafficking): tasteful symbolism only, never graphic.
+HARD RULE: image_prompt MUST describe action, setting, and concrete objects. No generic mood words alone.
 
 NARRATOR LINES IN THIS CHUNK:
 {numbered}
@@ -375,20 +316,10 @@ def _image_prompt_single_retry(beat_text: str, beat_i: int, total: int, analysis
     }
 
 
-def visual_prompts(scenes, analysis=None):
+def visual_prompts(scenes, analysis=None, brand_vibe: str | None = None):
     """Generate all still-image prompts, chunked (not all-in-one) with forced intermediate
-    reasoning fields and a validation+retry pass — same structure as video_prompts_batch(),
-    adapted for stills (no story-phase/camera-move logic, explicit character-consistency
-    field instead since there's no chain-extend anchor between separate images).
-
-    Returns list of {"prompt": str, "concrete_entity": str} dicts, one per scene, same
-    order as scenes. concrete_entity is already computed per entry for validation
-    purposes below — it used to be discarded after that; now it's returned too so
-    callers can persist it onto the scene (used for conditional character-reference
-    attachment, see _batch_generate_worker). Style (master prompt) is NOT included in
-    the prompt text — it's appended separately in _build_image_prompt().
+    reasoning fields, brand_vibe tone directive, visual subversion, and visual spikes.
     """
-    # Lazy-imports: analyze_script lives in dashboard.py
     from dashboard import analyze_script
 
     beats = [s["text"] for s in scenes]
@@ -401,29 +332,17 @@ def visual_prompts(scenes, analysis=None):
         analysis = analyze_script(beats)
     analysis_ctx = json.dumps(analysis, ensure_ascii=False, indent=1) if analysis else "{}"
     anon_words = _anonymized_words(analysis)
-    # A1: bekannte Charakter-IDs für den secondary_entity-enum (siehe _image_prompt_chunk-
-    # Docstring, warum NUR secondary_entity und nicht concrete_entity ein enum bekommt).
     char_ids = [str(c["id"]) for c in (analysis or {}).get("characters", []) if c.get("id")]
 
     def _fetch_image_chunk(chunk, chunk_offset, chunk_phases=None):
-        """Try the chunk; on failure (incl. truncated/malformed JSON on large chunks),
-        split in half and retry each half instead of giving up the whole chunk to the
-        generic fallback — a truncation only costs half the chunk, not all of it.
-
-        Juli 2026: at the leaf (chunk size 1, can't split further) this used to give up
-        after a single failed attempt — same "either it works or the scene silently gets
-        a near-empty placeholder prompt" problem as _image_prompt_single_retry. Now
-        retries 3x at the leaf before falling back, and the fallback is marked
-        prompt_error=True so it's never mistaken for a normal, fully-formed prompt.
-        """
         try:
-            return _image_prompt_chunk(chunk, chunk_offset, total, analysis_ctx, chunk_phases, char_ids)
+            return _image_prompt_chunk(chunk, chunk_offset, total, analysis_ctx, chunk_phases, char_ids, brand_vibe)
         except Exception as e:
             if len(chunk) <= 1:
                 last_err = e
                 for attempt in range(2, 4):
                     try:
-                        return _image_prompt_chunk(chunk, chunk_offset, total, analysis_ctx, chunk_phases, char_ids)
+                        return _image_prompt_chunk(chunk, chunk_offset, total, analysis_ctx, chunk_phases, char_ids, brand_vibe)
                     except Exception as e2:
                         last_err = e2
                         print(f"  [Plan] Bild-Chunk-Fehler (Szene {chunk_offset}) Versuch {attempt}/3: {e2}", flush=True)
@@ -1068,14 +987,33 @@ RULES:
   a hard constraint, not a suggestion)
 - Every claim in the title must be directly supported by the script content given
 - No emoji, no ALL CAPS spam, no exclamation-mark stacking
-- Return options in the exact language the script is written in
+- Return options in the language explicitly specified in the user message, not
+  whatever language the script happens to be written in (the script argument is
+  sometimes a rough, differently-languaged idea/fallback text, not necessarily the
+  video's actual output language)
 """
 
 
-def generate_titles(full_script: str, n: int = 5) -> list:
-    """Generate N candidate clickbait-but-honest titles from the full script."""
+def generate_titles(full_script: str, n: int = 5, lang: str = "en") -> list:
+    """Generate N candidate clickbait-but-honest titles from the full script.
+
+    Juli 2026 (User-Report "warum werden deutsche Titel generiert, obwohl alles
+    andere Englisch ist"): TITLE_SYSTEM ließ das Modell die Sprache aus full_script
+    selbst erraten -- und /api/generate_titles fällt auf meta["idea"] zurück,
+    solange noch kein Plan existiert. Die Idee-Box hat keinen Sprach-Schalter, wird
+    also oft auf Deutsch getippt, obwohl das eigentliche Skript/Video Englisch sein
+    soll -- das Modell "erbte" dann die Sprache des Fallback-Texts. Jetzt wie
+    generate_script()/rewrite_script_for_retention(): expliziter lang-Parameter
+    statt Sprache aus dem Input zu erraten.
+    """
     from dashboard import post_gemini_native  # lazy
+    lang_instr = (
+        "Write the titles in German (natural spoken German, not formal)."
+        if lang == "de"
+        else "Write the titles in English (clear, neutral international English)."
+    )
     user_msg = (
+        f"{lang_instr}\n\n"
         f"Generate {n} distinct YouTube title options for this script, using the "
         f"formulas above. Return ONLY a JSON array of {n} strings, nothing else.\n\n"
         f"SCRIPT:\n{full_script.strip()[:6000]}"
@@ -1084,7 +1022,7 @@ def generate_titles(full_script: str, n: int = 5) -> list:
         txt = post_gemini_native([
             {"role": "system", "content": TITLE_SYSTEM},
             {"role": "user", "content": user_msg},
-        ], json_mode=True, temp=0.9)
+        ], json_mode=True, temp=0.9, thinking_level="low")
         arr = json.loads(txt)
         if isinstance(arr, dict):
             for v in arr.values():
@@ -1196,7 +1134,7 @@ def generate_short_scripts(full_script: str, chosen_title: str, n: int = 5,
         txt = post_gemini_native([
             {"role": "system", "content": SHORTS_SCRIPT_SYSTEM},
             {"role": "user", "content": user_msg},
-        ], json_mode=True, temp=0.9, response_schema=schema)
+        ], json_mode=True, temp=0.9, response_schema=schema, thinking_level="low")
         arr = json.loads(txt)
         if isinstance(arr, list):
             return arr[:n]
@@ -1391,16 +1329,24 @@ word or short phrase. PREFER the video's concrete dollar amount or percentage as
 when it reads well large (e.g. "$1,042,000"), since a specific figure outperforms a vague
 verdict word. Examples of the RIGHT length/energy: "$1,000,000?!", "HE QUIT", "BROKE".
 Return ONLY the text itself, no quotes, no punctuation beyond what belongs in the phrase
-itself.
+itself, in the language explicitly specified in the user message (not necessarily the
+language of the SCRIPT text given below, which may be a differently-languaged fallback).
 """
 
 
-def make_thumbnail_text(full_script: str, chosen_title: str) -> str:
+def make_thumbnail_text(full_script: str, chosen_title: str, lang: str = "en") -> str:
     """Kurzer (2-4 Wörter), provokanter Text fürs Thumbnail-Kompositing (siehe
     composite_thumbnail_text) -- getrennt von make_thumbnail_prompt (Bild) und
-    generate_titles (Videotitel), aber dasselbe post_gemini_native-Muster."""
+    generate_titles (Videotitel), aber dasselbe post_gemini_native-Muster.
+
+    Juli 2026 (gleicher Sprach-Bug wie generate_titles(), siehe dessen Docstring):
+    THUMBNAIL_TEXT_SYSTEM ließ die Sprache bisher aus full_script erraten, das ohne
+    Plan auf die (oft deutsch getippte) Idee zurückfällt. Expliziter lang-Parameter
+    statt Raten."""
     from dashboard import post_gemini_native  # lazy
-    user_msg = f"TITLE: {chosen_title}\n\nSCRIPT:\n{full_script.strip()[:3000]}"
+    lang_instr = ("Write the text in German." if lang == "de"
+                  else "Write the text in English.")
+    user_msg = f"{lang_instr}\n\nTITLE: {chosen_title}\n\nSCRIPT:\n{full_script.strip()[:3000]}"
     try:
         text = post_gemini_native([
             {"role": "system", "content": THUMBNAIL_TEXT_SYSTEM},
