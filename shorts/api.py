@@ -361,6 +361,17 @@ def _hooks_worker(cid: str, vid: str):
         os.makedirs(uploads_dir, exist_ok=True)
         os.makedirs(out_dir, exist_ok=True)
 
+        # Juli 2026 Fix: die Hook-Nummerierung fing bisher IMMER bei 1 an (reines
+        # enumerate(scripts, start=1) über den gerade bestätigten Batch) -- ein zweiter
+        # Lauf auf demselben Video hätte short_hook_1.. also stillschweigend die bereits
+        # gerenderten (teils schon real hochgeladenen!) Hook-Shorts überschrieben. Start
+        # jetzt bei der höchsten bereits vorhandenen Hook-Nummer + 1, ermittelt aus den
+        # tatsächlich existierenden {target}_plan.json-Dateien -- rein additiv, ändert am
+        # Verhalten für den allerersten Batch eines Videos (keine vorhandenen Hooks) nichts.
+        existing_hook_nums = [int(m.group(1)) for f in os.listdir(out_dir)
+                               if (m := re.match(r"short_hook_(\d+)_plan\.json$", f))]
+        start_n = max(existing_hook_nums, default=0) + 1
+
         # Fallback-Bildstil für den seltenen Ausnahmefall, dass weder LLM-Zuordnung noch
         # Keyword-Overlap ein Longform-Bild finden (gleiches Muster wie
         # _thumbnail_generate_worker: Video-Modus entscheidet, welcher Master gilt).
@@ -372,7 +383,7 @@ def _hooks_worker(cid: str, vid: str):
             master_style = dashboard.VIDEO_MASTER_DEFAULT
 
         queue_ids = []
-        for n, (script, scenes, files) in enumerate(zip(scripts, all_scenes, assignments), start=1):
+        for n, (script, scenes, files) in enumerate(zip(scripts, all_scenes, assignments), start=start_n):
             target = f"short_hook_{n}"
             with _HOOKS_JOBS_LOCK:
                 HOOKS_JOBS[key].update(current_hook=n, stage="bilder")

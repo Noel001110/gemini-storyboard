@@ -20,6 +20,7 @@ from core.paths import (  # noqa: F401
     HERE, CHANNELS_DIR, CHANNELS_FILE, SHORTS_EXPORT_DIR,
     ch_dir, ch_master, ch_vid_master, ch_sheets, ch_videos_file,
     ch_voice_id, ch_voice_settings, ch_youtube_playlist_id,
+    ch_brand_vibe, ch_brand_color,
     v_dir, v_out, v_plan, v_uploads, v_audio, v_meta, v_script, v_render_tmp,
     shorts_export_dir,
 )

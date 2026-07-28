@@ -61,6 +61,14 @@ def ch_youtube_playlist_id(cid: str) -> str:
     return os.path.join(ch_dir(cid), "youtube_playlist_id.txt")
 
 
+def ch_brand_vibe(cid: str) -> str:
+    return os.path.join(ch_dir(cid), "brand_vibe.txt")
+
+
+def ch_brand_color(cid: str) -> str:
+    return os.path.join(ch_dir(cid), "brand_color.txt")
+
+
 # ── Per-video path helpers (one video = one script/plan/generated set) ────────
 def v_dir(cid: str, vid: str) -> str:
     return os.path.join(ch_dir(cid), "videos", vid)

@@ -21,7 +21,7 @@ import re
 import shutil
 import time
 
-from core.paths import v_dir
+from core.paths import ch_brand_color, ch_brand_vibe, ch_dir, v_dir
 
 
 def handle(method, path, handler, qs, cid, vid, body):
@@ -37,6 +37,23 @@ def handle(method, path, handler, qs, cid, vid, body):
                 if os.path.exists(os.path.join(v_dir(ch["id"], v["id"]), "generated", "plan.json"))
                 or os.path.exists(os.path.join(v_dir(ch["id"], v["id"]), "uploads", "voiceover.mp3"))
             )
+            # Juli 2026 (Incident: channels.json wurde versehentlich auf einen alten
+            # Stand zurückgesetzt, brand_vibe/brand_color gingen dabei verloren, weil sie
+            # NUR in channels.json standen, keine Zweitkopie). Selbstheilung: fehlt das
+            # Feld in channels.json, aber die eigene Kanal-Datei (channels/<cid>/
+            # brand_vibe.txt bzw. brand_color.txt, siehe /api/channels/brand_vibe|color
+            # unten) existiert, wird von dort nachgeladen -- diese Dateien liegen INNERHALB
+            # des Kanal-Ordners und sind von einem channels.json-Reset nie betroffen.
+            if not ch.get("brand_vibe"):
+                try:
+                    ch["brand_vibe"] = open(ch_brand_vibe(ch["id"])).read().strip()
+                except OSError:
+                    pass
+            if not ch.get("brand_color"):
+                try:
+                    ch["brand_color"] = open(ch_brand_color(ch["id"])).read().strip()
+                except OSError:
+                    pass
         handler._send(200, {"channels": chs})
         return True, None
 
@@ -106,6 +123,13 @@ def handle(method, path, handler, qs, cid, vid, body):
             handler._send(400, {"error": "Letzter Kanal kann nicht gelöscht werden."})
             return True, None
         dashboard.save_channels([c for c in chs if c["id"] != cid])
+        # Juli 2026 (User-Report: "gelöschte" Kanäle kamen mit allen Daten zurück,
+        # weil Löschen bisher NUR den channels.json-Eintrag entfernte, der Ordner
+        # channels/<cid>/ blieb für immer auf der Platte liegen -- inkonsistent mit
+        # /api/videos/delete oben, das seinen Ordner sehr wohl löscht). Kanal-Löschen
+        # löscht jetzt genauso wirklich: der Klick ist damit endgültig/unumkehrbar,
+        # exakt wie beim bestehenden Video-Löschen.
+        shutil.rmtree(ch_dir(cid), ignore_errors=True)
         handler._send(200, {"ok": True})
         return True, None
 
@@ -135,6 +159,10 @@ def handle(method, path, handler, qs, cid, vid, body):
             if c["id"] == cid:
                 c["brand_color"] = color
         dashboard.save_channels(chs)
+        # Juli 2026 (siehe GET /api/channels oben für die Begründung): Zweitkopie
+        # innerhalb des Kanal-Ordners, übersteht einen channels.json-Reset.
+        with open(ch_brand_color(cid), "w") as f:
+            f.write(color)
         handler._send(200, {"ok": True, "brand_color": color})
         return True, None
 
@@ -147,6 +175,10 @@ def handle(method, path, handler, qs, cid, vid, body):
             if c["id"] == cid:
                 c["brand_vibe"] = vibe
         dashboard.save_channels(chs)
+        # Juli 2026 (siehe GET /api/channels oben für die Begründung): Zweitkopie
+        # innerhalb des Kanal-Ordners, übersteht einen channels.json-Reset.
+        with open(ch_brand_vibe(cid), "w") as f:
+            f.write(vibe)
         handler._send(200, {"ok": True, "brand_vibe": vibe})
         return True, None
 
