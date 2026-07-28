@@ -547,10 +547,14 @@ def t_render_worker_calls_strip_before_alignment():
     """Source-check: der Alignment-Block in _render_worker muss _strip_pause_tokens
     VOR _compute_pause_trims/align_scenes_to_whisper aufrufen."""
     # Refactor Phase 3: _render_worker lebt jetzt in workers/render.py.
+    # Juli 2026 (Shorts-Pausen-Cap): _compute_pause_trims bekommt jetzt ein
+    # target-abhängiges max_pause (0.15s Shorts / dashboard.MAX_PAUSE_SEC Longform)
+    # statt des alten, fest impliziten Defaults -- Aufruf-Text entsprechend angepasst,
+    # die eigentliche Testaussage (strip läuft VOR trim) bleibt unverändert.
     src = open(os.path.join(ROOT, "workers", "render.py")).read()
-    idx = src.find("trims = dashboard._compute_pause_trims(whisper_words)")
+    idx = src.find("trims = dashboard._compute_pause_trims(whisper_words, max_pause=pause_cap)")
     assert idx != -1
-    window = src[max(0, idx - 700):idx]
+    window = src[max(0, idx - 1200):idx]
     assert "dashboard._strip_pause_tokens(whisper_words)" in window, \
         "Strip-Fix fehlt: _strip_pause_tokens muss vor _compute_pause_trims laufen"
 
@@ -995,23 +999,30 @@ def t_title_card_scenes_render_like_normal_scenes():
 # --- Nachjustierung Juli 2026: reine Sprecherspur + saubere Ken-Burns-Motion ----
 
 def t_no_sound_design_layer_render_worker_uses_raw_voice():
-    """Source-check: der User will künftig NUR die Sprecherspur im Render, Musik/SFX
-    legt er selbst extern drüber. _render_worker darf _build_final_audio nicht mehr
-    AUFRUFEN (ein erklärender Kommentar darf die Funktion weiter beim Namen nennen)
-    -- _mux_audio muss direkt mit audio_path gefüttert werden."""
+    """Source-check: für LONGFORM will der User weiterhin NUR die rohe Sprecherspur im
+    Render, Musik/SFX legt er dort selbst extern drüber -- _render_worker darf
+    _build_final_audio nicht mehr AUFRUFEN (ein erklärender Kommentar darf die Funktion
+    weiter beim Namen nennen). Juli 2026 (Shorts-SFX-System): für Shorts (target !=
+    "longform") ist das bewusst NICHT mehr wahr -- dort läuft jetzt gezielt
+    analyze_short_for_sfx()+_place_sfx() vor dem Mux, siehe eigene Verify-Schritte dafür.
+    Dieser Test prüft nur noch: (a) _build_final_audio bleibt komplett ungenutzt, (b) die
+    neue SFX-Schicht ist hinter einem target!="longform"-Gate versteckt, (c) der
+    finale _mux_audio-Call bekommt weiterhin audio_path (roh für Longform, ggf. auf die
+    SFX-Spur umgebogen für Shorts -- siehe Gate davor)."""
     # Refactor Phase 3: _render_worker lebt jetzt in workers/render.py.
     src = open(os.path.join(ROOT, "workers", "render.py")).read()
     # final_path wird seit der Shorts-Erweiterung (RenderTarget) über einen
     # target-abhängigen Dateinamen gebaut (final.mp4 nur noch für target=="longform"),
-    # statt der vorher hartkodierten Konstante -- der eigentliche Testzweck (keine
-    # Sound-Design-Kette, _mux_audio bekommt audio_path direkt) bleibt unverändert.
+    # statt der vorher hartkodierten Konstante.
     idx = src.find('final_name = "final.mp4" if target == "longform"')
     assert idx != -1
-    body = src[idx:idx + 900]
+    body = src[idx:idx + 1800]
     assert "_build_final_audio(" not in body, \
-        "_render_worker darf die Sound-Design-Kette nicht mehr AUFRUFEN"
+        "_render_worker darf die alte Sound-Design-Kette nicht mehr AUFRUFEN"
+    assert 'if target != "longform":\n            sfx_events = analyze_short_for_sfx(' in body, \
+        "Shorts-SFX-Schicht muss hinter einem target!=\"longform\"-Gate stehen (Longform bleibt roh)"
     assert '_mux_audio(silent_path, audio_path, final_path)' in body, \
-        "_mux_audio muss direkt die rohe (pausen-gekürzte) Sprecherspur bekommen"
+        "_mux_audio muss weiterhin audio_path bekommen (roh für Longform, SFX-Spur für Shorts)"
 
 
 def t_motion_library_has_no_combined_zoom_and_pan_recipes():

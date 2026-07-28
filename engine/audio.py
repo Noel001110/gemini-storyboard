@@ -236,12 +236,18 @@ def _sfx_duration_sec(path: str) -> float:
     return dur
 
 
-def _select_sfx_variant(category: str, seed: int) -> str | None:
+def _select_sfx_variant(category: str, seed: int, library: dict[str, list] | None = None) -> str | None:
     """Deterministische Varianten-Auswahl innerhalb einer SFX-Kategorie (rotiert über
     `seed % len(variants)` — gleiches Muster wie _select_bed_for_block/_motion_for_scene,
     kein Zufall). Fällt auf SFX_FILES[category] zurück, falls SFX_LIBRARY die Kategorie
-    nicht kennt oder keine ihrer Dateien existiert."""
-    variants = [p for p in SFX_LIBRARY.get(category, []) if os.path.exists(p)]
+    nicht kennt oder keine ihrer Dateien existiert.
+
+    `library` (Juli 2026, Shorts-SFX-System): optionale Override-Bibliothek statt des
+    Modul-globalen `SFX_LIBRARY` -- engine.shorts_sfx_analyzer übergibt hier die dynamisch
+    aus Sounds/* gescannte Kategorie-Liste (engine.sfx_library.discover_categories()),
+    ohne das globale SFX_LIBRARY anzufassen. `None` (Default) verhält sich exakt wie vorher."""
+    lib = library if library is not None else SFX_LIBRARY
+    variants = [p for p in lib.get(category, []) if os.path.exists(p)]
     if variants:
         return variants[seed % len(variants)]
     fallback = SFX_FILES.get(category)
@@ -380,7 +386,13 @@ def _duck_music_under_voice(voice_path: str, music_path: str, out_path: str) -> 
 
 # ── SFX-Placement ────────────────────────────────────────────────────────────
 
-def _place_sfx(narration_path: str, sfx_events: list, out_path: str) -> None:
+_VOICE_DUCK_AT_SFX_FACTOR = 0.63   # ~-4dB, Mitte der User-Vorgabe "3-5dB absenken"
+_VOICE_DUCK_AT_SFX_LEAD_SEC = 0.05  # Duck beginnt kurz VOR dem SFX-Treffer
+_VOICE_DUCK_AT_SFX_DUR_SEC = 0.35   # kurzes Fenster, "danach sofort wieder anheben"
+
+
+def _place_sfx(narration_path: str, sfx_events: list, out_path: str,
+                library: dict[str, list] | None = None) -> None:
     """Layers SFX files onto the (already ducked) narration track at specific
     timestamps via adelay, then amix + loudnorm for one consistent final loudness.
     Silently skips any event whose asset file doesn't exist — a missing single SFX
@@ -392,11 +404,22 @@ def _place_sfx(narration_path: str, sfx_events: list, out_path: str) -> None:
     the narration (already carrying the ducked music) gets divided down by the input
     count too. The final `loudnorm` is parameterized to FINAL_TARGET_LUFS (YouTube
     streaming target) instead of ffmpeg's un-parameterized default (-24 LUFS broadcast).
+
+    `library` (Juli 2026, Shorts-SFX-System): siehe _select_sfx_variant -- optionale
+    dynamische Kategorie-Bibliothek statt des Modul-globalen SFX_LIBRARY, `None` verhält
+    sich wie vorher.
+
+    `ev.get("duck_voice")` (Juli 2026, Shorts-SFX-System, Review-Ergänzung): nur für als
+    "laut" markierte Kategorien gesetzt (siehe engine.sfx_library) -- senkt die Stimme
+    kurz um ~4dB genau am SFX-Treffer und hebt sie danach sofort wieder an. Bewusst NICHT
+    für subtile Kategorien (Plop/Bing) gesetzt, sonst riskiert man Verständlichkeit (z.B.
+    eine genannte Summe) bei einem Finanz-Kanal, der davon lebt.
     """
     inputs = ["-i", narration_path]
     filter_parts, labels = [], []
+    duck_windows = []
     for ev in sfx_events:
-        sfx_path = _select_sfx_variant(ev["sfx"], ev.get("seed", 0))
+        sfx_path = _select_sfx_variant(ev["sfx"], ev.get("seed", 0), library=library)
         if not sfx_path or not os.path.exists(sfx_path):
             continue
         inputs += ["-i", sfx_path]
@@ -410,13 +433,26 @@ def _place_sfx(narration_path: str, sfx_events: list, out_path: str) -> None:
         trim = f"atrim=0:{RISER_RUNUP_CAP_SEC}," if ev["sfx"] == "riser" else ""
         filter_parts.append(f"[{len(labels)+1}:a]{trim}adelay={delay_ms}|{delay_ms},volume={vol}[{label}]")
         labels.append(label)
+        if ev.get("duck_voice"):
+            t0 = max(0.0, ev["start"] - _VOICE_DUCK_AT_SFX_LEAD_SEC)
+            t1 = ev["start"] + _VOICE_DUCK_AT_SFX_DUR_SEC
+            duck_windows.append((t0, t1))
 
     loudnorm = f"loudnorm=I={FINAL_TARGET_LUFS}:TP={FINAL_TARGET_TRUE_PEAK_DB}:LRA={FINAL_TARGET_LRA}"
     if not labels:
         # Nothing to place — just loudnorm-normalize the narration/music mix alone.
         cmd = ["ffmpeg", "-y", "-i", narration_path, "-af", loudnorm, out_path]
     else:
-        mix_inputs = "[0:a]" + "".join(f"[{l}]" for l in labels)
+        if duck_windows:
+            duck_expr = ",".join(
+                f"volume={_VOICE_DUCK_AT_SFX_FACTOR}:enable='between(t,{t0:.3f},{t1:.3f})'"
+                for t0, t1 in duck_windows
+            )
+            filter_parts.insert(0, f"[0:a]{duck_expr}[voice_ducked]")
+            narration_label = "[voice_ducked]"
+        else:
+            narration_label = "[0:a]"
+        mix_inputs = narration_label + "".join(f"[{l}]" for l in labels)
         filter_complex = (";".join(filter_parts) +
                            f";{mix_inputs}amix=inputs={len(labels)+1}:duration=first:normalize=0,{loudnorm}[a]")
         cmd = ["ffmpeg", "-y", *inputs, "-filter_complex", filter_complex, "-map", "[a]", out_path]

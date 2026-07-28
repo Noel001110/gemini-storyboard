@@ -242,8 +242,13 @@ class _TransitionRecipe(TypedDict):
 
 
 TRANSITION_LIBRARY: dict[str, _TransitionRecipe] = {
+    # Juli 2026 (Shorts-SFX-System, engine/shorts_sfx_analyzer.py): fade["sfx"] war
+    # bisher None (kein SFX-System hatte je live einen Aufrufer, siehe workers/render.py
+    # -- die Musik/SFX-Pipeline war komplett abgeschaltet). Jetzt "plop": sanfte
+    # Übergänge bekommen einen sanften Sound statt Stille, dieselbe deterministische
+    # Basis-Schicht wie "whoosh" bei wipe/smooth.
     "fade":   {"types": ["fade", "dissolve"],
-               "sfx": None,     "duration": 0.8},
+               "sfx": "plop",   "duration": 0.8},
     "wipe":   {"types": ["wipeleft", "wiperight", "wipeup", "wipedown"],
                "sfx": "whoosh", "duration": 0.3},
     "smooth": {"types": ["smoothleft", "smoothright", "smoothup", "smoothdown"],

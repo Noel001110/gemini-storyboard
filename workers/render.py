@@ -12,6 +12,7 @@ import traceback
 
 from core.logging import log_event as _log
 from core.paths import v_audio, v_out, v_plan, v_render_tmp, v_uploads
+from engine.audio import _place_sfx
 from engine.render import (
     RENDER_FPS,
     RENDER_TARGETS,
@@ -25,6 +26,7 @@ from engine.render import (
     _render_selfcheck,
     _transition_for_scene,
 )
+from engine.shorts_sfx_analyzer import analyze_short_for_sfx
 
 
 def run(cid: str, vid: str, target: str = "longform") -> None:
@@ -131,7 +133,14 @@ def run(cid: str, vid: str, target: str = "longform") -> None:
                           f"{n_before_strip - len(whisper_words)} Pausen-Marker-Token(s) vor "
                           f"Alignment entfernt ({n_before_strip} → {len(whisper_words)} Wörter).",
                           flush=True)
-                trims = dashboard._compute_pause_trims(whisper_words)
+                # Juli 2026 (User-Wunsch "so schnell wie möglich geschnitten"): Shorts
+                # bekommen einen deutlich engeren Pausen-Cap als der Longform-Default
+                # (dashboard.MAX_PAUSE_SEC=0.3s) -- 0.15s statt 0.3s, lässt noch genug
+                # Raum für PAUSE_GUARD_SEC (0.04s), damit kein Wort abgeschnitten wird,
+                # kürzt aber jede spürbare Sprechpause fast komplett weg. Longform bleibt
+                # exakt beim bisherigen Default (kein Scope-Creep in den Haupt-Videotyp).
+                pause_cap = dashboard.MAX_PAUSE_SEC if target == "longform" else 0.15
+                trims = dashboard._compute_pause_trims(whisper_words, max_pause=pause_cap)
                 dashboard._trim_audio_pauses(audio_path, trims, trimmed_audio_path)
                 adjusted_words = dashboard._adjust_words_for_trims(whisper_words, trims)
                 dashboard.align_scenes_to_whisper(scenes, adjusted_words)
@@ -208,11 +217,24 @@ def run(cid: str, vid: str, target: str = "longform") -> None:
         # der zweite Loop unten (Crossfade-Merge) dieselbe Position ohne O(n)-.index()
         # nachschlagen kann.
         transition_seq_idx_by_scene_idx = {idx: pos for pos, idx in enumerate(transition_at)}
+        # Juli 2026 (Shorts-SFX-System, engine/shorts_sfx_analyzer.py): `sfx` kam hier
+        # bisher als `_sfx` unter dem Tisch -- TRANSITION_LIBRARY ordnet jeder
+        # Übergangsfamilie längst ein SFX zu (fade->plop, wipe/smooth->woosh), das war
+        # nur nie verdrahtet. Der Schnittpunkt sitzt exakt bei scenes[idx]["start_aligned"]
+        # (gleiche Regel wie _has_transition_before-Doku: Bild-Übergang und SFX auf
+        # demselben Schnitt) -- fehlt der Wert (kein Alignment gelungen), wird der
+        # Übergang stumm gelassen statt zu raten. Nur für Shorts gesammelt, Longform
+        # bleibt beim bisherigen reinen Stimmen-Mux (siehe unten).
+        transition_sfx_events = []
         for idx in transition_at:
             prev = scenes[idx - 1]
-            _ttype, _sfx, t_duration = _transition_for_scene(scenes[idx], transition_seq_idx_by_scene_idx[idx])
+            _ttype, sfx, t_duration = _transition_for_scene(scenes[idx], transition_seq_idx_by_scene_idx[idx])
             transition_frames = round(t_duration * RENDER_FPS)
             prev["_frames"] = (prev.get("_frames") or round(prev["dur"] * RENDER_FPS)) + transition_frames
+            if target != "longform" and sfx:
+                start = scenes[idx].get("start_aligned")
+                if start is not None:
+                    transition_sfx_events.append({"start": start, "sfx": sfx})
 
         overlay_opts = dashboard.get_video_overlay_opts(cid, vid)
         stage("clips", 0, len(scenes))
@@ -259,13 +281,27 @@ def run(cid: str, vid: str, target: str = "longform") -> None:
         # bestehende Longform-final.mp4 desselben Videos überschreibt.
         final_name = "final.mp4" if target == "longform" else f"final_{target}.mp4"
         final_path = os.path.join(v_out(cid, vid), final_name)
-        # User-Entscheidung Juli 2026: keine Musik/SFX mehr im Render -- der User legt
-        # Soundeffekte künftig selbst extern über die fertige Sprecherspur. Nur noch die
-        # bereits pausen-gekürzte Sprecherspur (audio_path) wird gemuxt, unverändert.
-        # engine/audio.py (_build_final_audio + Sound-Design-Kette aus Schritt 1+2)
-        # bleibt im Repo erhalten (getestet, reaktivierbar), wird hier nur nicht mehr
-        # aufgerufen. Die frame-genaue Sync-Invariante ist davon unberührt -- die
-        # arbeitet ausschließlich auf den Video-Clip-Längen, nicht auf der Audiospur.
+        # User-Entscheidung Juli 2026: keine Musik/Ambient-SFX mehr im LONGFORM-Render --
+        # der User legt dort Soundeffekte künftig selbst extern über die fertige
+        # Sprecherspur. engine/audio.py (_build_final_audio + Sound-Design-Kette aus
+        # Schritt 1+2) bleibt im Repo erhalten (getestet, reaktivierbar), wird für
+        # Longform hier nicht mehr aufgerufen. Die frame-genaue Sync-Invariante ist davon
+        # unberührt -- die arbeitet ausschließlich auf den Video-Clip-Längen.
+        #
+        # Juli 2026, Shorts-SFX-System (neue, gezielt semantische Nachfolge-Entscheidung,
+        # NUR für Shorts -- Longform bleibt exakt bei der Entscheidung oben): mechanische
+        # Übergangs-SFX (transition_sfx_events, siehe oben) + eine semantische Schicht
+        # (engine/shorts_sfx_analyzer.analyze_short_for_sfx, dynamisch über Sounds/*
+        # erweiterbar) werden auf die bereits pausen-gekürzte Sprecherspur gelegt, bevor
+        # gemuxt wird. Fällt jede Analyzer-Schicht aus, bleibt die reine Sprecherspur --
+        # kein Renderabbruch, gleiches Resilienz-Prinzip wie überall sonst im Pipeline-Code.
+        if target != "longform":
+            sfx_events = analyze_short_for_sfx(scenes, transition_sfx_events)
+            if sfx_events:
+                sfx_ext = os.path.splitext(audio_path)[1] or ".wav"
+                sfx_audio_path = os.path.join(render_dir, f"voiceover_sfx{sfx_ext}")
+                _place_sfx(audio_path, sfx_events, sfx_audio_path)
+                audio_path = sfx_audio_path
         _mux_audio(silent_path, audio_path, final_path)
 
         stage("review")

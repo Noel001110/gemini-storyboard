@@ -1053,7 +1053,13 @@ suggestion, because the short-form feed swipes away within 1-3 seconds if this f
 Five beats, in this order, every time:
 1. HOOK (first sentence, ~1-3 seconds of spoken audio) -- a question, a surprising stat,
    or a bold claim. Never a greeting, never a setup sentence before the hook lands, never
-   "In this video..." framing.
+   "In this video..." framing. Three proven hook archetypes, OPTIONAL patterns to reach
+   for WHEN the real long-form content actually supports them -- never force one onto a
+   fact that doesn't fit it, a neutral fact stays a plain question/stat/claim hook instead:
+   - Loss-aversion / warning: "Stop doing [X] immediately if you don't want to lose [Y]."
+   - Hyper-specific number (never a vague amount): "How [subject] made exactly [$X] doing
+     [Y] -- without [Z]."
+   - Status-quo break / contrarian: "Everyone tells you [A], but the truth is [B]."
 2. PROBLEM / AGITATION (next 1-2 sentences) -- deepen the pain the hook opened: show the
    hidden cost, the trap, why it's worse than it first sounds.
 3. TWIST / INSIGHT -- name the actual psychological mechanism that explains WHY this

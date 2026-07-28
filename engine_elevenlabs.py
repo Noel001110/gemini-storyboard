@@ -76,7 +76,14 @@ ELEVENLABS_VOICE_SETTINGS_DEFAULT = {
     "similarity_boost": 0.75,
     "style": 0.0,
     "use_speaker_boost": True,
-    "speed": 1.1,   # ElevenLabs-API: 0.7–1.2 praxisüblich, >1.0 schneller
+    # Juli 2026 (User-Wunsch "schnellerer Schnitt in Shorts"): 1.1 -> 1.12. Bewusst
+    # konservativ statt 1.15+ (Review-Abwägung: der wahrgenommene Tempo-Effekt kommt
+    # überwiegend aus dem geschärften Pausen-Trim für Shorts, siehe workers/render.py,
+    # nicht aus reinem Stimm-Tempo -- 1.15+ ließ die Stimme in Kombination mit sehr
+    # kurzen Pausen leicht metallisch/gehetzt wirken, riskant für einen Finanz-Kanal,
+    # der von Vertrauen/Autorität lebt). Reiner Default-Wert, per echtem Hör-Test
+    # jederzeit nachjustierbar.
+    "speed": 1.12,   # ElevenLabs-API: 0.7–1.2 praxisüblich, >1.0 schneller
     "output_format": "mp3_44100_128",
 }
 
