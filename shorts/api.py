@@ -554,6 +554,20 @@ def handle(method, path, handler, qs, cid, vid, body):
         rows = [r for r in db.queue_list()
                 if r["cid"] == cid and r["vid"] == vid
                 and r["render_target"].startswith("short_part_")]
+        # Juli 2026 Fix (User-Report "Shorts doppelt im Frontend"): seit dem
+        # TikTok-Dual-Queueing (youtube/api.py:/api/youtube/queue_add queued
+        # jeden Short für platform=youtube UND platform=tiktok, identischer
+        # render_target) liefert queue_list() 2 Zeilen pro Part -- diese
+        # durable View zeigt einen Part unabhängig davon, für wie viele
+        # Plattformen er gequeued ist, nur EINMAL.
+        seen_targets = set()
+        deduped_rows = []
+        for r in rows:
+            if r["render_target"] in seen_targets:
+                continue
+            seen_targets.add(r["render_target"])
+            deduped_rows.append(r)
+        rows = deduped_rows
         rows.sort(key=_part_num)
         parts = [{
             "part": _part_num(r), "queue_id": r["id"],
@@ -656,6 +670,18 @@ def handle(method, path, handler, qs, cid, vid, body):
         rows = [r for r in db.queue_list()
                 if r["cid"] == cid and r["vid"] == vid
                 and r["render_target"].startswith("short_hook_")]
+        # Juli 2026 Fix (User-Report "Shorts doppelt im Frontend"): siehe
+        # identischer Fix + Begründung bei /api/shorts/parts_list oben --
+        # TikTok-Dual-Queueing liefert 2 Zeilen pro Hook-Short (platform=
+        # youtube + platform=tiktok, gleicher render_target).
+        seen_targets = set()
+        deduped_rows = []
+        for r in rows:
+            if r["render_target"] in seen_targets:
+                continue
+            seen_targets.add(r["render_target"])
+            deduped_rows.append(r)
+        rows = deduped_rows
         rows.sort(key=_hook_num)
         hooks = [{
             "hook": _hook_num(r), "queue_id": r["id"],
