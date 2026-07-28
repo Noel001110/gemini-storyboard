@@ -6,7 +6,7 @@ import urllib.parse
 from urllib.error import URLError
 
 import store.db as db
-from tiktok.oauth import build_auth_url, exchange_code
+from tiktok.oauth import build_auth_url, client_configured, exchange_code
 
 # Simple local state for CSRF like youtube
 _PENDING_STATES: dict = {}
@@ -34,6 +34,10 @@ def _pop_state(state: str) -> tuple[str, str] | None:
 
 def handle(method, path, handler, qs, cid, vid, body):
     if method == "GET" and path == "/tiktok/oauth/login":
+        if not client_configured():
+            handler._send(400, {"error": "~/.tiktok_oauth_client.json fehlt — OAuth-Client "
+                                          "noch nicht eingerichtet."})
+            return True, None
         state, code_verifier, code_challenge = _new_state(cid)
         url = build_auth_url(state, code_challenge)
         handler.send_response(302)

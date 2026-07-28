@@ -95,5 +95,14 @@ def process_one(entry: dict) -> None:
         print(f"  [TikTok Upload] Queue #{entry['id']} erfolgreich: {publish_id}")
         
     except Exception as e:
-        db.queue_update(entry["id"], attempts=entry.get("attempts", 0) + 1, error=str(e))
+        # status="failed" statt nur error/attempts zu schreiben (Fix Duplikat-
+        # Uploads, Juli 2026): TikTok hat kein Resumable-Upload-Äquivalent zu
+        # YouTube (jeder Init-Call fordert eine neue publish_id an) -- ein
+        # Eintrag, der auf "uploading" hängen bleibt, wurde vom 5s-Poll-Loop
+        # (queue_pending()) immer wieder aufgegriffen und postete denselben
+        # Clip bei jedem Fehlschlag NACH erfolgreichem TikTok-Empfang erneut.
+        # Ein automatischer Retry ist hier nie sicher -- manueller Retry über
+        # die UI (nutzt den deduplizierenden queue_add()) bleibt möglich.
+        db.queue_update(entry["id"], status="failed",
+                         attempts=entry.get("attempts", 0) + 1, error=str(e))
         print(f"  [TikTok Upload] Queue #{entry['id']}: Fehler: {e}", flush=True)

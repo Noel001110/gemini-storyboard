@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.error
 import urllib.parse
@@ -9,17 +10,35 @@ import urllib.request
 
 import store.db as db
 
-CLIENT_KEY = "sbawwfb9dpfdlratae"
-CLIENT_SECRET = "LysTAVkPQdrNwKDdM23kDDtSHP4OhN4m"
-REDIRECT_URI = "https://example.com/"
+# Juli 2026 (Secret-Hygiene-Fix): client_key/client_secret waren zuvor hier hart
+# codiert und landeten dadurch versehentlich im öffentlichen Git-Repo. Gleiches
+# Muster wie youtube/oauth.py (OAUTH_CLIENT_FILE/client_configured()) -- eine
+# gitignored Datei im Home-Verzeichnis, nie Teil des Repos.
+OAUTH_CLIENT_FILE = os.path.expanduser("~/.tiktok_oauth_client.json")
+# War zuvor "https://example.com/" -- TikToks eigener Doku-Platzhalter, nie
+# funktionsfähig. TikToks Login Kit für die Plattform "Desktop" erlaubt
+# localhost/127.0.0.1-Redirect-URIs (anders als "Web", das eine verifizierte
+# HTTPS-Domain verlangt) -- App im TikTok-Developer-Portal entsprechend als
+# "Desktop" registrieren, dann zeigt diese URI auf die bereits existierende
+# lokale Callback-Route (tiktok/api.py).
+REDIRECT_URI = "http://127.0.0.1:8010/tiktok/oauth/callback"
 
 AUTH_URL = "https://www.tiktok.com/v2/auth/authorize/"
 TOKEN_URL = "https://open.tiktokapis.com/v2/oauth/token/"
 SCOPES = "video.publish,user.info.basic"
 
+
+def client_configured() -> bool:
+    return os.path.exists(OAUTH_CLIENT_FILE)
+
+
+def _client() -> dict:
+    return json.load(open(OAUTH_CLIENT_FILE))
+
+
 def build_auth_url(state: str, code_challenge: str) -> str:
     params = {
-        "client_key": CLIENT_KEY,
+        "client_key": _client()["client_key"],
         "redirect_uri": REDIRECT_URI,
         "response_type": "code",
         "scope": SCOPES,
@@ -30,9 +49,10 @@ def build_auth_url(state: str, code_challenge: str) -> str:
     return f"{AUTH_URL}?{urllib.parse.urlencode(params)}"
 
 def exchange_code(cid: str, code: str, code_verifier: str) -> None:
+    client = _client()
     data = urllib.parse.urlencode({
-        "client_key": CLIENT_KEY,
-        "client_secret": CLIENT_SECRET,
+        "client_key": client["client_key"],
+        "client_secret": client["client_secret"],
         "code": code,
         "grant_type": "authorization_code",
         "redirect_uri": REDIRECT_URI,
@@ -95,9 +115,10 @@ def refresh_if_needed(cid: str) -> str:
         return tokens["access_token"]
         
     # Refresh
+    client = _client()
     data = urllib.parse.urlencode({
-        "client_key": CLIENT_KEY,
-        "client_secret": CLIENT_SECRET,
+        "client_key": client["client_key"],
+        "client_secret": client["client_secret"],
         "refresh_token": tokens["refresh_token"],
         "grant_type": "refresh_token",
     }).encode("utf-8")

@@ -132,6 +132,24 @@ def init_db() -> None:
             conn.execute("ALTER TABLE upload_queue ADD COLUMN platform TEXT NOT NULL DEFAULT 'youtube'")
         except sqlite3.OperationalError:
             pass  # Column already exists
+        # Zweite Absicherungsebene gegen Duplikat-Uploads (Juli 2026) zusätzlich
+        # zum App-Level-Dedup-Check in queue_add() — deckt die seltenere Race
+        # Condition ab (zwei fast gleichzeitige Requests, beide am App-Level-Check
+        # vorbei, bevor eine der beiden Transaktionen committed hat). Partieller
+        # Index statt vollem UNIQUE, weil abgeschlossene ('uploaded') oder
+        # verworfene ('failed'/'canceled') Einträge kein Dedup-Ziel mehr sind —
+        # ein späterer Retry nach 'failed' muss eine neue Zeile anlegen dürfen.
+        # COALESCE(short_id,'') statt rohem short_id: SQLite behandelt NULL != NULL
+        # bei UNIQUE-Constraints (Standard-SQL-Semantik) -- ein roher short_id wäre
+        # für den longform-/kein-short_id-Fall (short_id=NULL, genau der Fall aus
+        # dem gemeldeten Duplikat-Bug, siehe queue_add()-Aufrufer in youtube/api.py)
+        # wirkungslos, weil zwei NULL-Zeilen dann NIE als Duplikat gälten. Per
+        # Testlauf verifiziert (Insert-vs-Insert ohne den App-Level-Check).
+        conn.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_dedup
+               ON upload_queue(cid, vid, render_target, COALESCE(short_id,''), platform)
+               WHERE status IN ('queued','uploading')"""
+        )
         conn.commit()
 
 
@@ -217,9 +235,24 @@ def queue_add(cid: str, vid: str, render_target: str, file_path: str, title: str
     """Fügt einen neuen Warteschlangen-Eintrag (Status 'queued') hinzu.
     `render_target` identifiziert die Datei (z.B. 'longform', 'short_vertical',
     'short_part_1').
-    Rückgabe ist die `queue_id`."""
+    Rückgabe ist die `queue_id`.
+
+    Dedup-Check vor dem Insert (Fix Duplikat-Uploads, Juli 2026 — TikTok postete
+    identische Videos mehrfach): ein Doppelklick oder ein Retry nach langsamer
+    Antwort im Frontend rief diese Funktion zweimal mit identischen Parametern
+    auf, jedes Mal eine neue, unabhängige Zeile — beide wurden dann unabhängig
+    hochgeladen. Gleiches Check-vor-Insert-Prinzip wie der bestehende
+    ACTIVE_SCENE_JOBS-Dedup vor Bild-Generierung (workers/batch.py)."""
     conn = get_connection()
     with WRITE_LOCK:
+        existing = conn.execute(
+            """SELECT id FROM upload_queue
+               WHERE cid=? AND vid=? AND render_target=? AND short_id IS ?
+                 AND platform=? AND status IN ('queued','uploading','uploaded')""",
+            (cid, vid, render_target, short_id, platform),
+        ).fetchone()
+        if existing:
+            return existing["id"]
         cur = conn.execute(
             """INSERT INTO upload_queue
                (cid, vid, render_target, short_id, file_path, title, description,
