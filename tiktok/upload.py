@@ -11,6 +11,14 @@ import urllib.request
 import store.db as db
 from tiktok.oauth import refresh_if_needed
 
+# Juli 2026 (User-Entscheidung): TikTok-Auto-Upload abgeschaltet -- Nutzer plant Posts
+# künftig manuell über die TikTok-App auf dem Laptop. Zentraler Schalter statt Löschen
+# (CLAUDE.md-Konvention: hidden-not-deleted). process_one() prüft dies zuerst als
+# Absicherung; youtube/upload.py:worker_loop() und youtube/api.py:queue_add() prüfen es
+# zusätzlich VOR dem Dispatch/Queueing, damit die Queue nicht mit nie verarbeiteten
+# TikTok-Einträgen vollläuft. Wieder auf True stellen, um die Pipeline zu reaktivieren.
+AUTO_UPLOAD_ENABLED = False
+
 
 def _query_creator_info(access_token: str) -> dict:
     """POST .../creator_info/query/ — liefert u.a. privacy_level_options, die
@@ -82,7 +90,51 @@ def _build_init_body(title: str, file_size: int, privacy_level_options: list) ->
     }
 
 
+def _init_direct_post(access_token: str, title: str, file_size: int,
+                       privacy_level_options: list) -> dict:
+    """POST .../video/init/ (Direct Post). Real getestet (Juli 2026, kein
+    Doku-Fund): TikToks privacy_level_options filtert NICHT nach App-Audit-
+    Status -- listet, was der ACCOUNT theoretisch erlaubt (z.B.
+    PUBLIC_TO_EVERYONE), nicht was ein unaudited App tatsächlich posten darf.
+    Der eigentliche Fehler kommt erst beim Init-Call selbst: HTTP 403
+    unaudited_client_can_only_post_to_private_accounts. Statt hart zu
+    scheitern: einmaliger Retry mit privacy_level=SELF_ONLY erzwungen. Sobald
+    der Audit besteht, akzeptiert TikTok den ersten Versuch direkt -- keine
+    Codeänderung nötig, das ist der ganze Sinn von _build_init_body()'s
+    "erste verfügbare Option zuerst"-Logik."""
+    def _try(privacy_level: str) -> dict:
+        body = _build_init_body(title, file_size, [privacy_level])
+        req = urllib.request.Request(
+            "https://open.tiktokapis.com/v2/post/publish/video/init/",
+            data=json.dumps(body).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json; charset=UTF-8",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    privacy_level = privacy_level_options[0] if privacy_level_options else "SELF_ONLY"
+    try:
+        res = _try(privacy_level)
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8")
+        if (e.code == 403 and "unaudited_client_can_only_post_to_private_accounts" in err_body
+                and privacy_level != "SELF_ONLY"):
+            print("  [TikTok Upload] App unaudited -- Retry mit privacy_level=SELF_ONLY", flush=True)
+            res = _try("SELF_ONLY")
+        else:
+            raise ValueError(f"Init Error: HTTP {e.code}: {err_body}")
+    if res.get("error", {}).get("code") != "ok":
+        raise ValueError(f"Init Error: {res}")
+    return res["data"]
+
+
 def process_one(entry: dict) -> None:
+    if not AUTO_UPLOAD_ENABLED:
+        return
     if entry["status"] not in ("queued", "uploading"):
         return
 
@@ -109,31 +161,16 @@ def process_one(entry: dict) -> None:
         # YouTube, 0 Gedanken machen müssen") -- Inbox postete nur als Entwurf,
         # der Nutzer musste in der TikTok-App manuell antippen. Direct Post
         # verlangt privacy_level aus den für DIESEN Account tatsächlich
-        # erlaubten Optionen (siehe _query_creator_info/_build_init_body).
+        # erlaubten Optionen; _init_direct_post() fällt zusätzlich auf
+        # SELF_ONLY zurück, falls der App-Audit-Status das erzwingt (siehe
+        # dessen Docstring).
         creator_info = _query_creator_info(access_token)
-        init_body = _build_init_body(tiktok_caption, file_size,
-                                      creator_info.get("privacy_level_options", []))
+        init_data = _init_direct_post(access_token, tiktok_caption, file_size,
+                                       creator_info.get("privacy_level_options", []))
 
-        # 1. Initialize upload (Direct Post -- postet wirklich, kein Entwurf)
-        init_req = urllib.request.Request(
-            "https://open.tiktokapis.com/v2/post/publish/video/init/",
-            data=json.dumps(init_body).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json; charset=UTF-8"
-            },
-            method="POST"
-        )
+        upload_url = init_data["upload_url"]
+        publish_id = init_data["publish_id"]
 
-        with urllib.request.urlopen(init_req) as resp:
-            init_res = json.loads(resp.read().decode("utf-8"))
-            
-        if init_res.get("error", {}).get("code") != "ok":
-            raise ValueError(f"Init Error: {init_res}")
-            
-        upload_url = init_res["data"]["upload_url"]
-        publish_id = init_res["data"]["publish_id"]
-        
         # 2. Upload file
         with open(file_path, "rb") as f:
             upload_req = urllib.request.Request(

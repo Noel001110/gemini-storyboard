@@ -189,7 +189,19 @@ def run(cid: str, vid: str, target: str = "longform") -> None:
         # that overlap, so the merged clip's total duration still equals the original,
         # uncompensated sum of both scenes' planned durations, keeping the frame-exact
         # sync invariant intact regardless of which duration was used.
-        transition_at = [idx for idx in range(len(scenes)) if _has_transition_before(scenes, idx)]
+        # Juli 2026 (User-Wunsch "immer Bewegung/Dynamik beim Schnitt, nur in Shorts"):
+        # für Nicht-Longform-Targets (Shorts) bekommt JEDER Schnittpunkt einen Übergang,
+        # nicht nur Sequenzgrenzen (_has_transition_before) -- Short-Szenen sind
+        # eigenständig pro Short segmentiert (segment_by_pacing(profile=
+        # PACING_PROFILES["short"])) und populieren praktisch nie seq_id/seq_pos, wodurch
+        # _has_transition_before dort nie feuert -- jeder Schnitt war bisher ein harter
+        # Cut. Longform bleibt exakt beim bisherigen, selteneren Verhalten (kein
+        # Scope-Creep in den Haupt-Videotyp). Ken-Burns selbst (_motion_for_scene oben)
+        # bleibt unverändert -- das hier ergänzt nur Übergänge AN den Schnitten.
+        if target == "longform":
+            transition_at = [idx for idx in range(len(scenes)) if _has_transition_before(scenes, idx)]
+        else:
+            transition_at = list(range(1, len(scenes)))
         # transition_seq_idx (Position INNERHALB transition_at, nicht der rohe
         # Szenenindex) treibt die Sub-Typ-Rotation in _transition_for_scene --
         # Feinschliff Runde 2, siehe dessen Docstring. Einmal als Lookup gebaut, damit

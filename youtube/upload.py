@@ -462,6 +462,9 @@ def worker_loop(poll_interval_sec: float = 5.0) -> None:
             for entry in db.queue_pending():
                 if entry.get("platform") == "tiktok":
                     # Lazy import to avoid circular dependency
+                    from tiktok.upload import AUTO_UPLOAD_ENABLED
+                    if not AUTO_UPLOAD_ENABLED:
+                        continue
                     from tiktok.upload import process_one as tiktok_process_one
                     tiktok_process_one(entry)
                 else:

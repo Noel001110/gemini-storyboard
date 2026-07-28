@@ -207,14 +207,18 @@ def handle(method, path, handler, qs, cid, vid, body):
                                  category_id=meta.get("category_id"),
                                  platform="youtube"))
         
-        # Falls es sich um einen Short handelt, AUCH für TikTok in die Warteschlange
-        if render_target != "longform":
+        # Falls es sich um einen Short handelt, AUCH für TikTok in die Warteschlange --
+        # nur wenn der TikTok-Auto-Upload aktiv ist (Juli 2026: abgeschaltet, Nutzer
+        # postet manuell über die TikTok-App). Sonst würde die Queue mit nie
+        # verarbeiteten TikTok-Einträgen volllaufen.
+        from tiktok.upload import AUTO_UPLOAD_ENABLED
+        if render_target != "longform" and AUTO_UPLOAD_ENABLED:
             qids.append(db.queue_add(cid, vid, render_target, file_path, title, scheduled_at,
                                      description=meta.get("description", ""),
                                      tags=meta.get("tags", []),
                                      category_id=meta.get("category_id"),
                                      platform="tiktok"))
-                                     
+
         handler._send(200, {"ok": True, "queue_ids": qids})
         return True, None
 

@@ -58,7 +58,7 @@ def exchange_code(cid: str, code: str, code_verifier: str) -> None:
         "redirect_uri": REDIRECT_URI,
         "code_verifier": code_verifier
     }).encode("utf-8")
-    
+
     req = urllib.request.Request(
         TOKEN_URL,
         data=data,
@@ -67,16 +67,27 @@ def exchange_code(cid: str, code: str, code_verifier: str) -> None:
     
     with urllib.request.urlopen(req) as resp:
         res = json.loads(resp.read().decode("utf-8"))
-        
+
     access_token = res.get("access_token")
+    if not access_token:
+        # TikToks OAuth-Token-Endpoint nutzt ein anderes Fehlerformat als die
+        # Content-Posting-API (flaches error/error_description statt
+        # error.code) -- ungeprüft durchgereicht landete ein fehlendes
+        # access_token bisher als NOT-NULL-Constraint-Fehler in der DB, ohne
+        # den eigentlichen TikTok-Fehler (z.B. invalid_grant) sichtbar zu
+        # machen. Juli 2026, gefunden beim ersten echten Reconnect-Versuch.
+        raise ValueError(
+            f"TikTok token exchange failed: "
+            f"{res.get('error_description') or res.get('error') or res}"
+        )
     refresh_token = res.get("refresh_token")
     expires_in = res.get("expires_in", 86400)
     refresh_expires_in = res.get("refresh_expires_in", 31536000)
     open_id = res.get("open_id")
-    
+
     expires_at = time.time() + expires_in
     refresh_expires_at = time.time() + refresh_expires_in
-    
+
     # Store tokens in DB
     conn = db.get_connection()
     with db.WRITE_LOCK:
@@ -131,14 +142,19 @@ def refresh_if_needed(cid: str) -> str:
     
     with urllib.request.urlopen(req) as resp:
         res = json.loads(resp.read().decode("utf-8"))
-        
+
     access_token = res.get("access_token")
+    if not access_token:
+        raise ValueError(
+            f"TikTok token refresh failed: "
+            f"{res.get('error_description') or res.get('error') or res}"
+        )
     refresh_token = res.get("refresh_token")
     expires_in = res.get("expires_in", 86400)
     refresh_expires_in = res.get("refresh_expires_in", 31536000)
-    
+
     expires_at = time.time() + expires_in
     refresh_expires_at = time.time() + refresh_expires_in
-    
+
     update_access_token(cid, access_token, expires_at, refresh_token, refresh_expires_at)
     return access_token

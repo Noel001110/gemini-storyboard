@@ -1143,16 +1143,28 @@ def generate_short_scripts(full_script: str, chosen_title: str, n: int = 5,
     return []
 
 
-def _keyword_overlap_match(short_text: str, longform_scenes: list) -> int:
+def _keyword_overlap_match(short_text: str, longform_scenes: list,
+                            exclude_files: set | None = None) -> int:
     """Deterministischer Fallback (kein API-Call) für assign_short_scene_images: wählt
     die Longform-Szene mit dem größten Wort-Overlap zwischen ihrem `text`/`prompt` und
     dem Short-Szenentext. Nie ein Renderabbruch, falls die LLM-Zuordnung fehlschlägt.
     Sucht NUR unter Szenen mit vorhandenem `file` -- eine fileless Szene als "Match"
-    zurückzugeben wäre für den Aufrufer wertlos (kein Bild zum Wiederverwenden da)."""
+    zurückzugeben wäre für den Aufrufer wertlos (kein Bild zum Wiederverwenden da).
+
+    `exclude_files` (Juli 2026, Anti-Wiederholungs-Fix): optionale Menge an Dateien, die
+    NICHT als Match zurückkommen sollen (z.B. das Bild der unmittelbaren Vorszene) --
+    genutzt von `_dedupe_adjacent_picks()`. Fällt auf die ungefilterte Kandidatenliste
+    zurück, falls der Ausschluss ALLE Kandidaten eliminiert (Pool erschöpft, z.B. nur
+    1 Bild insgesamt) -- ein Match, das nicht perfekt divers ist, ist besser als gar
+    keins."""
     stop = {"the", "a", "an", "of", "to", "in", "on", "and", "was", "is", "for",
             "der", "die", "das", "und", "ist", "war", "ein", "eine", "zu", "im"}
     short_words = {w.lower() for w in re.findall(r"[a-zA-ZäöüßÄÖÜ]{3,}", short_text)} - stop
-    candidates = [i for i, ls in enumerate(longform_scenes) if ls.get("file")]
+    all_candidates = [i for i, ls in enumerate(longform_scenes) if ls.get("file")]
+    candidates = ([i for i in all_candidates if longform_scenes[i]["file"] not in exclude_files]
+                  if exclude_files else all_candidates)
+    if not candidates:
+        candidates = all_candidates
     if not candidates:
         return -1
     if not short_words:
@@ -1166,6 +1178,32 @@ def _keyword_overlap_match(short_text: str, longform_scenes: list) -> int:
         if score > best_score:
             best_i, best_score = i, score
     return best_i
+
+
+def _dedupe_adjacent_picks(picks: list, scenes: list, longform_scenes: list) -> list:
+    """Post-Processing für EINEN Short (Juli 2026, User-Report): verhindert, dass zwei
+    DIREKT AUFEINANDERFOLGENDE Szenen dasselbe Longform-Bild bekommen. Grund: jede Szene
+    startet ihren Ken-Burns-Zoom/Pan unabhängig von der Vorszene aus einem festen Rezept
+    (engine/render.py:_build_motion) -- bei zwei Klammern desselben Bildes hintereinander
+    sieht der Schnitt aus wie ein Bug (Bild "springt" beim Schnitt auf seine
+    Ausgangsposition zurück). Nur STRIKT ANGRENZENDE Wiederholungen werden ersetzt, nicht
+    jede Wiederholung irgendwo im Short -- generelle Bildvielfalt ist nicht das Problem,
+    der harte Schnitt zwischen zwei identischen Klammern ist es. Bewusst NACH sowohl der
+    LLM-Zuordnung als auch dem Keyword-Fallback angewendet (ein gemeinsamer Guard statt
+    Duplizierung in beiden Pfaden)."""
+    fixed = list(picks)
+    for i in range(1, len(fixed)):
+        if not fixed[i] or fixed[i] != fixed[i - 1]:
+            continue
+        alt_idx = _keyword_overlap_match(scenes[i].get("text", ""), longform_scenes,
+                                          exclude_files={fixed[i - 1]})
+        if alt_idx is not None and alt_idx >= 0:
+            alt_file = longform_scenes[alt_idx].get("file")
+            if alt_file and alt_file != fixed[i - 1]:
+                fixed[i] = alt_file
+        # sonst: kein Alternativ-Bild verfügbar (Pool erschöpft) -- bleibt wie es ist,
+        # besser eine seltene Restwiederholung als ein KeyError/None-Bild.
+    return fixed
 
 
 def assign_short_scene_images(shorts_scenes: list, longform_scenes: list) -> list:
@@ -1200,7 +1238,7 @@ def assign_short_scene_images(shorts_scenes: list, longform_scenes: list) -> lis
             for sc in scenes:
                 idx = _keyword_overlap_match(sc.get("text", ""), longform_scenes)
                 picks.append(lf_file_by_i.get(idx))
-            out.append(picks)
+            out.append(_dedupe_adjacent_picks(picks, scenes, longform_scenes))
         return out
 
     if not lf_indexed:
@@ -1249,7 +1287,7 @@ def assign_short_scene_images(shorts_scenes: list, longform_scenes: list) -> lis
                     idx = _keyword_overlap_match(sc.get("text", ""), longform_scenes)
                     f = lf_file_by_i.get(idx)
                 picks.append(f)
-            out.append(picks)
+            out.append(_dedupe_adjacent_picks(picks, scenes, longform_scenes))
         return out
     except Exception as e:
         print(f"  [ShortsImageAssign] Fehler: {e} — Keyword-Overlap-Fallback.", flush=True)
