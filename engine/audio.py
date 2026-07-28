@@ -198,8 +198,16 @@ SFX_VOLUME_BY_CATEGORY = {
     "riser":  0.20,       # -14 dB -- liegt länger unter der Stimme, darf leiser sein
     "swell":  0.20,       # -14 dB -- Klimax-Anlauf, wie riser
     "downshifter": 0.30,  # -10.5 dB -- Spannungsabbau CLIMAX->RESOLUTION
+    "plop":   0.15,       # -16 dB -- weicher Übergang, sehr leise
+    "Money":  0.15,       # -16 dB -- neue semantische Kategorien
+    "Fail":   0.15,
+    "Action": 0.20,
+    "Funny":  0.15,
+    "Social": 0.10,
+    "Suspense": 0.15,
+    "Magic":  0.15,
 }
-SFX_DEFAULT_VOLUME = 0.25
+SFX_DEFAULT_VOLUME = 0.15
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -430,7 +438,12 @@ def _place_sfx(narration_path: str, sfx_events: list, out_path: str,
         # Docstring) -- ohne atrim würde ein Riser weit über den beabsichtigten
         # Spannungs-Anlauf hinaus unmotiviert weiterlaufen. Andere Kategorien (Braam/
         # Boom/Impact/Downshifter) dürfen voll ausklingen -- das ist ihre Charakteristik.
-        trim = f"atrim=0:{RISER_RUNUP_CAP_SEC}," if ev["sfx"] == "riser" else ""
+        if ev["sfx"] == "riser":
+            trim = f"atrim=0:{RISER_RUNUP_CAP_SEC},"
+        elif ev["sfx"] in {"whoosh", "plop"} and "duration" in ev:
+            trim = f"atrim=0:{ev['duration']},"
+        else:
+            trim = ""
         filter_parts.append(f"[{len(labels)+1}:a]{trim}adelay={delay_ms}|{delay_ms},volume={vol}[{label}]")
         labels.append(label)
         if ev.get("duck_voice"):

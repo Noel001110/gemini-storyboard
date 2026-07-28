@@ -23,6 +23,10 @@
    - Die TikTok Content Posting API (Direct Post) wurde für den Upload von generierten Shorts unter `tiktok/upload.py` implementiert. Der Worker-Loop checkt nun anhand des `platform`-Flags, an welche Plattform das Video geht.
    - **Upload-Automatisierung gestoppt**: Der Bug, durch den Shorts sofort nach Generierung automatisch hochgeladen wurden, wurde behoben. Sie müssen nun wie das Longform-Video manuell in Schritt 7 via "Zur Warteschlange hinzufügen" in den Queue verschoben werden.
    - Beim manuellen Hinzufügen eines Shorts zur Warteschlange wird dieses fortan automatisch **doppelt** gequeued (1x für YouTube Shorts, 1x für TikTok).
+9. **Shorts Sound System Fixes & Localhost Crash**:
+   - Absturz des Dashboards durch fehlendes `Pillow`-Modul (aus `shorts/cta.py`) behoben.
+   - **Semantische Audio-Kategorisierung**: Die losen `.mp3`-Dateien in `Sounds/` wurden in Unterordner (`Money`, `Fail`, `Action`, `Funny`, `Social`, `Suspense`, `Magic`) sortiert, damit der LLM SFX-Analyzer sie als valide semantische Kategorien erkennt und auswählt.
+   - **Lautstärke & Trimming**: Die Lautstärke der SFX-Kategorien wurde in `engine/audio.py` deutlich abgesenkt (auf 0.15). Mechanische Übergänge (`whoosh`, `plop`) werden nun in `_place_sfx` exakt auf die visuelle Dauer der Transition (z.B. 0.3s) zugeschnitten, anstatt unkontrolliert lange nachzuklingen.
 
 ## Working State
 Das System verfügt nun über eine hochmoderne Viral-Retention-Pipeline, die Klischees im Keim erstickt, Marken-Vibes per Kanal steuert und visuelle Ermüdung durch gezielte Spikes unterbindet. Es unterstützt nun außerdem den Cross-Upload von Shorts auf YouTube und TikTok über eine integrierte Warteschlange und OAuth-Anbindung. Der UI-Bug bezüglich der verschwundenen Sidebar wurde gefixt.

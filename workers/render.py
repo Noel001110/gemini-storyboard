@@ -234,7 +234,7 @@ def run(cid: str, vid: str, target: str = "longform") -> None:
             if target != "longform" and sfx:
                 start = scenes[idx].get("start_aligned")
                 if start is not None:
-                    transition_sfx_events.append({"start": start, "sfx": sfx})
+                    transition_sfx_events.append({"start": start, "sfx": sfx, "duration": t_duration})
 
         overlay_opts = dashboard.get_video_overlay_opts(cid, vid)
         stage("clips", 0, len(scenes))

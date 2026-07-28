@@ -54,6 +54,45 @@ CATEGORY_META: dict[str, CategoryMeta] = {
         loud=False,
         placement_window="anywhere",
     ),
+    "Money": CategoryMeta(
+        description="Money = positiver finanzieller Kontext, Gewinn, Einnahmen oder Erfolg. "
+                    "NICHT bei Verlust oder Schulden verwenden.",
+        loud=True,
+        placement_window="anywhere",
+    ),
+    "Fail": CategoryMeta(
+        description="Fail = negativer Kontext, peinlicher Moment, Fehler, Verlust oder "
+                    "unerwartete schlechte Wendung.",
+        loud=True,
+        placement_window="anywhere",
+    ),
+    "Action": CategoryMeta(
+        description="Action = harter Einschlag, Bruch oder sehr dynamischer, aggressiver Moment.",
+        loud=True,
+        placement_window="anywhere",
+    ),
+    "Funny": CategoryMeta(
+        description="Funny = Meme-Moment, extrem absurder oder witziger Kommentar, "
+                    "Comedy-Element.",
+        loud=True,
+        placement_window="anywhere",
+    ),
+    "Social": CategoryMeta(
+        description="Social = Benachrichtigung, Anruf, Social Media Interaktion oder "
+                    "Aufmerksamkeit.",
+        loud=False,
+        placement_window="anywhere",
+    ),
+    "Suspense": CategoryMeta(
+        description="Suspense = Spannungsaufbau, Warten auf eine wichtige Enthüllung.",
+        loud=False,
+        placement_window="anywhere",
+    ),
+    "Magic": CategoryMeta(
+        description="Magic = magischer, übernatürlicher, oder extrem positiver 'Good Ending'-Moment.",
+        loud=False,
+        placement_window="anywhere",
+    ),
 }
 
 _DEFAULT_META = CategoryMeta(description="", loud=False, placement_window="anywhere")
