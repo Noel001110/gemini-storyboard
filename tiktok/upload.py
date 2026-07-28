@@ -11,6 +11,77 @@ import urllib.request
 import store.db as db
 from tiktok.oauth import refresh_if_needed
 
+
+def _query_creator_info(access_token: str) -> dict:
+    """POST .../creator_info/query/ — liefert u.a. privacy_level_options, die
+    für DIESEN Account/App-Status tatsächlich erlaubten Werte (unaudited nur
+    SELF_ONLY). TikToks Doku verlangt, dass der gesendete privacy_level aus
+    genau dieser Liste stammt -- frisch pro Post abgefragt statt hart codiert,
+    damit der Code nach einem bestandenen Audit ohne Änderung weiterläuft."""
+    req = urllib.request.Request(
+        "https://open.tiktokapis.com/v2/post/publish/creator_info/query/",
+        data=b"{}",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json; charset=UTF-8",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req) as resp:
+        res = json.loads(resp.read().decode("utf-8"))
+    if res.get("error", {}).get("code") != "ok":
+        raise ValueError(f"creator_info/query Error: {res}")
+    return res["data"]
+
+
+def _build_caption(entry: dict) -> str:
+    """TikTok hat ein einziges Caption-Feld ('title', bis 2200 Zeichen) --
+    Titel, Beschreibung und Hashtags werden zusammengeführt. Reine Funktion,
+    isoliert testbar ohne Netzwerk/DB."""
+    tiktok_caption = entry["title"] or "Tiktok Short"
+    if entry["description"]:
+        tiktok_caption += f"\n\n{entry['description']}"
+    if entry["tags"]:
+        try:
+            tags = json.loads(entry["tags"])
+            if tags:
+                hashtags = " ".join([f"#{t.replace(' ', '')}" for t in tags])
+                tiktok_caption += f"\n\n{hashtags}"
+        except Exception:
+            pass
+    return tiktok_caption[:2150]
+
+
+def _build_init_body(title: str, file_size: int, privacy_level_options: list) -> dict:
+    """Request-Body für /v2/post/publish/video/init/ (Direct Post). Reine
+    Funktion, isoliert testbar ohne Netzwerk.
+
+    privacy_level MUSS laut TikToks Doku einer der von creator_info/query
+    tatsächlich für diesen Account/App-Status erlaubten Werte sein (unaudited
+    typischerweise nur SELF_ONLY) -- nicht hart codiert, damit der Code nach
+    einem bestandenen Audit ohne Änderung öffentlich posten kann. Erster Wert
+    aus der Liste als Default; SELF_ONLY als Fallback falls die Liste leer/
+    unerwartet ist (sicherster Default statt eines Fehlers).
+
+    is_aigc=True (empfohlen, nicht optional weggelassen): TikToks Content-
+    Sharing-Guidelines verlangen explizite Kennzeichnung von KI-generiertem
+    Content -- bei dieser Pipeline ist buchstäblich alles KI-generiert."""
+    privacy_level = privacy_level_options[0] if privacy_level_options else "SELF_ONLY"
+    return {
+        "post_info": {
+            "title": title,
+            "privacy_level": privacy_level,
+            "is_aigc": True,
+        },
+        "source_info": {
+            "source": "FILE_UPLOAD",
+            "video_size": file_size,
+            "chunk_size": file_size,
+            "total_chunk_count": 1,
+        },
+    }
+
+
 def process_one(entry: dict) -> None:
     if entry["status"] not in ("queued", "uploading"):
         return
@@ -32,41 +103,28 @@ def process_one(entry: dict) -> None:
     db.queue_update(entry["id"], status="uploading")
 
     try:
-        # TikTok has a single caption field ('title') up to 2200 chars. 
-        # We concatenate title, description and hashtags.
-        tiktok_caption = entry["title"] or "Tiktok Short"
-        if entry["description"]:
-            tiktok_caption += f"\n\n{entry['description']}"
-        if entry["tags"]:
-            try:
-                tags = json.loads(entry["tags"])
-                if tags:
-                    hashtags = " ".join([f"#{t.replace(' ', '')}" for t in tags])
-                    tiktok_caption += f"\n\n{hashtags}"
-            except Exception:
-                pass
-        
-        # truncate to safe limit
-        tiktok_caption = tiktok_caption[:2150]
+        tiktok_caption = _build_caption(entry)
 
-        # 1. Initialize upload (Inbox API flow for Sandbox & Public Accounts)
+        # Direct Post statt Inbox/Draft (Juli 2026, User-Wunsch "wie bei
+        # YouTube, 0 Gedanken machen müssen") -- Inbox postete nur als Entwurf,
+        # der Nutzer musste in der TikTok-App manuell antippen. Direct Post
+        # verlangt privacy_level aus den für DIESEN Account tatsächlich
+        # erlaubten Optionen (siehe _query_creator_info/_build_init_body).
+        creator_info = _query_creator_info(access_token)
+        init_body = _build_init_body(tiktok_caption, file_size,
+                                      creator_info.get("privacy_level_options", []))
+
+        # 1. Initialize upload (Direct Post -- postet wirklich, kein Entwurf)
         init_req = urllib.request.Request(
-            "https://open.tiktokapis.com/v2/post/publish/inbox/video/init/",
-            data=json.dumps({
-                "source_info": {
-                    "source": "FILE_UPLOAD",
-                    "video_size": file_size,
-                    "chunk_size": file_size,
-                    "total_chunk_count": 1
-                }
-            }).encode("utf-8"),
+            "https://open.tiktokapis.com/v2/post/publish/video/init/",
+            data=json.dumps(init_body).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {access_token}",
                 "Content-Type": "application/json; charset=UTF-8"
             },
             method="POST"
         )
-        
+
         with urllib.request.urlopen(init_req) as resp:
             init_res = json.loads(resp.read().decode("utf-8"))
             
